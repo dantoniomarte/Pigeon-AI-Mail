@@ -695,3 +695,15 @@ Next steps:
 
 Full guide: docs/DEPLOY.md
 EOF
+
+# DNS reality check (issue #54): if the domain does not resolve yet, tell the
+# operator this install only works for local testing until records are published.
+if command -v dig >/dev/null 2>&1; then
+    if [[ -z "$(dig +short MX "$DOMAIN" A "$DOMAIN" 2>/dev/null | grep -v '^$')" ]]; then
+        echo
+        echo "NOTE: ${DOMAIN} does not resolve in DNS yet. This install is fully"
+        echo "functional for LOCAL testing (API, webmail, SMTP answering on :25)."
+        echo "Real internet mail will only flow once you publish the DNS records"
+        echo "from step 1 above and they propagate."
+    fi
+fi
