@@ -19,6 +19,7 @@ import {
   patchMessage,
   deleteMessage,
   emptyTrash,
+  logout,
   type FolderCounts,
   getStoredFrom,
   getStoredKey,
@@ -115,8 +116,23 @@ export default function App(): JSX.Element {
   const { t, i18n: i18nInstance } = useTranslation();
 
   const [apiKey, setApiKey] = useState<string | null>(() => getStoredKey());
-  const [sessionActive, setSessionActive] = useState<boolean>(() => hasSession());
+  const [sessionActive, setSessionActive] = useState<boolean>(false);
+  const [sessionChecked, setSessionChecked] = useState<boolean>(false);
   const [apiKeyFallback, setApiKeyFallback] = useState<boolean>(false);
+
+  // Resolve the HttpOnly session cookie once on mount (JD-A-003).
+  useEffect(() => {
+    let cancelled = false;
+    void hasSession().then((active) => {
+      if (!cancelled) {
+        setSessionActive(active);
+        setSessionChecked(true);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [view, setView] = useState<View>('inbox');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [theme, setTheme] = useState<Theme>(() => readTheme());
@@ -420,6 +436,7 @@ export default function App(): JSX.Element {
   );
 
   const handleSignOut = useCallback(() => {
+    void logout().catch(() => { /* offline sign-out still completes locally */ });
     storeKey(null);
     setApiKey(null);
     setSelectedId(null);
@@ -428,6 +445,8 @@ export default function App(): JSX.Element {
     setDrafts([]);
     setView('inbox');
     setReadIds(new Set<string>());
+    setSessionActive(false);
+    setApiKeyFallback(false);
     notify('info', t('toast.signedOut'));
   }, [notify, t]);
 
@@ -508,7 +527,11 @@ export default function App(): JSX.Element {
 
   // Login FIRST: a fresh visitor without a session sees the Login screen.
   // Setup (API key) is a fallback for headless/agent usage via a link.
-  if (!sessionActive) {
+  if (!sessionChecked) {
+    return <></>; // resolving the session cookie
+  }
+
+  if (!sessionActive && !apiKeyFallback) {
     return (
       <Login
         onSuccess={() => {
@@ -527,6 +550,7 @@ export default function App(): JSX.Element {
         onReady={(key) => {
           storeKey(key);
           setApiKey(key);
+          setApiKeyFallback(false);
         }}
         lang={lang}
         onLangChange={(code) => {

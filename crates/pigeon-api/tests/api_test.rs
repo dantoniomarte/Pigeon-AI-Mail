@@ -1340,6 +1340,32 @@ impl TestApp {
         self.post("/v1/auth/login", None, body).await
     }
 
+    /// Creates a pending bootstrap invitation for the owner account and returns
+    /// the one-time token (the login requires a code since the security fix).
+    fn bootstrap_token(&self) -> String {
+        // Create an org so the invitation has an owner context, then mint the
+        // invitation for the owner's own address. The token is returned once.
+        let org_id = self.state.store.create_org("test-org").expect("org");
+        self.state
+            .store
+            .set_account_org(
+                self.account_id,
+                Some(org_id),
+                pigeon_core::types::OrgRole::Owner,
+            )
+            .expect("org membership");
+        let email = EmailAddress::parse("owner@example.com").expect("address");
+        self.state
+            .store
+            .create_invitation(
+                org_id,
+                &email,
+                pigeon_core::types::OrgRole::Admin,
+                self.account_id,
+            )
+            .expect("invitation")
+    }
+
     async fn get_with_session(&self, path: &str, cookie: &str) -> Response {
         let authorization = format!("pigeon_session={cookie}");
         self.call(build(
@@ -1368,7 +1394,10 @@ impl TestApp {
 #[tokio::test]
 async fn login_issues_a_session_cookie_that_authenticates_full_scope_routes() {
     let app = TestApp::new();
-    let login = app.login(json!({"email": "owner@example.com"})).await;
+    let token = app.bootstrap_token();
+    let login = app
+        .login(json!({"email": "owner@example.com", "code": token}))
+        .await;
 
     assert_eq!(login.status, StatusCode::OK, "{:?}", login.body);
     let session_id = login.body["session_id"].as_str().expect("session_id");
@@ -1465,7 +1494,10 @@ async fn the_2fa_endpoints_are_session_realm_only() {
 #[tokio::test]
 async fn totp_enroll_activate_and_login_with_a_code_rejects_replay() {
     let app = TestApp::new();
-    let login = app.login(json!({"email": "owner@example.com"})).await;
+    let token = app.bootstrap_token();
+    let login = app
+        .login(json!({"email": "owner@example.com", "code": token}))
+        .await;
     assert_eq!(login.status, StatusCode::OK, "{:?}", login.body);
     let cookie = session_cookie(&login);
 
@@ -1483,14 +1515,10 @@ async fn totp_enroll_activate_and_login_with_a_code_rejects_replay() {
         "the returned secret is the stored one"
     );
 
-    // Before activation the account still logs in without a code.
+    // Before activation the account is challenged (the security fix requires
+    // a code on every login — no more email-only sessions).
     let without_code = app.login(json!({"email": "owner@example.com"})).await;
-    assert_eq!(
-        without_code.status,
-        StatusCode::OK,
-        "{:?}",
-        without_code.body
-    );
+    without_code.assert_problem(StatusCode::FORBIDDEN, "mfa-required");
 
     let code = code_now(&secret);
     let activate = app
@@ -1552,8 +1580,12 @@ async fn totp_enroll_activate_and_login_with_a_code_rejects_replay() {
         .await;
     assert_eq!(still_valid.status, StatusCode::OK, "{:?}", still_valid.body);
 
-    // And login is back to the email-only bootstrap.
-    let no_second_factor = app.login(json!({"email": "owner@example.com"})).await;
+    // And login works again with a fresh bootstrap token (the security fix
+    // requires a code on every login; the first invitation was burned).
+    let fresh_token = app.bootstrap_token();
+    let no_second_factor = app
+        .login(json!({"email": "owner@example.com", "code": fresh_token}))
+        .await;
     assert_eq!(
         no_second_factor.status,
         StatusCode::OK,
@@ -1563,9 +1595,45 @@ async fn totp_enroll_activate_and_login_with_a_code_rejects_replay() {
 }
 
 #[tokio::test]
+async fn bootstrap_token_burns_on_login_and_replay_is_rejected() {
+    let app = TestApp::new();
+    let token = app.bootstrap_token();
+    let first = app
+        .login(json!({"email": "owner@example.com", "code": &token}))
+        .await;
+    assert_eq!(first.status, StatusCode::OK, "{:?}", first.body);
+    // The token is single-use: the same code is a failed login now.
+    let replay = app
+        .login(json!({"email": "owner@example.com", "code": &token}))
+        .await;
+    replay.assert_problem(StatusCode::UNAUTHORIZED, "unauthorized");
+}
+
+#[tokio::test]
+async fn mfa_required_charges_the_login_budget() {
+    // The 403 mfa-required path must count as a login failure (JD-A-009):
+    // otherwise the enumeration challenge is free to hammer.
+    let app = TestApp::new();
+    for attempt in 1..=5 {
+        let challenged = app.login(json!({"email": "owner@example.com"})).await;
+        assert_eq!(
+            challenged.status,
+            StatusCode::FORBIDDEN,
+            "attempt {attempt}: {:?}",
+            challenged.body
+        );
+    }
+    let limited = app.login(json!({"email": "owner@example.com"})).await;
+    limited.assert_problem(StatusCode::TOO_MANY_REQUESTS, "rate-limited");
+}
+
+#[tokio::test]
 async fn recovery_codes_log_in_once_and_step_up_verification_works() {
     let app = TestApp::new();
-    let login = app.login(json!({"email": "owner@example.com"})).await;
+    let bootstrap = app.bootstrap_token();
+    let login = app
+        .login(json!({"email": "owner@example.com", "code": bootstrap}))
+        .await;
     let cookie = session_cookie(&login);
     let enroll = app
         .post_with_session("/v1/account/2fa/enroll", &cookie, json!({}))
@@ -1632,7 +1700,10 @@ async fn recovery_codes_log_in_once_and_step_up_verification_works() {
 #[tokio::test]
 async fn activating_without_a_pending_enrollment_or_with_a_wrong_code_fails() {
     let app = TestApp::new();
-    let login = app.login(json!({"email": "owner@example.com"})).await;
+    let bootstrap = app.bootstrap_token();
+    let login = app
+        .login(json!({"email": "owner@example.com", "code": bootstrap}))
+        .await;
     let cookie = session_cookie(&login);
 
     // Nothing enrolled yet.

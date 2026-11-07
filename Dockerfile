@@ -20,7 +20,9 @@
 #   WITH_WEBMAIL=1 docker compose build                    # same, via compose
 # ---------------------------------------------------------------------------
 
-ARG RUST_VERSION=1.85
+# 1.99: the workspace Cargo.lock requires rustc >= 1.91-era crates; 1.85 fails
+# the build (dependency MSRV). CI uses `stable`, which currently satisfies it.
+ARG RUST_VERSION=1.99
 # 0 = binary only. Only the `pigeon-webmail` target consumes this value, and
 # that target is not in the default target's dependency graph, so the node
 # image is never downloaded for a plain `docker build .`.

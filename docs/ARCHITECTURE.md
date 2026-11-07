@@ -53,9 +53,9 @@ Tables: `accounts`, `api_keys` (Argon2id-hashed, scopes), `messages` (encrypted 
 | `PIGEON_DB_PATH` | `/var/lib/pigeon/pigeon.db` | SQLite path (must be real disk) |
 | `PIGEON_HTTP_ADDR` | `:8000` | API listen address |
 | `PIGEON_SMTP_IN_ADDR` | `:25` | inbound SMTP |
-| `PIGEON_SMTP_OUT_STARTTLS` | `required` | `required` \| `pinned` \| `opportunistic` |
+| `PIGEON_SMTP_OUT_STARTTLS` | `required` | `required` \| `opportunistic` |
 | `PIGEON_WEBMAIL` | `off` | serve bundled webmail |
-| `PIGEON_LOG` | `info,json` | tracing filter |
+| `PIGEON_LOG` | `info` | tracing filter |
 
 Full reference lives with the installer PR.
 

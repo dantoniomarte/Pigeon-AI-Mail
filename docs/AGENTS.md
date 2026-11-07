@@ -133,7 +133,7 @@ Contract: [`openapi.yaml`](../openapi.yaml) · [`API.md`](API.md).
 |---|---|---|
 | `PIGEON_DB_PATH` | `/var/lib/pigeon/pigeon.db` | SQLite file (must be real disk — ADR 0002) |
 | `PIGEON_MASTER_KEY_FILE` | `/etc/pigeon/master.key` | 32-byte master key, `0640 root:pigeon` |
-| `PIGEON_LOG` | `info,json` | tracing filter; use `warn` for MCP so stdout stays clean |
+| `PIGEON_LOG` | `info` | tracing filter; use `warn` for MCP so stdout stays clean |
 
 The master key is **always a file**, never an environment value: an agent that
 can read it can decrypt every mailbox on the instance.
@@ -148,7 +148,7 @@ can read it can decrypt every mailbox on the instance.
 ### Server-side (for reference)
 
 `PIGEON_HTTP_ADDR` (`:8000`), `PIGEON_SMTP_IN_ADDR` (`:25`),
-`PIGEON_SMTP_OUT_STARTTLS` (`required|pinned|opportunistic`), `PIGEON_WEBMAIL`
+`PIGEON_SMTP_OUT_STARTTLS` (`required|opportunistic`), `PIGEON_WEBMAIL`
 (`on|off`), `PIGEON_PUBLIC_IP`, `PIGEON_SMTP_HOSTNAME`. Full table:
 [`ARCHITECTURE.md`](ARCHITECTURE.md#configuration-principal-env-vars) and
 [`../.env.example`](../.env.example).

@@ -232,7 +232,9 @@ Payloads are the `Event` schema (openapi) — field names match the internal con
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /v1/auth/login` {email, password, code?} | Session login; `code` = TOTP (6/8 digits) **or a recovery code**. See the challenge below. |
+| `POST /v1/auth/login` {email, password, code?} | Session login. **Every login requires `code`**: a TOTP code (6/8 digits), a recovery code, or the invitation/bootstrap token. See the challenge below. |
+| `POST /v1/auth/logout` | Revokes the session the request authenticated with. `204`. |
+| `GET /v1/auth/check` | `204` when the session cookie is valid — the browser cannot read the HttpOnly cookie, so the webmail probes the server instead. |
 | `POST /v1/account/2fa/enroll` {password} | Re-auth required; → `{secret_base32, otpauth_uri}`. |
 | `POST /v1/account/2fa/activate` {code} | → 10 one-time recovery codes, shown once. |
 | `POST /v1/account/2fa/verify` {code} | Step-up check for the current session → `200` valid; wrong code → `422`, `429` when limited. |
@@ -251,7 +253,7 @@ Holding a `full` API key does **not** grant or bypass 2FA enrollment — keys an
 
 - It is accepted only if it matches a **pending, unexpired** invitation addressed to that login's own address. Redemption burns it (one use), and a replay is `401 unauthorized`.
 - A code that matches nothing is a **failed** login (`401`), never a silent success: the server does not answer "wrong code, but here is your session anyway".
-- With **no** `code`, the address alone still issues a session — the documented v0.1 bootstrap for an account the installer created. That is a deliberate, documented shortcut while there is no password realm, and it is why the bootstrap token is a convenience rather than a real second gate for an account that never enrolled TOTP: enroll TOTP if you need a real second factor.
+- With **no** `code`, the login is rejected (`403 mfa-required`). Every login requires a second factor: a TOTP code, a recovery code, or the invitation/bootstrap token. (The earlier email-only bootstrap was a session-issuance hole — anyone who knew the address could log in — and was removed.)
 
 ## Organizations, members & invitations
 

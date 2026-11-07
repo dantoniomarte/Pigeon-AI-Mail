@@ -172,6 +172,7 @@ pub fn router(state: AppState) -> Router {
     // keys cannot touch the second factor (see `auth::require_session`).
     let session_group = Router::new()
         .route("/v1/auth/logout", post(sessions::logout))
+        .route("/v1/auth/check", get(sessions::check))
         .route("/v1/account/2fa/enroll", post(twofa::enroll))
         .route("/v1/account/2fa/activate", post(twofa::activate))
         .route("/v1/account/2fa/verify", post(twofa::verify))

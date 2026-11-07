@@ -3499,6 +3499,12 @@ body[data-motion="on"] .admin__body > *:nth-child(3) {
   align-self: center;
 }
 
+.login-card form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
 .login-card__api-key-link:hover {
   color: var(--text);
 }

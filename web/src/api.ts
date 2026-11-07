@@ -1076,9 +1076,20 @@ export async function disable2fa(code: string): Promise<void> {
   if (!response.ok) throw new Error(`disable failed: ${response.status}`);
 }
 
-/** Check whether a session cookie exists (client hint only — the server validates). */
-export function hasSession(): boolean {
-  return document.cookie.includes('pigeon_session=');
+/**
+ * Ask the server whether the HttpOnly session cookie is valid.
+ *
+ * `document.cookie` never exposes HttpOnly cookies, so the old localStorage
+ * check was always false after a reload (jd-judge JD-A-003). This returns the
+ * server's verdict instead.
+ */
+export async function hasSession(): Promise<boolean> {
+  try {
+    const response = await fetch('/v1/auth/check', { credentials: 'same-origin' });
+    return response.status === 204;
+  } catch {
+    return false;
+  }
 }
 
 

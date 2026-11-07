@@ -20,6 +20,7 @@ name: pigeon
 
 services:
   pigeon:
+    container_name: pigeon-mail
     build:
       context: .
       # Webmail is opt-in through WEBMAIL_TARGET, not through WITH_WEBMAIL:

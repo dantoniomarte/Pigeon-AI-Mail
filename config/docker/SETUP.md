@@ -8,9 +8,10 @@ database and master key never leave it and nothing has to be copied to the host.
 
 ```bash
 docker ps --format '{{.Names}}\t{{.Image}}' | grep -i pigeon
-# docker-compose project "pigeon" + service "pigeon" → pigeon-pigeon-1
+# the shipped configs use the container_name from docker-compose.example.yml
+# (a bare `docker compose up` without container_name derives pigeon-<project>-<service>-1)
 
-docker exec pigeon-pigeon-1 /usr/local/bin/pigeon --version
+docker exec pigeon-mail /usr/local/bin/pigeon --version
 ```
 
 The Compose service is defined in [`../../docker-compose.yml`](../../docker-compose.yml);
@@ -41,12 +42,13 @@ the real store and key.
 
 ```bash
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
-  | docker exec -i pigeon-pigeon-1 /usr/local/bin/pigeon mcp \
+  | docker exec -i pigeon-mail /usr/local/bin/pigeon mcp \
   | grep -o '"name"' | wc -l     # expect 25
 ```
 
 Then point the agent at the same command line and check that its MCP panel lists
-`pigeon-mail`.
+`pigeon-mail` (add `container_name: pigeon-mail` to your compose service, or
+edit the config to your derived name — config and container must match).
 
 ## 5. Notes
 

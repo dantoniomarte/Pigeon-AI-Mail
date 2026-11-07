@@ -1705,10 +1705,10 @@ paths:
       tags:
       - account
       security: []
-      summary: 'Dashboard/webmail session login (browser flows; API keys are for machines). Body: email,
-        password, and `code` in one of three roles: a TOTP or recovery code when 2FA is enrolled, a
-        one-time bootstrap/invitation token for an account that has no 2FA, or nothing at all for the
-        documented v0.1 installer-created account. Sets an HttpOnly session cookie (SameSite=Strict).
+      summary: 'Dashboard/webmail session login (browser flows; API keys are for machines). Body: email
+        plus a required `code` in one of two roles: a TOTP or recovery code when 2FA is enrolled, or a
+        one-time bootstrap/invitation token for an account that has no 2FA. A login without `code` is
+        rejected with 403 mfa-required. Sets an HttpOnly session cookie (SameSite=Strict).
 
         '
       operationId: login
@@ -1738,7 +1738,7 @@ paths:
                     '
       responses:
         '200':
-          description: Session established (no 2FA enrolled, or code accepted)
+          description: Session established (a valid code was accepted)
           headers:
             Set-Cookie:
               schema:
@@ -1751,11 +1751,26 @@ paths:
         '429':
           $ref: '#/components/responses/RateLimited'
         '403':
-          description: 2FA enrolled and no/invalid code — problem type mfa-required (the challenge)
+          description: Every login requires a code — missing, invalid, or replayed code, or 2FA challenge; problem type mfa-required for missing code, unauthorized (401) for wrong/replayed
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+  /v1/auth/check:
+    get:
+      tags:
+      - account
+      summary: '204 when the session cookie (pigeon_session) is valid. The cookie is HttpOnly, so
+        browser JavaScript cannot read it; the webmail probes this endpoint to learn whether a
+        session exists without paying for a data fetch.
+
+        '
+      operationId: authCheck
+      responses:
+        '204':
+          description: The session cookie is valid
+        '401':
+          $ref: '#/components/responses/Problem'
   /v1/account/2fa/enroll:
     post:
       tags:

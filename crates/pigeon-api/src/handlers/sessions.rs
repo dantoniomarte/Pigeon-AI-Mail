@@ -15,12 +15,10 @@
 //!   is a failed login, not a silent success: a code the server does not accept
 //!   must never be indistinguishable from a correct one. Redeeming the token burns
 //!   it and attaches the account to the organization.
-//! * **no 2FA, no code** — the email alone issues a session. That is the v0.1
-//!   bootstrap: the account was created by the installer/operator (`pigeon` CLI)
-//!   and the API is expected to run on a private address behind the operator's own
-//!   access control. It is a deliberate, documented shortcut, not an accident, and
-//!   it is why the bootstrap token above is a convenience rather than a real gate
-//!   for an account that never enrolled 2FA.
+//! * **no 2FA, no code** — rejected with 403 mfa-required. The earlier
+//!   email-only shortcut was a session-issuance hole (anyone who knew the
+//!   address could log in); every login now requires a code — the
+//!   bootstrap/invitation token for accounts that have not enrolled TOTP.
 //!
 //! Passwords land together with the installer's admin bootstrap (hashed with
 //! the same Argon2id the API keys use); this handler is where they will be
@@ -114,8 +112,8 @@ fn login_blocking(
                 return Err(Problem::new(
                     StatusCode::FORBIDDEN,
                     ProblemType::MfaRequired,
-                    "two-factor authentication is enabled for this account: resend the TOTP or a \
-                     recovery code in `code`",
+                    "this account requires a second factor: resend the TOTP code, a recovery \
+                     code, or the invitation/bootstrap token in `code`",
                 ));
             };
             if !session::consume_second_factor(state, account_id, &enrollment, code)? {
@@ -126,23 +124,37 @@ fn login_blocking(
             }
         }
         None => {
-            // No TOTP: a code can only be a bootstrap/invitation token. Accepting
-            // it burns it; refusing it is a failed login, because answering "the
-            // code was wrong but here is your session anyway" would make the
-            // token decorative and hide a typo from the member.
-            if let Some(code) = code {
-                if !session::consume_bootstrap_token(state, account_id, &email.normalized(), code)?
-                {
-                    return Err(unauthorized(
-                        "no pending invitation or bootstrap token matches that code for this \
-                         address",
-                    ));
-                }
+            // No TOTP: a bootstrap/invitation token is REQUIRED — the email
+            // alone must never issue a session (owner security review: the
+            // email-only shortcut let anyone knowing the address log in).
+            let Some(code) = code else {
+                return Err(Problem::new(
+                    StatusCode::FORBIDDEN,
+                    ProblemType::MfaRequired,
+                    "this account requires a second factor: resend the TOTP code, a recovery \
+                     code, or the invitation/bootstrap token in `code`",
+                ));
+            };
+            if !session::consume_bootstrap_token(state, account_id, &email.normalized(), code)? {
+                return Err(unauthorized(
+                    "no pending invitation or bootstrap token matches that code for this \
+                     address",
+                ));
             }
         }
     }
 
     session::issue(state, account_id)
+}
+
+/// `GET /v1/auth/check` — 204 when the session cookie is valid.
+///
+/// The cookie is HttpOnly, so the SPA cannot read it from JavaScript; this
+/// endpoint is how the webmail learns a session still exists without paying
+/// for a full data fetch.
+pub async fn check(Extension(session): Extension<SessionContext>) -> Response {
+    let _ = session;
+    StatusCode::NO_CONTENT.into_response()
 }
 
 /// `POST /v1/auth/logout` — revoke the session the request came in with.

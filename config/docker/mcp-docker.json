@@ -9,7 +9,7 @@
         "PIGEON_DB_PATH=/var/lib/pigeon/pigeon.db",
         "--env",
         "PIGEON_MASTER_KEY_FILE=/etc/pigeon/master.key",
-        "pigeon-pigeon-1",
+        "pigeon-mail",
         "/usr/local/bin/pigeon",
         "mcp"
       ]
