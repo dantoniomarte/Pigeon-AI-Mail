@@ -1146,6 +1146,38 @@ export async function emptyTrash(key: string | null): Promise<number> {
   return result.deleted;
 }
 
+/* ------------------------------------------------------------------ */
+/* Account settings (server-side policy)                               */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The account's mailbox policy. Unlike the preferences stored in this browser
+ * (language, theme, motion), these live on the server: the webmail, an agent over
+ * MCP and the purge worker all read the same row.
+ */
+export interface AccountSettings {
+  /** Days a message stays in the trash before it is deleted (`0` = keep forever). */
+  trash_retention_days: number;
+}
+
+export async function fetchAccountSettings(key: string | null): Promise<AccountSettings> {
+  return request<AccountSettings>(key, '/v1/account/settings');
+}
+
+/**
+ * Save the trash retention. `0` is a real value ("keep forever"), which is why it
+ * is sent as-is rather than turned into "no preference".
+ */
+export async function saveTrashRetention(
+  key: string | null,
+  days: number,
+): Promise<AccountSettings> {
+  return request<AccountSettings>(key, '/v1/account/settings', {
+    method: 'PATCH',
+    body: JSON.stringify({ trash_retention_days: days }),
+  });
+}
+
 /** Clear the stored last-used From (sign-out / identity switch). */
 export function clearStoredFrom(): void {
   try {

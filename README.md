@@ -96,7 +96,7 @@ roles, one account per organization, catch-all targets inside the routed domain)
 and writes the same audit log (`mcp:agent`). Scopes are the HTTP scopes; MCP adds
 no privilege the API does not have.
 
-### The 25 tools
+### The 27 tools
 
 | Group | Tools | What an agent does with them |
 |---|---|---|
@@ -108,6 +108,7 @@ no privilege the API does not have.
 | **Domains** | `domain_add`, `domain_dns` | manage a sending domain and get the exact `A`/`MX`/`SPF`/`DKIM`/`DMARC` records to publish |
 | **Suppressions** | `suppression_list`, `suppression_add`, `suppression_remove` | see who is suppressed and why, add up to 100 addresses, release one |
 | **API keys** | `api_key_create`, `api_key_list`, `api_key_revoke` | issue a `pk_…` key (shown once), list key metadata, revoke a key |
+| **Account settings** | `account_settings`, `set_trash_retention` | read the mailbox policy; configure trash retention in days (`0` keeps trashed mail forever) |
 
 ### One real session: create a team, set the catch-all, send mail
 
@@ -166,7 +167,7 @@ Full guide: [docs/AGENTS.md](docs/AGENTS.md).
 | **Hermes** | [`config/hermes/mcp.yaml`](config/hermes/mcp.yaml) | copy to the Hermes config dir as `mcp.yaml` |
 | **Any MCP client** | [`config/generic/mcp-stdio.json`](config/generic/mcp-stdio.json) | stdio descriptor: `pigeon mcp` + `PIGEON_DB_PATH`, `PIGEON_MASTER_KEY_FILE` |
 | **Docker (remote host)** | [`config/docker/mcp-docker.json`](config/docker/mcp-docker.json) | stdio through `docker exec -i <container> pigeon mcp` — no key leaves the host |
-| **Remote over HTTPS** | [`config/remote/`](config/remote/) | `PIGEON_URL` + `PIGEON_API_KEY` (`pk_…`); REST equivalents of all 25 tools in [`api-examples.md`](config/remote/api-examples.md) |
+| **Remote over HTTPS** | [`config/remote/`](config/remote/) | `PIGEON_URL` + `PIGEON_API_KEY` (`pk_…`); REST equivalents of all 27 tools in [`api-examples.md`](config/remote/api-examples.md) |
 
 ```bash
 # copy a platform config and print its placement steps

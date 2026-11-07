@@ -228,6 +228,29 @@ dig +short TXT _dmarc.example.com
 dig +short TXT <selector>._domainkey.example.com
 ```
 
+## Trash retention
+
+`pigeon serve` runs a fourth long-lived task besides the HTTP API, the inbound
+SMTP server and the queue worker: the **trash purge**. Every 6 hours it walks
+the accounts whose `trash_retention_days` is enabled and deletes the messages
+that have been in the trash longer than that.
+
+- **Per account, not per deployment.** The default is 30 days; `0` means *keep
+  trashed mail forever* and the sweep skips those accounts entirely. Change it
+  with `PATCH /v1/account/settings` (`{"trash_retention_days": 7}`), from the
+  webmail (Settings → Preferences → Trash retention) or from an agent through the
+  MCP tools `account_settings` / `set_trash_retention`.
+- **No configuration, no new variable.** The interval is part of the binary, and
+  the policy lives in the database, so a container or systemd unit needs no
+  change. The first sweep of a `pigeon serve` is immediate.
+- **On demand:** `POST /v1/messages/purge-trash` runs the same sweep for the
+  calling account right away (scope `send`), which is what the webmail and agents
+  use instead of waiting for the timer.
+- **Deletion is permanent.** The purge removes the message row (attachments,
+events and queue rows follow), so a trash item older than the window is gone.
+  Widen the window *before* it expires if the mail matters; a restore afterwards
+  is a backup restore.
+
 ## Master key rules
 
 The key is the only thing that makes stored mail readable (ADR 0003). There is

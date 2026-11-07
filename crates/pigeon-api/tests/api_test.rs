@@ -12,10 +12,11 @@ use axum::Router;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use pigeon_api::{ApiConfig, AppState};
-use pigeon_core::{ApiKeyScope, EmailAddress};
+use pigeon_core::{ApiKeyScope, Direction, EmailAddress, MessageFolder};
 use pigeon_crypto::MasterKey;
 use serde_json::{json, Value};
-use store::Storage;
+use std::path::{Path, PathBuf};
+use store::{NewMessage, Storage};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
@@ -28,6 +29,9 @@ const TEST_PUBLIC_IP: &str = "203.0.113.10";
 struct TestApp {
     // Dropping the tempdir deletes the database the two connections share.
     _dir: TempDir,
+    /// Path of the database file, so a test can seed states the API cannot reach
+    /// (a message that has been in the trash for 40 days).
+    path: PathBuf,
     state: AppState,
     router: Router,
     full_key: String,
@@ -62,6 +66,7 @@ impl TestApp {
         let router = pigeon_api::router(state.clone());
         Self {
             _dir: dir,
+            path,
             state,
             router,
             full_key,
@@ -1289,6 +1294,275 @@ async fn health_probes_answer_without_authentication() {
     let app = TestApp::new();
     assert_eq!(app.get("/healthz", None).await.status, StatusCode::OK);
     assert_eq!(app.get("/readyz", None).await.status, StatusCode::OK);
+}
+
+// ------------------------------------------------------- trash retention
+
+/// Seed one stored message for `account_id` straight through the store (reserve
+/// the id, seal with it as AAD, insert) and move it to `folder`.
+///
+/// The send path cannot produce a message that has been sitting in the trash for
+/// weeks, so the retention tests build the row they need instead of waiting.
+fn seed_stored_message(
+    state: &AppState,
+    account_id: i64,
+    folder: MessageFolder,
+    subject: &str,
+) -> i64 {
+    let reserved = state.store.reserve_message_id().expect("reserve id");
+    let aad = format!("account:{account_id}:message:{reserved}");
+    let sealed = pigeon_crypto::seal_content(
+        &TEST_MASTER_KEY,
+        b"Subject: seeded\r\n\r\nbody",
+        aad.as_bytes(),
+    )
+    .expect("seal body");
+    state
+        .store
+        .insert_message(
+            NewMessage {
+                account_id,
+                direction: Direction::In,
+                from_addr: EmailAddress::parse("sender@example.net").expect("sender"),
+                to_addrs: vec![EmailAddress::parse("owner@example.com").expect("recipient")],
+                subject: subject.to_string(),
+                sealed_body: sealed,
+                idempotency_key: None,
+            },
+            reserved,
+        )
+        .expect("insert message");
+    state
+        .store
+        .set_message_folder(reserved, folder)
+        .expect("move message");
+    reserved
+}
+
+/// Rewrite `messages.trashed_at` to `now + offset` (`'-40 days'`) on the file the
+/// API is using. The store only writes `datetime('now')`, so this is the only way
+/// to reach the expired state the purge is supposed to act on.
+fn craft_trashed_at(path: &Path, message_id: i64, offset: &str) {
+    let conn = raw_connection(path);
+    conn.execute(
+        "UPDATE messages SET trashed_at = datetime('now', ?2) WHERE id = ?1",
+        rusqlite::params![message_id, offset],
+    )
+    .expect("craft trashed_at");
+}
+
+fn stored_trashed_at(path: &Path, message_id: i64) -> Option<String> {
+    let conn = raw_connection(path);
+    conn.query_row(
+        "SELECT trashed_at FROM messages WHERE id = ?1",
+        [message_id],
+        |row| row.get(0),
+    )
+    .expect("read trashed_at")
+}
+
+/// A second connection to the test database, with the same busy timeout the
+/// store uses.
+///
+/// Without the timeout a statement that races the API's own writer fails
+/// immediately with `SQLITE_BUSY` instead of waiting, which would make the
+/// retention tests flaky rather than wrong.
+fn raw_connection(path: &Path) -> rusqlite::Connection {
+    let conn = rusqlite::Connection::open(path).expect("open raw connection");
+    conn.busy_timeout(std::time::Duration::from_secs(5))
+        .expect("set busy timeout");
+    conn
+}
+
+#[tokio::test]
+async fn account_settings_read_and_update_the_trash_retention() {
+    let app = TestApp::new();
+
+    // The documented default: an account that never opened settings still has a
+    // bounded trash.
+    let current = app.get("/v1/account/settings", Some(&app.full_key)).await;
+    assert_eq!(current.status, StatusCode::OK, "{:?}", current.body);
+    assert_eq!(current.body["trash_retention_days"], 30);
+
+    // A read key may see the policy; only a write credential may change it.
+    let read_key = app.key_with(&[ApiKeyScope::Read], false);
+    let seen = app.get("/v1/account/settings", Some(&read_key)).await;
+    assert_eq!(seen.status, StatusCode::OK, "{:?}", seen.body);
+    assert_eq!(seen.body["trash_retention_days"], 30);
+    let refused = app
+        .patch(
+            "/v1/account/settings",
+            Some(&read_key),
+            json!({ "trash_retention_days": 7 }),
+        )
+        .await;
+    refused.assert_problem(StatusCode::FORBIDDEN, "forbidden");
+
+    // A valid patch answers with the updated settings and persists them.
+    for days in [0_i64, 1, 90, 365] {
+        let patched = app
+            .patch(
+                "/v1/account/settings",
+                Some(&app.full_key),
+                json!({ "trash_retention_days": days }),
+            )
+            .await;
+        assert_eq!(patched.status, StatusCode::OK, "{:?}", patched.body);
+        assert_eq!(patched.body["trash_retention_days"], days);
+        let reread = app.get("/v1/account/settings", Some(&app.full_key)).await;
+        assert_eq!(reread.body["trash_retention_days"], days);
+        assert_eq!(
+            app.state
+                .store
+                .get_trash_retention(app.account_id)
+                .expect("store read"),
+            days,
+            "the API writes through to the store, not to a copy"
+        );
+    }
+
+    // Out of range is a validation problem, and the stored value is untouched:
+    // a rejected patch must not be a partial write.
+    for (body, expected) in [
+        (json!({ "trash_retention_days": 366 }), 366),
+        (json!({ "trash_retention_days": 400 }), 400),
+        (json!({ "trash_retention_days": -1 }), -1),
+    ] {
+        let invalid = app
+            .patch("/v1/account/settings", Some(&app.full_key), body)
+            .await;
+        invalid.assert_problem(StatusCode::UNPROCESSABLE_ENTITY, "validation");
+        assert_eq!(invalid.body["errors"][0]["field"], "trash_retention_days");
+        assert!(
+            invalid.body["errors"][0]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(&expected.to_string())),
+            "the message names the offending value: {:?}",
+            invalid.body
+        );
+        assert_eq!(
+            app.state
+                .store
+                .get_trash_retention(app.account_id)
+                .expect("store read"),
+            365,
+            "an invalid patch leaves the old policy in place"
+        );
+    }
+
+    // An empty body and an unknown member are validation problems too.
+    let empty = app
+        .patch("/v1/account/settings", Some(&app.full_key), json!({}))
+        .await;
+    empty.assert_problem(StatusCode::UNPROCESSABLE_ENTITY, "validation");
+    let unknown = app
+        .patch(
+            "/v1/account/settings",
+            Some(&app.full_key),
+            json!({ "trash_retention_days": 7, "trash_days": 7 }),
+        )
+        .await;
+    unknown.assert_problem(StatusCode::UNPROCESSABLE_ENTITY, "validation");
+}
+
+#[tokio::test]
+async fn purge_trash_deletes_only_the_callers_expired_trash() {
+    let app = TestApp::new();
+    // A second mailbox with its own policy and its own expired trash.
+    let other_account = app
+        .state
+        .store
+        .create_account(&EmailAddress::parse("other@example.com").expect("address"))
+        .expect("second account");
+
+    // Expired, fresh, and old-but-not-in-the-trash rows of the caller.
+    let expired = seed_stored_message(&app.state, app.account_id, MessageFolder::Trash, "expired");
+    craft_trashed_at(&app.path, expired, "-40 days");
+    let fresh = seed_stored_message(&app.state, app.account_id, MessageFolder::Trash, "fresh");
+    craft_trashed_at(&app.path, fresh, "-1 days");
+    let inbox = seed_stored_message(&app.state, app.account_id, MessageFolder::Inbox, "inbox");
+    craft_trashed_at(&app.path, inbox, "-400 days");
+    let sent = seed_stored_message(&app.state, app.account_id, MessageFolder::Sent, "sent");
+    craft_trashed_at(&app.path, sent, "-400 days");
+    let spam = seed_stored_message(&app.state, app.account_id, MessageFolder::Spam, "spam");
+    craft_trashed_at(&app.path, spam, "-400 days");
+
+    // The other mailbox's expired trash is untouched by this caller's purge.
+    let foreign = seed_stored_message(&app.state, other_account, MessageFolder::Trash, "foreign");
+    craft_trashed_at(&app.path, foreign, "-400 days");
+    let foreign_stamp = stored_trashed_at(&app.path, foreign).expect("foreign stamp");
+
+    let purged = app
+        .post("/v1/messages/purge-trash", Some(&app.full_key), json!({}))
+        .await;
+    assert_eq!(purged.status, StatusCode::OK, "{:?}", purged.body);
+    assert_eq!(purged.body["deleted"], 1, "{:?}", purged.body);
+    assert_eq!(purged.body["trash_remaining"], 1, "{:?}", purged.body);
+
+    let trash = app
+        .get("/v1/messages?folder=trash", Some(&app.full_key))
+        .await;
+    let remaining: Vec<&str> = trash.body["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .map(|item| item["subject"].as_str().expect("subject"))
+        .collect();
+    assert_eq!(remaining, vec!["fresh"], "the fresh trash stays");
+    assert_eq!(trash.body["counts"]["trash"], 1);
+
+    // Every other folder survives, however old its stamp is.
+    for folder in ["inbox", "sent", "spam"] {
+        let listing = app
+            .get(
+                &format!("/v1/messages?folder={folder}"),
+                Some(&app.full_key),
+            )
+            .await;
+        assert_eq!(
+            listing.body["items"].as_array().expect("items").len(),
+            1,
+            "{folder} must survive the purge: {:?}",
+            listing.body
+        );
+    }
+    assert_eq!(
+        app.state.store.count_trash(other_account).expect("count"),
+        1,
+        "another account's trash is its own policy's business"
+    );
+    assert_eq!(
+        stored_trashed_at(&app.path, foreign).as_deref(),
+        Some(foreign_stamp.as_str()),
+        "the foreign row keeps the stamp it had"
+    );
+
+    // The purge follows the account's own policy: `0` keeps everything.
+    let set = app
+        .patch(
+            "/v1/account/settings",
+            Some(&app.full_key),
+            json!({ "trash_retention_days": 0 }),
+        )
+        .await;
+    assert_eq!(set.status, StatusCode::OK, "{:?}", set.body);
+    let kept = app
+        .post("/v1/messages/purge-trash", Some(&app.full_key), json!({}))
+        .await;
+    assert_eq!(kept.status, StatusCode::OK, "{:?}", kept.body);
+    assert_eq!(
+        kept.body["deleted"], 0,
+        "keep-forever deletes nothing: {:?}",
+        kept.body
+    );
+    assert_eq!(kept.body["trash_remaining"], 1);
+
+    // Purge is a write: a read key is refused.
+    let read_key = app.key_with(&[ApiKeyScope::Read], false);
+    let refused = app
+        .post("/v1/messages/purge-trash", Some(&read_key), json!({}))
+        .await;
+    refused.assert_problem(StatusCode::FORBIDDEN, "forbidden");
 }
 
 // ------------------------------------------------------------ sessions / 2fa

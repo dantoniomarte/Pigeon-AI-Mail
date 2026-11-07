@@ -280,7 +280,10 @@
     "reasonManual": "Manuel",
     "reasonBounce": "Rejet",
     "reasonComplaint": "Plainte",
-    "webhookUrlPlaceholder": "https://votre-app.exemple/hooks/pigeon"
+    "webhookUrlPlaceholder": "https://votre-app.exemple/hooks/pigeon",
+    "trashRetention": "Conservation de la corbeille",
+    "trashRetentionHelp": "Les messages déplacés dans la corbeille sont supprimés automatiquement après ce nombre de jours.",
+    "trashKeepForever": "Conserver pour toujours"
   },
   "toast": {
     "copied": "Copié dans le presse-papiers",
@@ -295,7 +298,8 @@
     "templateCreated": "Modèle créé",
     "testSent": "Test en file",
     "testFailed": "Échec du test",
-    "suppressionAdded": "Adresse supprimée"
+    "suppressionAdded": "Adresse supprimée",
+    "settingsSaved": "Réglages enregistrés"
   },
   "auth": {
     "unauthorized": "Cette clé a été refusée. Connectez-vous avec une clé valide.",

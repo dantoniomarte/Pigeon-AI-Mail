@@ -10,11 +10,12 @@
 //!
 //! # Surface
 //!
-//! 25 tools, grouped: messaging (send, read, list, templates, webhooks),
-//! organizations, catch-all routing, drafts, folders, domains, suppressions and
-//! API keys. The administration tools reuse the API's own auxiliary SQL layer
-//! ([`aux`]) against the same database file, so an agent manages exactly the
-//! state the HTTP API manages — never a private copy of it.
+//! 27 tools, grouped: messaging (send, read, list, templates, webhooks),
+//! organizations, catch-all routing, drafts, folders, domains, suppressions,
+//! API keys and the account settings (trash retention). The administration tools
+//! reuse the API's own auxiliary SQL layer ([`aux`]) against the same database
+//! file, so an agent manages exactly the state the HTTP API manages — never a
+//! private copy of it.
 //!
 //! `unsafe` is forbidden in this crate.
 

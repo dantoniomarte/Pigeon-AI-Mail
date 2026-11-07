@@ -2,27 +2,34 @@
 //!
 //! Two subcommands, both meant to be scriptable by the installer:
 //!
-//! * `pigeon serve` — open the database, load the master key and run the three
+//! * `pigeon serve` — open the database, load the master key and run the four
 //!   long-lived services until SIGINT/SIGTERM: the HTTP API, the inbound SMTP
-//!   server and the outbound queue worker.
+//!   server, the outbound queue worker and the trash-retention purge worker.
 //! * `pigeon keygen` — bootstrap: print a fresh master key (write it to the key
 //!   file), create the account's first `full` API key, and print the exact
 //!   environment to paste into the unit file. Nothing is written to disk except
 //!   the account and key rows in the database, so an operator always sees the key
 //!   material exactly once.
 //!
-//! # One process, three services
+//! # One process, four services
 //!
 //! ```text
 //!  :8000  HTTP API  (axum)      ← clients, webmail
 //!  :2525  SMTP in   (pigeon-smtp) ← the outside world
 //!  ----   queue worker          → MX of the recipient domain
+//!  ----   trash purge worker    → the database only
 //! ```
 //!
 //! They share one database file and one master key, and they stop together: a
-//! single SIGINT/SIGTERM flips one `watch` channel that all three futures wait
+//! single SIGINT/SIGTERM flips one `watch` channel that all four futures wait
 //! on, so in-flight HTTP requests, SMTP sessions and deliveries finish instead of
 //! being cut off. The webmail UI and the MCP server are still separate services.
+//!
+//! The purge worker enforces the per-account trash retention
+//! (`accounts.trash_retention_days`, 30 by default, `0` = keep forever): every six
+//! hours it deletes the trashed messages whose countdown expired. The same sweep
+//! is available on demand as `POST /v1/messages/purge-trash`, so an agent or a
+//! user never has to wait for the interval.
 //!
 //! # Environment this binary adds on top of [`pigeon_core::Config`]
 //!
@@ -42,6 +49,7 @@
 use std::error::Error;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use std::sync::Arc;
 
@@ -57,6 +65,12 @@ use pigeon_smtp::{
 };
 use store::{SqliteStorage, Storage};
 use tower_http::trace::TraceLayer;
+
+/// How often the trash purge worker sweeps the database (6 hours).
+///
+/// Long enough that the sweep is noise on any deployment's I/O budget, short
+/// enough that a "30 days" policy is honest to within a quarter of a day.
+const TRASH_PURGE_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// Pigeon Mail — self-hosted encrypted email server.
 #[derive(Debug, Parser)]
@@ -217,6 +231,10 @@ async fn serve(config: Config, api_config: ApiConfig) -> Result<(), Box<dyn Erro
         let _ = stop.send(true);
     });
 
+    // Trash retention: every account's own policy decides how long its trashed
+    // mail survives. See `spawn_trash_purge`.
+    let purge = spawn_trash_purge(Arc::clone(&state.store), stop_rx.clone());
+
     // JD-A-003: ConnectInfo is required for the per-IP auth failure budget;
     // without it every caller shares one bucket (global DoS with 5 requests).
     let http = axum::serve(
@@ -234,8 +252,85 @@ async fn serve(config: Config, api_config: ApiConfig) -> Result<(), Box<dyn Erro
         }
         () = smtp => tracing::info!("pigeon smtp stopped"),
         () = queue => tracing::info!("pigeon queue worker stopped"),
+        () = async { let _ = purge.await; } => tracing::info!("pigeon trash purge stopped"),
     }
     Ok(())
+}
+
+/// Spawn the trash purge worker.
+///
+/// Every [`TRASH_PURGE_INTERVAL`] it walks the accounts whose
+/// `trash_retention_days` is enabled and deletes the messages that have been in
+/// the trash for longer than that. The first tick of a `tokio` interval is
+/// immediate, so a deployment that restarts more often than the interval still
+/// purges.
+///
+/// The store is blocking (`rusqlite`), so each sweep runs on the blocking pool
+/// instead of stalling the runtime. A failed sweep is logged and the next tick
+/// tries again: a worker that gave up permanently would silently break the policy
+/// the owner configured, and nothing in the UI would say so.
+fn spawn_trash_purge(
+    store: Arc<SqliteStorage>,
+    stop: tokio::sync::watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(TRASH_PURGE_INTERVAL);
+        // A missed tick (process suspended, a slow sweep) must not queue up a
+        // burst of catch-up runs: one sweep answers every account anyway.
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {
+                    let store = Arc::clone(&store);
+                    let swept = tokio::task::spawn_blocking(move || purge_expired_trash_once(&store)).await;
+                    match swept {
+                        Ok(Ok((accounts, deleted))) => tracing::info!(
+                            accounts,
+                            deleted,
+                            "trash retention: expired messages purged"
+                        ),
+                        Ok(Err(error)) => {
+                            tracing::warn!(%error, "trash retention: the purge sweep failed")
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "trash retention: the purge task failed")
+                        }
+                    }
+                }
+                () = wait_for_stop(stop.clone()) => {
+                    tracing::info!("trash purge worker stopped");
+                    return;
+                }
+            }
+        }
+    })
+}
+
+/// One sweep: purge the expired trash of every account with retention enabled.
+///
+/// Returns `(accounts swept, messages deleted)`. An account deleted between the
+/// listing and its purge is skipped rather than aborting the sweep, so one
+/// concurrent account deletion cannot leave every other mailbox un-purged.
+fn purge_expired_trash_once(store: &SqliteStorage) -> store::Result<(usize, usize)> {
+    let accounts = store.accounts_with_trash_purge()?;
+    let mut deleted = 0usize;
+    let mut failed = 0usize;
+    for account_id in &accounts {
+        match store.purge_expired_trash(*account_id) {
+            Ok(purged) => deleted += purged,
+            // A missing account is normal; any other error must not stop the
+            // remaining accounts from being purged — log it and carry on.
+            Err(store::StoreError::NotFound) => continue,
+            Err(error) => {
+                tracing::warn!(account_id, %error, "trash purge failed for one account");
+                failed += 1;
+            }
+        }
+    }
+    if failed > 0 {
+        tracing::warn!(failed, "trash purge completed with per-account failures");
+    }
+    Ok((accounts.len(), deleted))
 }
 
 /// Resolve once the shared stop channel is set (or its sender is gone, which
@@ -375,6 +470,26 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_purge_sweep_visits_only_accounts_that_opted_in() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = SqliteStorage::open(dir.path().join("pigeon.db")).expect("open store");
+        let owner = EmailAddress::parse("owner@example.com").expect("address");
+        let opted_out = EmailAddress::parse("keep@example.com").expect("address");
+        let owner_id = store.create_account(&owner).expect("account");
+        let opted_out_id = store.create_account(&opted_out).expect("account");
+        store
+            .set_trash_retention(opted_out_id, 0)
+            .expect("keep forever");
+
+        // Nothing is in the trash yet, so the sweep deletes nothing but must still
+        // report the one account it visited instead of failing on an empty trash.
+        let (accounts, deleted) = purge_expired_trash_once(&store).expect("sweep");
+        assert_eq!(accounts, 1, "only the account with retention enabled");
+        assert_eq!(deleted, 0);
+        assert!(store.get_account(owner_id).is_ok());
+    }
 
     #[test]
     fn http_addr_shorthand_binds_all_interfaces() {

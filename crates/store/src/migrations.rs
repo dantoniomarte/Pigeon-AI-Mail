@@ -96,6 +96,17 @@ use crate::error::Result;
 /// a made-up one); `action = 'route'` needs a `target_account_id`, and deleting
 /// that account deletes the rule instead of leaving a rule that points nowhere.
 ///
+/// `0012` adds trash retention: `accounts.trash_retention_days` (the policy,
+/// default 30) and `messages.trashed_at` (the countdown clock). A retention of
+/// `0` means "keep forever" and is a real setting, not a missing one, so the
+/// purge path checks the value before deleting anything. `trashed_at` is written
+/// by the folder move ([`crate::Storage::set_message_folder`]) and cleared when
+/// the message leaves the trash, which is what makes "how long has this been in
+/// the trash" answerable without a second history table. Rows already in the
+/// trash when this migration runs keep `NULL` and are therefore never purged
+/// until they are moved to the trash again: an upgrade must not delete mail whose
+/// countdown never started.
+///
 /// The schema is **unreleased**, so checks that SQLite cannot add later
 /// (`CHECK` constraints, `AUTOINCREMENT` on `accounts.id`) are edited in place in
 /// `0001` rather than shipped as a table rebuild.
@@ -428,6 +439,27 @@ CREATE TABLE IF NOT EXISTS catchall_rules (
     target_account_id INTEGER NULL REFERENCES accounts(id) ON DELETE CASCADE,
     created_at        TEXT NOT NULL DEFAULT (datetime('now'))
 );
+"#,
+    // ---------------------------------------------------------------- 0012
+    r#"
+-- How long a message survives in the trash, in days. `0` is "keep forever", and
+-- the API accepts 0..=365 (`Storage::set_trash_retention` refuses anything else
+-- too, so a value the API would reject can never reach the column).
+--
+-- The default is 30 on purpose: a deployment whose owner never opens the settings
+-- still has a bounded trash. Mailboxes that grow forever are a disk-full outage
+-- with a long fuse.
+ALTER TABLE accounts ADD COLUMN trash_retention_days INTEGER NOT NULL DEFAULT 30;
+
+-- When the message entered the trash folder. NULL in every other folder, and
+-- NULL on trash rows that predate this migration (see the note above MIGRATIONS:
+-- an upgrade never starts a countdown retroactively).
+ALTER TABLE messages ADD COLUMN trashed_at TEXT NULL;
+
+-- "The expired trash of one account" is the purge query: equality on
+-- (account_id, folder), then a range over the timestamp.
+CREATE INDEX IF NOT EXISTS idx_messages_trash
+    ON messages (account_id, folder, trashed_at);
 "#,
 ];
 

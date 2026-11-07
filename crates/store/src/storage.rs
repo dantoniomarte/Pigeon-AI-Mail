@@ -56,6 +56,13 @@ pub const INVITATION_TTL_SECS: u64 = 7 * 86_400;
 /// flood is cleaned up.
 pub const MAX_INVITATION_SCAN: i64 = 256;
 
+/// Longest trash retention [`Storage::set_trash_retention`] will accept, in days.
+///
+/// `0` is a valid value and means "keep forever"; the upper bound keeps a typo
+/// (`3000` instead of `30`) from being a silent "never delete" and keeps the
+/// comparison date SQLite computes well inside its range.
+pub const MAX_TRASH_RETENTION_DAYS: i64 = 365;
+
 /// Characters a base64url alphabet uses (RFC 4648 §5, no padding).
 const B64URL_ALPHABET: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -425,6 +432,47 @@ pub trait Storage {
 
     /// Number of messages of `account_id` in `folder`, for the sidebar badges.
     fn count_folder(&self, account_id: i64, folder: MessageFolder) -> Result<i64>;
+
+    // ------------------------------------------------------- trash retention
+
+    /// How long a trashed message survives, in days (`0` = keep forever).
+    ///
+    /// [`StoreError::NotFound`] for an unknown account: a settings read must not
+    /// answer with the column default of an account that does not exist.
+    fn get_trash_retention(&self, account_id: i64) -> Result<i64>;
+
+    /// Set the trash retention window for `account_id`.
+    ///
+    /// `days` must be `0..=MAX_TRASH_RETENTION_DAYS`. The API validates the same
+    /// range; the store refuses it as well ([`StoreError::InvalidArgument`]) so no
+    /// caller can persist a value the API would have to reject on read.
+    /// [`StoreError::NotFound`] for an unknown account.
+    fn set_trash_retention(&self, account_id: i64, days: i64) -> Result<()>;
+
+    /// Permanently delete the account's trash rows older than its retention
+    /// window; returns how many rows were removed.
+    ///
+    /// "Older" is measured on `messages.trashed_at`, the stamp
+    /// [`Storage::set_message_folder`] writes on entry to the trash, so the clock
+    /// starts when the message was thrown away — not when it arrived. Only the
+    /// `trash` folder is ever touched: an inbox, sent or spam row cannot be
+    /// purged by this path even if it carries a stale stamp.
+    ///
+    /// A retention of `0` (keep forever) deletes nothing, and a row in the trash
+    /// without a `trashed_at` (written before migration `0012`) is kept: no
+    /// countdown ever started for it.
+    fn purge_expired_trash(&self, account_id: i64) -> Result<usize>;
+
+    /// Number of messages currently in the account's trash folder.
+    fn count_trash(&self, account_id: i64) -> Result<i64> {
+        self.count_folder(account_id, MessageFolder::Trash)
+    }
+
+    /// Every account whose trash retention is enabled (`> 0`), oldest first.
+    ///
+    /// The purge worker's work list: accounts that chose "keep forever" are not
+    /// returned, so the worker never has to re-read a policy it would not act on.
+    fn accounts_with_trash_purge(&self) -> Result<Vec<i64>>;
 
     /// Add a delivery job that becomes due at `run_after_unix`.
     fn queue_enqueue(&self, message_id: i64, run_after_unix: i64) -> Result<i64>;
@@ -1588,8 +1636,18 @@ impl Storage for SqliteStorage {
 
     fn set_message_folder(&self, message_id: i64, folder: MessageFolder) -> Result<()> {
         let conn = self.lock();
+        // `trashed_at` is the retention clock and it moves with the folder:
+        // entering the trash stamps it, leaving the trash clears it. A second
+        // move *into* the trash keeps the first arrival (`COALESCE`), so a client
+        // that re-patches `folder=trash` cannot reset its own countdown forever.
         let updated = conn.execute(
-            "UPDATE messages SET folder = ?2 WHERE id = ?1",
+            "UPDATE messages
+                SET folder = ?2,
+                    trashed_at = CASE
+                        WHEN ?2 = 'trash' THEN COALESCE(trashed_at, datetime('now'))
+                        ELSE NULL
+                    END
+              WHERE id = ?1",
             params![message_id, folder.as_str()],
         )?;
         if updated == 0 {
@@ -1639,6 +1697,67 @@ impl Storage for SqliteStorage {
             params![account_id, folder.as_str()],
             |row| row.get(0),
         )?)
+    }
+
+    fn get_trash_retention(&self, account_id: i64) -> Result<i64> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT trash_retention_days FROM accounts WHERE id = ?1",
+            [account_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or(StoreError::NotFound)
+    }
+
+    fn set_trash_retention(&self, account_id: i64, days: i64) -> Result<()> {
+        if !(0..=MAX_TRASH_RETENTION_DAYS).contains(&days) {
+            return Err(StoreError::InvalidArgument(format!(
+                "trash retention must be 0..={MAX_TRASH_RETENTION_DAYS} days, got {days}"
+            )));
+        }
+        let conn = self.lock();
+        let updated = conn.execute(
+            "UPDATE accounts SET trash_retention_days = ?2 WHERE id = ?1",
+            params![account_id, days],
+        )?;
+        if updated == 0 {
+            return Err(StoreError::NotFound);
+        }
+        Ok(())
+    }
+
+    fn purge_expired_trash(&self, account_id: i64) -> Result<usize> {
+        // The policy is read with its own lock, released before the delete: the
+        // mutex is not reentrant, so nesting the two locks would deadlock.
+        let days = self.get_trash_retention(account_id)?;
+        if days <= 0 {
+            return Ok(0);
+        }
+        let conn = self.lock();
+        // The cutoff is computed by SQLite in the same textual form
+        // `datetime('now')` writes into `trashed_at`, which is what makes the
+        // comparison a plain string compare in one shared clock. `trashed_at IS
+        // NOT NULL` keeps pre-migration trash and every non-trash row out.
+        let removed = conn.execute(
+            "DELETE FROM messages
+              WHERE account_id = ?1
+                AND folder = 'trash'
+                AND trashed_at IS NOT NULL
+                AND trashed_at < datetime('now', ?2)",
+            params![account_id, format!("-{days} days")],
+        )?;
+        Ok(removed)
+    }
+
+    fn accounts_with_trash_purge(&self) -> Result<Vec<i64>> {
+        let conn = self.lock();
+        let mut stmt =
+            conn.prepare("SELECT id FROM accounts WHERE trash_retention_days > 0 ORDER BY id")?;
+        let ids = stmt
+            .query_map([], |row| row.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(ids)
     }
 
     fn queue_enqueue(&self, message_id: i64, run_after_unix: i64) -> Result<i64> {

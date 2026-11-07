@@ -1032,6 +1032,40 @@ pub struct EmptyTrashResult {
     pub deleted: i64,
 }
 
+/// `POST /v1/messages/purge-trash` result — the retention purge, run now.
+///
+/// `deleted` counts only the messages whose retention window had already
+/// expired; everything newer than the window stays in the trash and is what
+/// `trash_remaining` counts.
+#[derive(Debug, Clone, Serialize)]
+pub struct PurgeTrashResult {
+    /// Messages removed by this run.
+    pub deleted: i64,
+    /// Messages still in the trash afterwards (fresh ones, and every one kept
+    /// because the retention is `0`).
+    pub trash_remaining: i64,
+}
+
+/// `GET /v1/account/settings` — the account-wide mailbox policy.
+#[derive(Debug, Clone, Serialize)]
+pub struct AccountSettings {
+    /// Days a message stays in `trash` before the purge deletes it (`0` = keep
+    /// forever).
+    pub trash_retention_days: i64,
+}
+
+/// `PATCH /v1/account/settings` body.
+///
+/// `trash_retention_days` is required: a settings patch that changes nothing is
+/// a client bug, and an omitted field would be indistinguishable from "set it to
+/// the default again".
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountSettingsPatch {
+    /// `0..=365`; `0` keeps trash forever.
+    pub trash_retention_days: i64,
+}
+
 /// `Template`.
 #[derive(Debug, Clone, Serialize)]
 pub struct Template {

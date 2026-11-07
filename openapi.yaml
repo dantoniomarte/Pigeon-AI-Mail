@@ -326,6 +326,37 @@ paths:
           $ref: '#/components/responses/RateLimited'
       x-scopes:
       - send
+  /v1/messages/purge-trash:
+    post:
+      tags:
+      - receive
+      summary: Run the trash retention purge now (the same sweep the server runs every 6 hours)
+      operationId: purgeTrash
+      security:
+      - bearerKey: []
+      - sessionCookie: []
+      description: 'Deletes the caller''s trashed messages whose retention window
+        (`trash_retention_days`) has expired, and nothing else: fresher trash, the
+        inbox, sent and spam folders, and every other account are left alone. A
+        retention of `0` (keep forever) deletes nothing. Idempotent: a second call
+        with nothing expired answers `deleted: 0`.
+
+        '
+      responses:
+        '200':
+          description: Purge finished
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PurgeTrashResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+      x-scopes:
+      - send
   /v1/messages/{id}:
     parameters:
     - name: id
@@ -1601,6 +1632,65 @@ paths:
           $ref: '#/components/responses/Problem'
       x-scopes:
       - full
+  /v1/account/settings:
+    get:
+      tags:
+      - account
+      summary: Read the account's mailbox policy (trash retention)
+      operationId: getAccountSettings
+      security:
+      - bearerKey: []
+      - sessionCookie: []
+      responses:
+        '200':
+          description: Current settings
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountSettings'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+      x-scopes:
+      - read
+    patch:
+      tags:
+      - account
+      summary: Update the account's mailbox policy (trash retention)
+      operationId: updateAccountSettings
+      security:
+      - bearerKey: []
+      - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AccountSettingsPatch'
+      responses:
+        '200':
+          description: Updated settings (the response is the stored policy, not the request)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountSettings'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+      description: 'Changes how long a trashed message survives. `0` means "keep
+        forever" and is a valid value; values outside `0..=365` are `422` with a
+        field-level error rather than a silent clamp, because a clamped retention
+        would delete mail the caller did not ask to delete.
+
+        '
+      x-scopes:
+      - send
   /v1/account/keys:
     post:
       tags:
@@ -2457,6 +2547,45 @@ components:
         deleted:
           type: integer
           minimum: 0
+    PurgeTrashResult:
+      type: object
+      additionalProperties: false
+      required:
+      - deleted
+      - trash_remaining
+      properties:
+        deleted:
+          type: integer
+          minimum: 0
+          description: Messages removed by this run (only those past the retention window)
+        trash_remaining:
+          type: integer
+          minimum: 0
+          description: Messages still in the trash afterwards
+    AccountSettings:
+      type: object
+      additionalProperties: false
+      required:
+      - trash_retention_days
+      properties:
+        trash_retention_days:
+          type: integer
+          minimum: 0
+          maximum: 365
+          description: 'Days a message stays in the trash before it is deleted
+            automatically. `0` keeps trashed mail forever. Default 30.
+
+            '
+    AccountSettingsPatch:
+      type: object
+      additionalProperties: false
+      required:
+      - trash_retention_days
+      properties:
+        trash_retention_days:
+          type: integer
+          minimum: 0
+          maximum: 365
     Template:
       type: object
       additionalProperties: false

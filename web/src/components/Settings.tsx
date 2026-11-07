@@ -24,10 +24,12 @@ import {
   createApiKey,
   createWebhook,
   deleteWebhook,
+  fetchAccountSettings,
   fetchApiKeys,
   fetchSent,
   fetchWebhooks,
   revokeApiKey,
+  saveTrashRetention,
   type ApiKeyView,
   type Scope,
   type SentMessage,
@@ -921,6 +923,15 @@ export default function Settings({
                 <MotionSwitch motion={motion} onToggle={() => onMotionChange(!motion)} />
               </div>
 
+              {/* The one preference that is a server policy, not a device one. */}
+              <div className="pref-row">
+                <div className="pref-row__text">
+                  <span className="pref-row__label">{t('settings.trashRetention')}</span>
+                  <p>{t('settings.trashRetentionHelp')}</p>
+                </div>
+                <TrashRetentionControl apiKey={apiKey} notify={notify} />
+              </div>
+
               <div className="pref-row pref-row--danger">
                 <div className="pref-row__text">
                   <span className="pref-row__label">{t('settings.dangerZone')}</span>
@@ -936,6 +947,120 @@ export default function Settings({
         </div>
       ) : null}
     </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Trash retention: the preference that is an account policy, not a device one
+// ---------------------------------------------------------------------------
+
+/** Ceiling the API enforces (`0` = keep forever, `365` = a year). */
+const TRASH_RETENTION_MAX = 365;
+
+/**
+ * Trash retention control.
+ *
+ * Every other preference in this panel is stored in the browser; this one is
+ * stored on the server, because the purge worker — not the tab — is what deletes
+ * the mail. It is therefore read back from `GET /v1/account/settings` on mount
+ * and written with `PATCH`, using the API key when the webmail has one and the
+ * session cookie otherwise (the endpoint accepts both).
+ */
+function TrashRetentionControl({
+  apiKey,
+  notify,
+}: {
+  apiKey: string | null;
+  notify: (kind: ToastKind, message: string) => void;
+}): JSX.Element {
+  const { t } = useTranslation();
+  const [days, setDays] = useState('30');
+  const [state, setState] = useState<LoadState>('loading');
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setState('loading');
+    fetchAccountSettings(apiKey)
+      .then((settings) => {
+        if (cancelled) {
+          return;
+        }
+        setDays(String(settings.trash_retention_days));
+        setState('ready');
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setState('error');
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [apiKey]);
+
+  const parsed = Number.parseInt(days, 10);
+  const valid = Number.isInteger(parsed) && parsed >= 0 && parsed <= TRASH_RETENTION_MAX;
+
+  const onSave = useCallback(() => {
+    if (!valid || saving) {
+      return;
+    }
+    setSaving(true);
+    saveTrashRetention(apiKey, parsed)
+      .then((settings) => {
+        setDays(String(settings.trash_retention_days));
+        notify('success', t('toast.settingsSaved'));
+      })
+      .catch((error: unknown) => {
+        notify('error', error instanceof ApiError ? error.message : t('toast.error'));
+      })
+      .finally(() => setSaving(false));
+  }, [apiKey, notify, parsed, saving, t, valid]);
+
+  if (state === 'loading') {
+    return <Loader2 size={16} className="spin" aria-hidden="true" />;
+  }
+  if (state !== 'ready') {
+    return (
+      <p className="field__error" role="alert">
+        {t('settings.loadError')}
+      </p>
+    );
+  }
+
+  return (
+    <form
+      className="trash-retention"
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSave();
+      }}
+    >
+      <input
+        className="input"
+        type="number"
+        inputMode="numeric"
+        min={0}
+        max={TRASH_RETENTION_MAX}
+        step={1}
+        value={days}
+        aria-label={t('settings.trashRetention')}
+        aria-invalid={valid ? undefined : true}
+        onChange={(event) => setDays(event.target.value)}
+      />
+      <span className="trash-retention__hint">
+        {parsed === 0 ? t('settings.trashKeepForever') : null}
+      </span>
+      <button type="submit" className="btn btn--primary" disabled={!valid || saving}>
+        {saving ? (
+          <Loader2 size={14} className="spin" aria-hidden="true" />
+        ) : (
+          <Check size={14} aria-hidden="true" />
+        )}
+        {t('admin.save')}
+      </button>
+    </form>
   );
 }
 

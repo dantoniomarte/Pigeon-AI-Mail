@@ -75,6 +75,11 @@ pub fn router(state: AppState) -> Router {
             patch(messages::patch_message).delete(messages::delete_message),
         )
         .route("/v1/messages/empty-trash", post(messages::empty_trash))
+        // The retention purge, on demand (the server also runs it on a timer).
+        .route("/v1/messages/purge-trash", post(messages::purge_trash))
+        // Settings are a write here and a read below: changing the trash
+        // retention is a mailbox write, exactly like moving a message.
+        .route("/v1/account/settings", patch(account::patch_settings))
         .route("/v1/templates", post(template_handlers::create_template))
         .route(
             "/v1/templates/{id}",
@@ -105,7 +110,9 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/templates", get(template_handlers::list_templates))
         .route("/v1/templates/{id}", get(template_handlers::get_template))
         .route("/v1/drafts", get(drafts::list_drafts))
-        .route("/v1/drafts/{id}", get(drafts::get_draft));
+        .route("/v1/drafts/{id}", get(drafts::get_draft))
+        // The account's mailbox policy is metadata, so reading it is `read`.
+        .route("/v1/account/settings", get(account::get_settings));
 
     let full_group = Router::new()
         .route(

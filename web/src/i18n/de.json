@@ -280,7 +280,10 @@
     "reasonManual": "Manuell",
     "reasonBounce": "Bounce",
     "reasonComplaint": "Beschwerde",
-    "webhookUrlPlaceholder": "https://deine-app.beispiel/hooks/pigeon"
+    "webhookUrlPlaceholder": "https://deine-app.beispiel/hooks/pigeon",
+    "trashRetention": "Papierkorb-Aufbewahrung",
+    "trashRetentionHelp": "In den Papierkorb verschobene Nachrichten werden nach so vielen Tagen automatisch gelöscht.",
+    "trashKeepForever": "Für immer behalten"
   },
   "toast": {
     "copied": "In die Zwischenablage kopiert",
@@ -295,7 +298,8 @@
     "templateCreated": "Vorlage erstellt",
     "testSent": "Test in Warteschlange",
     "testFailed": "Test fehlgeschlagen",
-    "suppressionAdded": "Adresse unterdrückt"
+    "suppressionAdded": "Adresse unterdrückt",
+    "settingsSaved": "Einstellungen gespeichert"
   },
   "auth": {
     "unauthorized": "Dieser Schlüssel wurde abgelehnt. Melde dich mit einem gültigen Schlüssel an.",

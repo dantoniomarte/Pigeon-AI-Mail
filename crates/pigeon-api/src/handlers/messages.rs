@@ -26,7 +26,7 @@ use crate::db::StoredMessage;
 use crate::handlers::{blocking, bool_param, enum_param, int_param, Params, ProblemJson};
 use crate::models::{
     AuthVerdict, DecryptedMessageView, EmptyTrashResult, FolderCounts, MessageAttachmentView,
-    MessagePage, MessagePatch, MessageSummary, SealedMessageView,
+    MessagePage, MessagePatch, MessageSummary, PurgeTrashResult, SealedMessageView,
 };
 use crate::problem::{forbidden, internal, not_found, validation, FieldError, Problem};
 use crate::state::AppState;
@@ -199,6 +199,45 @@ pub async fn empty_trash(
     .await;
     match result {
         Ok(emptied) => Json(emptied).into_response(),
+        Err(problem) => problem.into_response(),
+    }
+}
+
+/// `POST /v1/messages/purge-trash` — run the retention purge for the caller now.
+///
+/// The same purge the background worker runs every six hours, on demand: an
+/// agent (or a user who just changed the setting) does not have to wait for the
+/// interval to see the trash shrink. "Expired" is defined by the account's own
+/// retention window, so this endpoint never deletes a message the worker would
+/// have kept.
+pub async fn purge_trash(
+    State(state): State<AppState>,
+    Extension(context): Extension<ApiKeyContext>,
+) -> Response {
+    let result = blocking(move || {
+        let deleted = state
+            .store
+            .purge_expired_trash(context.account_id)
+            .map_err(Problem::from)?;
+        let remaining = state
+            .store
+            .count_trash(context.account_id)
+            .map_err(Problem::from)?;
+        if let Err(error) = state.store.audit(
+            &format!("key:{}", context.public_id),
+            "messages.purge_trash",
+            &format!("deleted={deleted}"),
+        ) {
+            tracing::warn!(%error, "could not write audit row");
+        }
+        Ok(PurgeTrashResult {
+            deleted: i64::try_from(deleted).unwrap_or(i64::MAX),
+            trash_remaining: remaining,
+        })
+    })
+    .await;
+    match result {
+        Ok(purged) => Json(purged).into_response(),
         Err(problem) => problem.into_response(),
     }
 }

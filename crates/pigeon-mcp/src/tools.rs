@@ -13,7 +13,8 @@
 //! 5. **folders** — move a message, mark it read;
 //! 6. **domains** — add one, get its DNS records;
 //! 7. **suppressions** — list, add, remove the addresses never to mail again;
-//! 8. **API keys** — create, list (metadata only), revoke.
+//! 8. **API keys** — create, list (metadata only), revoke;
+//! 9. **account settings** — read and set the trash retention window.
 
 use crate::{admin, aux, domains, mail, org, McpState};
 use store::Storage;
@@ -340,6 +341,23 @@ fn tools() -> Vec<Tool> {
                 }
             }),
         },
+        // ----------------------------------------------- account settings
+        Tool {
+            name: "account_settings",
+            description: "Read the account's mailbox policy: the trash retention in days (0 means trashed mail is kept forever).",
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+        },
+        Tool {
+            name: "set_trash_retention",
+            description: "Set how many days a message stays in the trash before it is deleted automatically: 0 keeps trashed mail forever, the default is 30, the range is 0-365.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "required": ["days"],
+                "properties": {
+                    "days": { "type": "integer", "minimum": 0, "maximum": 365, "description": "Retention window in days (0 = never auto-delete)" }
+                }
+            }),
+        },
     ]
 }
 
@@ -383,6 +401,9 @@ pub async fn dispatch(
         "api_key_create" => admin::api_key_create(args, state),
         "api_key_list" => admin::api_key_list(args, state),
         "api_key_revoke" => admin::api_key_revoke(args, state),
+        // account settings
+        "account_settings" => admin::account_settings(args, state),
+        "set_trash_retention" => admin::set_trash_retention(args, state),
         _ => Err(format!("unknown tool: {name}")),
     }
 }

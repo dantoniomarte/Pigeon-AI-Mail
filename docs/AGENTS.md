@@ -46,7 +46,7 @@ Verify before wiring any client:
 # handshake
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | pigeon mcp
 
-# catalog — 25 tools
+# catalog — 27 tools
 printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
   | pigeon mcp | grep -o '"name"' | wc -l
 
@@ -155,7 +155,7 @@ can read it can decrypt every mailbox on the instance.
 
 ---
 
-## The 25-tool catalog
+## The 27-tool catalog
 
 Grouped as `tools/list` returns them. Every tool takes a JSON object; every
 result is a text content block containing JSON.
@@ -206,6 +206,13 @@ result is a text content block containing JSON.
 | `api_key_create` | `name` + `scopes: send\|read\|full`, optional `sandbox`. The `pk_…` value is shown **once**. |
 | `api_key_list` | Metadata only (never key material, `last_used_at` included). |
 | `api_key_revoke` | `key_id` (`key_…`); the next request with it is refused. |
+
+### Account settings
+
+| Tool | Agent use |
+|---|---|
+| `account_settings` | Reads the mailbox policy → `{trash_retention_days}`. `0` means trashed mail is kept forever, so a purge would surprise the owner. |
+| `set_trash_retention` | `days: 0..=365`; `0` keeps trashed mail forever, the default is 30. The next purge sweep uses the new window. |
 
 ### Agent-oriented examples
 

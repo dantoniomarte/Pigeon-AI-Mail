@@ -280,7 +280,10 @@
     "reasonManual": "Manual",
     "reasonBounce": "Bounce",
     "reasonComplaint": "Complaint",
-    "webhookUrlPlaceholder": "https://your-app.example/hooks/pigeon"
+    "webhookUrlPlaceholder": "https://your-app.example/hooks/pigeon",
+    "trashRetention": "Trash retention",
+    "trashRetentionHelp": "Messages moved to trash are deleted automatically after this many days.",
+    "trashKeepForever": "Keep forever"
   },
   "toast": {
     "copied": "Copied to clipboard",
@@ -295,7 +298,8 @@
     "templateCreated": "Template created",
     "testSent": "Test email queued",
     "testFailed": "Test send failed",
-    "suppressionAdded": "Address suppressed"
+    "suppressionAdded": "Address suppressed",
+    "settingsSaved": "Settings saved"
   },
   "auth": {
     "unauthorized": "This key was rejected. Sign in with a valid key.",

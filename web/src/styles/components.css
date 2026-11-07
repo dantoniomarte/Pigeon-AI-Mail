@@ -2016,6 +2016,30 @@ body {
   flex: none;
 }
 
+/* Trash retention: the one preference in this list that is stored on the
+   server, because the purge worker — not the tab — deletes the mail. */
+.trash-retention {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+.trash-retention .input {
+  width: 88px;
+  text-align: center;
+}
+
+.trash-retention__hint {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.trash-retention .btn {
+  flex: none;
+}
+
 /* ---------------------------------------------------------------- */
 /* Setup screen                                                     */
 /* ---------------------------------------------------------------- */

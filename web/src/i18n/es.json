@@ -280,7 +280,10 @@
     "reasonManual": "Manual",
     "reasonBounce": "Rebote",
     "reasonComplaint": "Queja",
-    "webhookUrlPlaceholder": "https://tu-app.ejemplo/hooks/pigeon"
+    "webhookUrlPlaceholder": "https://tu-app.ejemplo/hooks/pigeon",
+    "trashRetention": "Conservación de la papelera",
+    "trashRetentionHelp": "Los mensajes movidos a la papelera se eliminan automáticamente después de estos días.",
+    "trashKeepForever": "Guardar para siempre"
   },
   "toast": {
     "copied": "Copiado al portapapeles",
@@ -295,7 +298,8 @@
     "templateCreated": "Plantilla creada",
     "testSent": "Prueba en cola",
     "testFailed": "Falló la prueba",
-    "suppressionAdded": "Dirección suprimida"
+    "suppressionAdded": "Dirección suprimida",
+    "settingsSaved": "Ajustes guardados"
   },
   "auth": {
     "unauthorized": "Esta clave fue rechazada. Entrá con una clave válida.",

@@ -1,4 +1,4 @@
-//! Suppressions and API keys over MCP.
+//! Suppressions, API keys and the account settings over MCP.
 //!
 //! # Suppressions
 //!
@@ -12,10 +12,18 @@
 //! hash is stored, so a lost key is re-issued, never recovered. Listing returns
 //! metadata only, and revoking marks the row so the next request re-reads it
 //! instead of matching a cached verification.
+//!
+//! # Account settings
+//!
+//! `account_settings` / `set_trash_retention` are the mailbox policy the owner
+//! asked to be configurable from an agent, not only from the webmail: the same
+//! column (`accounts.trash_retention_days`) the settings page and the purge
+//! worker read, so the three can never disagree.
 
 use pigeon_api::models::ApiKeyPatch;
 use pigeon_core::ApiKeyScope;
 use pigeon_core::EmailAddress;
+use store::Storage;
 
 use crate::aux;
 use crate::McpState;
@@ -184,6 +192,49 @@ pub fn api_key_revoke(args: &serde_json::Value, state: &McpState) -> Result<Stri
         "revoked": revoked.revoked,
     })
     .to_string())
+}
+
+// -------------------------------------------------------- account settings
+
+/// `account_settings` — the account-wide mailbox policy.
+///
+/// Today that is the trash retention window. An agent reads it before deciding
+/// anything about the trash: `0` means the owner asked to keep trashed mail
+/// forever, so a purge would be a surprise.
+pub fn account_settings(_args: &serde_json::Value, state: &McpState) -> Result<String, String> {
+    let actor = aux::actor(state)?;
+    let days = state
+        .store
+        .get_trash_retention(actor.account_id)
+        .map_err(|error| aux::store_error("could not read the account settings", error))?;
+    Ok(serde_json::json!({ "trash_retention_days": days }).to_string())
+}
+
+/// `set_trash_retention` — how long a message survives in the trash.
+///
+/// `0` is a legitimate setting ("keep forever"), not an omission, so it is
+/// accepted and echoed back. The range is checked here as well as in the store:
+/// an agent that asks for `400` gets an explanation, not a silent clamp that
+/// would delete mail the owner never agreed to lose.
+pub fn set_trash_retention(args: &serde_json::Value, state: &McpState) -> Result<String, String> {
+    let actor = aux::actor(state)?;
+    let days = aux::required_i64(args, "days")?;
+    if !(0..=store::MAX_TRASH_RETENTION_DAYS).contains(&days) {
+        return Err(format!(
+            "`days` must be between 0 (keep trash forever) and {}, got {days}",
+            store::MAX_TRASH_RETENTION_DAYS
+        ));
+    }
+    state
+        .store
+        .set_trash_retention(actor.account_id, days)
+        .map_err(|error| aux::store_error("could not save the trash retention", error))?;
+    aux::audit(
+        state,
+        "account.settings",
+        &format!("trash_retention_days={days}"),
+    );
+    Ok(serde_json::json!({ "trash_retention_days": days }).to_string())
 }
 
 /// Parse the scope list, deduplicating and refusing anything unknown.

@@ -48,11 +48,11 @@ entry to the remote transport:
 
 ```bash
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
-  | pigeon mcp | grep -o '"name"' | wc -l     # expect 25
+  | pigeon mcp | grep -o '"name"' | wc -l     # expect 27
 ```
 
 Then in Hermes, list connected servers (`/mcp` or the agent's tool panel) and
-confirm `pigeon-mail` reports 25 tools.
+confirm `pigeon-mail` reports 27 tools.
 
 ## Troubleshooting
 

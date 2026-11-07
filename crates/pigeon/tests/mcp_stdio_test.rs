@@ -14,8 +14,8 @@ use pigeon_core::{Direction, EmailAddress};
 use pigeon_crypto::MasterKey;
 use store::{NewMessage, SqliteStorage, Storage};
 
-/// The tool surface: 5 messaging + 20 administration tools.
-const TOOL_COUNT: usize = 25;
+/// The tool surface: 5 messaging + 22 administration tools.
+const TOOL_COUNT: usize = 27;
 
 /// The bootstrap account the tools act as.
 const ACTOR_EMAIL: &str = "admin@pigeon.local";
@@ -164,7 +164,7 @@ fn mcp_initialize_and_protocol() {
     assert_eq!(
         tools.len(),
         TOOL_COUNT,
-        "5 messaging + 20 administration tools"
+        "5 messaging + 22 administration tools"
     );
     for name in [
         // messaging
@@ -200,6 +200,9 @@ fn mcp_initialize_and_protocol() {
         "api_key_create",
         "api_key_list",
         "api_key_revoke",
+        // account settings
+        "account_settings",
+        "set_trash_retention",
     ] {
         assert!(
             tools.iter().any(|tool| tool["name"] == name),

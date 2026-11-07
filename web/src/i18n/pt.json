@@ -280,7 +280,10 @@
     "reasonManual": "Manual",
     "reasonBounce": "Rejeição",
     "reasonComplaint": "Reclamação",
-    "webhookUrlPlaceholder": "https://seu-app.exemplo/hooks/pigeon"
+    "webhookUrlPlaceholder": "https://seu-app.exemplo/hooks/pigeon",
+    "trashRetention": "Retenção da lixeira",
+    "trashRetentionHelp": "As mensagens movidas para a lixeira são apagadas automaticamente após estes dias.",
+    "trashKeepForever": "Guardar para sempre"
   },
   "toast": {
     "copied": "Copiado para a área de transferência",
@@ -295,7 +298,8 @@
     "templateCreated": "Modelo criado",
     "testSent": "Teste na fila",
     "testFailed": "Teste falhou",
-    "suppressionAdded": "Endereço suprimido"
+    "suppressionAdded": "Endereço suprimido",
+    "settingsSaved": "Definições guardadas"
   },
   "auth": {
     "unauthorized": "Esta chave foi recusada. Entre com uma chave válida.",

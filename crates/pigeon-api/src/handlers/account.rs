@@ -1,9 +1,13 @@
-//! Account administration: API keys.
+//! Account administration: API keys and the account-wide settings.
 //!
 //! Key creation returns the `pk_…` value exactly once (only the Argon2id hash is
 //! stored), listing returns metadata only, and revoking or deleting a key clears
 //! the verification cache so the change takes effect on the next request instead
 //! of after the cache TTL.
+//!
+//! Settings are the mailbox policy that belongs to the account rather than to a
+//! key: today that is the trash retention window, which the purge worker reads
+//! back from the store on every run.
 //!
 //! The session realm (cookie login, TOTP enrollment) lives in
 //! [`crate::handlers::sessions`] and [`crate::handlers::twofa`]: it authenticates
@@ -20,12 +24,20 @@ use crate::auth::ApiKeyContext;
 use crate::db::KeyRow;
 use crate::handlers::{blocking, ProblemJson};
 use crate::ids;
-use crate::models::{ApiKeyCreate, ApiKeyCreated, ApiKeyPatch, ApiKeyView};
+use crate::models::{
+    AccountSettings, AccountSettingsPatch, ApiKeyCreate, ApiKeyCreated, ApiKeyPatch, ApiKeyView,
+};
 use crate::problem::{not_found, validation, FieldError, Problem};
 use crate::state::AppState;
 
 /// Longest accepted key label.
 const MAX_KEY_NAME_LEN: usize = 100;
+
+/// Ceiling on the trash retention the API accepts, in days (`0` = keep forever).
+///
+/// The store owns the constant: the same bound guards the column, so an API bug
+/// cannot persist a value the store would refuse to write back.
+const MAX_TRASH_RETENTION_DAYS: i64 = store::MAX_TRASH_RETENTION_DAYS;
 
 /// `POST /v1/account/keys` — create a key, returning `pk_…` once.
 pub async fn create_key(
@@ -157,6 +169,76 @@ pub async fn delete_key(
     .await;
     match result {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(problem) => problem.into_response(),
+    }
+}
+
+/// `GET /v1/account/settings` — the account-wide mailbox policy.
+///
+/// Reachable with an API key holding `read` and with a webmail session cookie
+/// (a session carries `full` authority, which is a superset): the settings page
+/// is a browser surface, but an agent reading the policy needs no different
+/// route.
+pub async fn get_settings(
+    State(state): State<AppState>,
+    Extension(context): Extension<ApiKeyContext>,
+) -> Response {
+    let result = blocking(move || {
+        let days = state
+            .store
+            .get_trash_retention(context.account_id)
+            .map_err(Problem::from)?;
+        Ok(AccountSettings {
+            trash_retention_days: days,
+        })
+    })
+    .await;
+    match result {
+        Ok(settings) => Json(settings).into_response(),
+        Err(problem) => problem.into_response(),
+    }
+}
+
+/// `PATCH /v1/account/settings` — change the trash retention window.
+///
+/// `0` means "keep forever" and is a valid value; anything outside `0..=365` is
+/// a `422` with a field-level error rather than a silent clamp, because a
+/// clamped retention would delete mail the caller did not ask to delete.
+pub async fn patch_settings(
+    State(state): State<AppState>,
+    Extension(context): Extension<ApiKeyContext>,
+    ProblemJson(request): ProblemJson<AccountSettingsPatch>,
+) -> Response {
+    let result = blocking(move || {
+        let days = request.trash_retention_days;
+        if !(0..=MAX_TRASH_RETENTION_DAYS).contains(&days) {
+            return Err(validation(vec![FieldError::with_code(
+                "trash_retention_days",
+                "out-of-range",
+                format!(
+                    "trash_retention_days must be between 0 (keep forever) and \
+                     {MAX_TRASH_RETENTION_DAYS}, got {days}"
+                ),
+            )]));
+        }
+        state
+            .store
+            .set_trash_retention(context.account_id, days)
+            .map_err(Problem::from)?;
+        if let Err(error) = state.store.audit(
+            &format!("key:{}", context.public_id),
+            "account.settings",
+            &format!("trash_retention_days={days}"),
+        ) {
+            tracing::warn!(%error, "could not write audit row");
+        }
+        Ok(AccountSettings {
+            trash_retention_days: days,
+        })
+    })
+    .await;
+    match result {
+        Ok(settings) => Json(settings).into_response(),
         Err(problem) => problem.into_response(),
     }
 }

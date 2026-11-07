@@ -1142,6 +1142,279 @@ fn empty_folder_returns_its_count_and_only_clears_that_folder_and_account() {
     );
 }
 
+// ------------------------------------------------------- trash retention
+
+/// Rewrite `messages.trashed_at` to `now + offset` (days), the state the purge
+/// path is supposed to act on. The store only ever writes `datetime('now')`, so
+/// a test that needs "41 days ago" has to craft it. `offset` is a SQLite
+/// modifier such as `'-41 days'`.
+fn craft_trashed_at(storage: &SqliteStorage, message_id: i64, offset: &str) -> String {
+    let conn = storage.raw_conn();
+    conn.execute(
+        "UPDATE messages SET trashed_at = datetime('now', ?2) WHERE id = ?1",
+        params![message_id, offset],
+    )
+    .expect("craft trashed_at");
+    conn.query_row(
+        "SELECT trashed_at FROM messages WHERE id = ?1",
+        [message_id],
+        |row| row.get(0),
+    )
+    .expect("read back trashed_at")
+}
+
+fn trashed_at(storage: &SqliteStorage, message_id: i64) -> Option<String> {
+    storage
+        .raw_conn()
+        .query_row(
+            "SELECT trashed_at FROM messages WHERE id = ?1",
+            [message_id],
+            |row| row.get(0),
+        )
+        .expect("read trashed_at")
+}
+
+#[test]
+fn trash_retention_defaults_to_30_days_and_roundtrips() {
+    let fixture = fixture();
+    let account_id = new_account(&fixture.storage);
+
+    assert_eq!(
+        fixture.storage.get_trash_retention(account_id).unwrap(),
+        30,
+        "an account that never opened settings still has a bounded trash"
+    );
+
+    for days in [0_i64, 1, 90, 365] {
+        fixture
+            .storage
+            .set_trash_retention(account_id, days)
+            .unwrap();
+        assert_eq!(
+            fixture.storage.get_trash_retention(account_id).unwrap(),
+            days,
+            "{days} must round-trip"
+        );
+    }
+
+    // Out of range is refused, and the stored value is untouched: a rejected
+    // write must not be a half-write.
+    for bad in [-1_i64, 366, 100_000] {
+        let error = fixture
+            .storage
+            .set_trash_retention(account_id, bad)
+            .unwrap_err();
+        assert!(
+            matches!(error, StoreError::InvalidArgument(_)),
+            "{bad} must be refused, got {error}"
+        );
+        assert_eq!(
+            fixture.storage.get_trash_retention(account_id).unwrap(),
+            365
+        );
+    }
+
+    // An unknown account is `NotFound` in both directions, never a default.
+    assert!(matches!(
+        fixture.storage.get_trash_retention(999_999).unwrap_err(),
+        StoreError::NotFound
+    ));
+    assert!(matches!(
+        fixture.storage.set_trash_retention(999_999, 7).unwrap_err(),
+        StoreError::NotFound
+    ));
+}
+
+#[test]
+fn moving_into_the_trash_stamps_the_clock_and_leaving_clears_it() {
+    let fixture = fixture();
+    let account_id = new_account(&fixture.storage);
+    let message_id = seed_message(&fixture.storage, account_id);
+
+    assert_eq!(
+        trashed_at(&fixture.storage, message_id),
+        None,
+        "a message in the inbox has no trash clock"
+    );
+
+    fixture
+        .storage
+        .set_message_folder(message_id, MessageFolder::Trash)
+        .unwrap();
+    let stamp =
+        trashed_at(&fixture.storage, message_id).expect("entering the trash stamps the clock");
+    assert!(!stamp.is_empty());
+
+    // Re-moving to the trash keeps the first arrival: a client cannot reset its
+    // own countdown by re-patching `folder=trash`.
+    fixture
+        .storage
+        .set_message_folder(message_id, MessageFolder::Trash)
+        .unwrap();
+    assert_eq!(trashed_at(&fixture.storage, message_id), Some(stamp));
+
+    // Restoring the message stops the countdown.
+    fixture
+        .storage
+        .set_message_folder(message_id, MessageFolder::Inbox)
+        .unwrap();
+    assert_eq!(
+        trashed_at(&fixture.storage, message_id),
+        None,
+        "leaving the trash clears the clock"
+    );
+
+    // ... and a later trip to the trash starts a fresh one.
+    fixture
+        .storage
+        .set_message_folder(message_id, MessageFolder::Trash)
+        .unwrap();
+    assert!(trashed_at(&fixture.storage, message_id).is_some());
+}
+
+#[test]
+fn purge_expired_trash_deletes_only_expired_trash_of_one_account() {
+    let fixture = fixture();
+    let account_id = new_account(&fixture.storage);
+    let other_account = fixture
+        .storage
+        .create_account(&addr("other@example.com"))
+        .unwrap();
+    fixture.storage.set_trash_retention(account_id, 30).unwrap();
+
+    // Old trash of this account: expired.
+    let expired = seed_message(&fixture.storage, account_id);
+    fixture
+        .storage
+        .set_message_folder(expired, MessageFolder::Trash)
+        .unwrap();
+    craft_trashed_at(&fixture.storage, expired, "-41 days");
+
+    // Fresh trash of this account: must survive.
+    let fresh = seed_message(&fixture.storage, account_id);
+    fixture
+        .storage
+        .set_message_folder(fresh, MessageFolder::Trash)
+        .unwrap();
+    craft_trashed_at(&fixture.storage, fresh, "-2 days");
+
+    // Every other folder, however old, is out of scope for this path.
+    let inbox = seed_message(&fixture.storage, account_id);
+    craft_trashed_at(&fixture.storage, inbox, "-400 days");
+    let sent = seed_message(&fixture.storage, account_id);
+    fixture
+        .storage
+        .set_message_folder(sent, MessageFolder::Sent)
+        .unwrap();
+    craft_trashed_at(&fixture.storage, sent, "-400 days");
+    let spam = seed_message(&fixture.storage, account_id);
+    fixture
+        .storage
+        .set_message_folder(spam, MessageFolder::Spam)
+        .unwrap();
+    craft_trashed_at(&fixture.storage, spam, "-400 days");
+
+    // Another account's expired trash belongs to that account's policy.
+    let foreign = seed_message(&fixture.storage, other_account);
+    fixture
+        .storage
+        .set_message_folder(foreign, MessageFolder::Trash)
+        .unwrap();
+    craft_trashed_at(&fixture.storage, foreign, "-400 days");
+
+    assert_eq!(
+        fixture.storage.purge_expired_trash(account_id).unwrap(),
+        1,
+        "exactly the expired trash row of this account goes"
+    );
+    assert!(matches!(
+        fixture.storage.get_message(expired).unwrap_err(),
+        StoreError::NotFound
+    ));
+    for survivor in [fresh, inbox, sent, spam, foreign] {
+        assert!(
+            fixture.storage.get_message(survivor).is_ok(),
+            "message {survivor} must survive"
+        );
+    }
+    assert_eq!(fixture.storage.count_trash(account_id).unwrap(), 1);
+
+    // A second run is idempotent: nothing left to purge.
+    assert_eq!(fixture.storage.purge_expired_trash(account_id).unwrap(), 0);
+}
+
+#[test]
+fn purge_expired_trash_keeps_everything_when_retention_is_zero() {
+    let fixture = fixture();
+    let account_id = new_account(&fixture.storage);
+    fixture.storage.set_trash_retention(account_id, 0).unwrap();
+
+    let ancient = seed_message(&fixture.storage, account_id);
+    fixture
+        .storage
+        .set_message_folder(ancient, MessageFolder::Trash)
+        .unwrap();
+    craft_trashed_at(&fixture.storage, ancient, "-4000 days");
+
+    assert_eq!(
+        fixture.storage.purge_expired_trash(account_id).unwrap(),
+        0,
+        "0 means keep forever, not expire everything"
+    );
+    assert!(fixture.storage.get_message(ancient).is_ok());
+
+    // The worker's work list agrees: this account opted out.
+    assert!(!fixture
+        .storage
+        .accounts_with_trash_purge()
+        .unwrap()
+        .contains(&account_id));
+}
+
+#[test]
+fn purge_skips_trash_whose_clock_never_started() {
+    let fixture = fixture();
+    let account_id = new_account(&fixture.storage);
+    let legacy = seed_message(&fixture.storage, account_id);
+    fixture
+        .storage
+        .set_message_folder(legacy, MessageFolder::Trash)
+        .unwrap();
+    // A row that predates migration 0012: in the trash, but never stamped.
+    fixture
+        .storage
+        .raw_conn()
+        .execute(
+            "UPDATE messages SET trashed_at = NULL WHERE id = ?1",
+            [legacy],
+        )
+        .unwrap();
+
+    assert_eq!(
+        fixture.storage.purge_expired_trash(account_id).unwrap(),
+        0,
+        "an upgrade must not delete mail whose countdown never started"
+    );
+    assert!(fixture.storage.get_message(legacy).is_ok());
+}
+
+#[test]
+fn accounts_with_trash_purge_lists_only_enabled_accounts() {
+    let fixture = fixture();
+    let enabled = new_account(&fixture.storage);
+    let disabled = fixture
+        .storage
+        .create_account(&addr("keep@example.com"))
+        .unwrap();
+    fixture.storage.set_trash_retention(disabled, 0).unwrap();
+
+    assert_eq!(
+        fixture.storage.accounts_with_trash_purge().unwrap(),
+        vec![enabled],
+        "a fresh account is enabled by default; `0` opts out"
+    );
+}
+
 // ------------------------------------------------------------------------ queue
 
 #[test]

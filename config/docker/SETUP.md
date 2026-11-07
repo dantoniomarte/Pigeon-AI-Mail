@@ -43,7 +43,7 @@ the real store and key.
 ```bash
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
   | docker exec -i pigeon-mail /usr/local/bin/pigeon mcp \
-  | grep -o '"name"' | wc -l     # expect 25
+  | grep -o '"name"' | wc -l     # expect 27
 ```
 
 Then point the agent at the same command line and check that its MCP panel lists

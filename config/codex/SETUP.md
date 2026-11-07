@@ -38,10 +38,10 @@ fresh login. On a different machine than the mail server, use
 PIGEON_DB_PATH=/var/lib/pigeon/pigeon.db \
 PIGEON_MASTER_KEY_FILE=/etc/pigeon/master.key \
   pigeon mcp <<<'{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
-  | grep -o '"name"' | wc -l      # expect 25
+  | grep -o '"name"' | wc -l      # expect 27
 ```
 
-Inside Codex: `/mcp` lists `pigeon-mail` and its 25 tools.
+Inside Codex: `/mcp` lists `pigeon-mail` and its 27 tools.
 
 ## Troubleshooting
 

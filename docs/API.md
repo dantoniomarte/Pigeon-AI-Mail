@@ -14,8 +14,8 @@ Two auth realms:
 
 | Scope | Grants |
 |---|---|
-| `send` | `POST /v1/emails`, `POST /v1/emails/batch`, cancel via `DELETE /v1/emails/{id}`, mailbox writes (folder/read `PATCH`, `DELETE` and empty-trash on `/v1/messages`), template create/update/delete, `POST /v1/templates/{id}/test-send`, draft save/update/delete/send. |
-| `read` | Inbox and discovery GETs: emails (`/v1/emails*`, including sandbox raw MIME), messages, attachments, templates, drafts. Metadata and sealed blobs only. |
+| `send` | `POST /v1/emails`, `POST /v1/emails/batch`, cancel via `DELETE /v1/emails/{id}`, mailbox writes (folder/read `PATCH`, `DELETE`, empty-trash and purge-trash on `/v1/messages`), the account settings `PATCH` (trash retention), template create/update/delete, `POST /v1/templates/{id}/test-send`, draft save/update/delete/send. |
+| `read` | Inbox and discovery GETs: emails (`/v1/emails*`, including sandbox raw MIME), messages, attachments, templates, drafts, account settings. Metadata and sealed blobs only. |
 | `full` | The admin GETs — domains, webhooks, suppressions, keys — plus every write to those, plus **decrypted bodies** (`?sealed=false`). Account administration, including organizations, members, invitations and catch-all routing. |
 
 The spec carries this per-operation in `x-scopes` on each path, so `read` on `/v1/domains` is a `403`, not a silent widening.
@@ -124,7 +124,11 @@ Lifecycle: `queued → scheduled → sending → sent | deferred {next_attempt_a
 
 ### `POST /v1/messages/empty-trash` — purges the caller's trash, `200 {deleted: N}` (idempotent: an already-empty trash reports `0`).
 
-Mailbox mutations (`PATCH`/`DELETE`/`empty-trash`) require scope `send`, matching cancel-email; the listing requires `read`.
+### `POST /v1/messages/purge-trash` — the **retention** purge, on demand, `200 {deleted, trash_remaining}`.
+
+Trashed mail is deleted automatically once it has been in the trash longer than the account's `trash_retention_days` (default **30**, `0` = keep forever; see [account settings](#account-keys-sessions--2fa)). The server runs that sweep every **6 hours**; this endpoint runs it immediately for the caller, so a user who just changed the setting — or an agent that moved mail to the trash — does not have to wait for the interval. It deletes only *expired* trash: fresher messages stay, other folders are untouched, and another account is never affected. A `0` retention deletes nothing.
+
+Mailbox mutations (`PATCH`/`DELETE`/`empty-trash`/`purge-trash`) require scope `send`, matching cancel-email; the listing requires `read`.
 
 ### `GET /v1/messages/{id}`
 
@@ -228,6 +232,15 @@ Payloads are the `Event` schema (openapi) — field names match the internal con
 | `PATCH /v1/account/keys/{id}` | `{revoked: true}` to revoke (compromised key), sandbox toggle, rename. |
 | `DELETE /v1/account/keys/{id}` | Delete immediately (audited). |
 
+**Account settings** (the mailbox policy that belongs to the account, not to a key). Both routes accept an API key *and* the webmail session cookie:
+
+| Endpoint | Scope | Purpose |
+|---|---|---|
+| `GET /v1/account/settings` | `read` | `200 {trash_retention_days}` (default **30**). |
+| `PATCH /v1/account/settings` {trash_retention_days} | `send` | `200` with the stored policy. Range `0..=365`: `0` = **keep trash forever**, `1`–`365` = days until the purge deletes it. Outside the range → `422 validation` (never a silent clamp: a clamped retention would delete mail nobody asked to delete). |
+
+**Trash retention behavior.** The countdown starts when a message **enters** the trash (`PATCH /v1/messages/{id}` with `folder: trash`) and stops when it leaves it again, so restoring a message cancels its deletion. A message trashed before this feature existed has no start time and is never purged until it is moved to the trash again. Changing the setting applies to the whole trash on the next sweep: lowering `30` to `7` deletes what is already older than seven days.
+
 **Dashboard/webmail sessions & 2FA** (session cookie realm):
 
 | Endpoint | Purpose |
@@ -316,7 +329,7 @@ Same operations over the Model Context Protocol — same key, same scopes, same 
     "env": { "PIGEON_URL": "https://mail.example.com", "PIGEON_API_KEY": "pk_..." } } } }
 ```
 
-Tools: `send_email`, `list_messages`, `get_message`, `create_template`, `manage_webhooks`.
+Tools: `send_email`, `list_messages`, `get_message`, `create_template`, `manage_webhooks`, the organization/catch-all/draft/folder/domain/suppression/API-key groups (27 tools in total), plus `account_settings` and `set_trash_retention` so an agent can read and change the trash retention (`days: 0` keeps trashed mail forever) without going through the HTTP API.
 
 ## Quickstart (curl)
 
