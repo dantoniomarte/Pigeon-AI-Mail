@@ -279,6 +279,33 @@ export function storeKey(key: string | null): void {
   }
 }
 
+const ACCOUNT_EMAIL_STORAGE = 'pigeon_account_email';
+
+/** The account email typed at login — the default From for new compose sessions. */
+export function getStoredAccountEmail(): string {
+  try {
+    return localStorage.getItem(ACCOUNT_EMAIL_STORAGE) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+export function storeAccountEmail(address: string): void {
+  try {
+    localStorage.setItem(ACCOUNT_EMAIL_STORAGE, address);
+  } catch {
+    // Ignore storage failures (private mode).
+  }
+}
+
+export function clearStoredAccountEmail(): void {
+  try {
+    localStorage.removeItem(ACCOUNT_EMAIL_STORAGE);
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
 export function getStoredFrom(): string {
   try {
     return localStorage.getItem(FROM_STORAGE) ?? '';
@@ -1117,4 +1144,13 @@ export async function emptyTrash(key: string | null): Promise<number> {
     method: 'POST',
   });
   return result.deleted;
+}
+
+/** Clear the stored last-used From (sign-out / identity switch). */
+export function clearStoredFrom(): void {
+  try {
+    localStorage.removeItem(FROM_STORAGE);
+  } catch {
+    // Ignore storage failures.
+  }
 }

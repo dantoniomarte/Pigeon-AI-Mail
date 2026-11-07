@@ -5,7 +5,7 @@ import { Loader2, Mail, ShieldCheck } from 'lucide-react';
 import { login, TwoFaRequiredError } from '../api';
 
 export interface LoginProps {
-  onSuccess: () => void;
+  onSuccess: (email: string) => void;
   onUseApiKey?: () => void;
 }
 
@@ -23,7 +23,7 @@ export default function Login({ onSuccess, onUseApiKey }: LoginProps): JSX.Eleme
     setSubmitting(true);
     setError(null);
     login(email.trim(), needsCode && code.trim() ? code.trim() : undefined)
-      .then(() => onSuccess())
+      .then(() => onSuccess(email.trim()))
       .catch((err: unknown) => {
         setSubmitting(false);
         if (err instanceof TwoFaRequiredError) {

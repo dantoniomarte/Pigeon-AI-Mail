@@ -37,7 +37,7 @@ import Settings from './components/Settings';
 import Landing from './components/Landing';
 import Login from './components/Login';
 import Setup from './components/Setup';
-import { hasSession } from './api';
+import { clearStoredAccountEmail, clearStoredFrom, getStoredAccountEmail, hasSession, storeAccountEmail } from './api';
 import Sidebar from './components/Sidebar';
 import Toast, { type ToastItem, type ToastKind } from './components/Toast';
 import TopBar from './components/TopBar';
@@ -109,8 +109,8 @@ function persistReadIds(ids: Set<string>): void {
   }
 }
 
-function emptySeed(): ComposeSeed {
-  return { from: getStoredFrom(), to: '', subject: '', body: '' };
+function emptySeed(accountEmail: string): ComposeSeed {
+  return { from: accountEmail, to: '', subject: '', body: '' };
 }
 
 export default function App(): JSX.Element {
@@ -121,6 +121,7 @@ export default function App(): JSX.Element {
   const [sessionChecked, setSessionChecked] = useState<boolean>(false);
   const [apiKeyFallback, setApiKeyFallback] = useState<boolean>(false);
   const [loginOpen, setLoginOpen] = useState<boolean>(false);
+  const [accountEmail, setAccountEmail] = useState<string>(() => getStoredAccountEmail());
 
   // Resolve the HttpOnly session cookie once on mount (JD-A-003).
   useEffect(() => {
@@ -142,7 +143,7 @@ export default function App(): JSX.Element {
   const [lang, setLang] = useState<string>(() => detectLanguage());
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [composeOpen, setComposeOpen] = useState(false);
-  const [composeSeed, setComposeSeed] = useState<ComposeSeed>(() => emptySeed());
+  const [composeSeed, setComposeSeed] = useState<ComposeSeed>(() => emptySeed(accountEmail));
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const toastId = useRef(0);
 
@@ -244,6 +245,9 @@ export default function App(): JSX.Element {
           // to re-auth (Setup for key mode, Login for session mode).
           storeKey(null);
           setApiKey(null);
+          setAccountEmail('');
+          clearStoredAccountEmail();
+          clearStoredFrom();
           setSessionActive(false);
           setApiKeyFallback(false);
           setListState('idle');
@@ -450,9 +454,14 @@ export default function App(): JSX.Element {
     setDrafts([]);
     setView('inbox');
     setReadIds(new Set<string>());
+    setAccountEmail('');
+    clearStoredAccountEmail();
+    clearStoredFrom();
     setSessionActive(false);
     setApiKeyFallback(false);
     setLoginOpen(false);
+    setComposeOpen(false);
+    setComposeSeed(emptySeed(''));
     notify('info', t('toast.signedOut'));
   }, [notify, t]);
 
@@ -477,15 +486,15 @@ export default function App(): JSX.Element {
   }, [sidebarOpen]);
 
   const startCompose = useCallback(() => {
-    setComposeSeed(emptySeed());
+    setComposeSeed(emptySeed(accountEmail));
     setComposeOpen(true);
-  }, []);
+  }, [accountEmail]);
 
   /** Open the compose box on a stored draft. */
   const continueDraft = useCallback((draft: DraftView) => {
     const html = (draft.html ?? '').trim();
     setComposeSeed({
-      from: draft.from.trim().length > 0 ? draft.from : getStoredFrom(),
+      from: draft.from.trim().length > 0 ? draft.from : getStoredFrom() || accountEmail,
       to: draft.to.join(', '),
       cc: draft.cc.join(', '),
       subject: draft.subject ?? '',
@@ -498,7 +507,7 @@ export default function App(): JSX.Element {
       tags: draft.tags,
     });
     setComposeOpen(true);
-  }, []);
+  }, [accountEmail]);
 
   const removeDraft = useCallback(
     (draft: DraftView) => {
@@ -521,14 +530,14 @@ export default function App(): JSX.Element {
           ? `\n\n---------- ${t('mail.forward')} ----------\n${t('mail.from')}: ${message.from_addr}\n${t('compose.subject')}: ${subject}\n\n${message.body_text ?? ''}`
           : '';
       setComposeSeed({
-        from: getStoredFrom(),
+        from: getStoredFrom() || accountEmail,
         to: mode === 'reply' ? sender : '',
         subject: mode === 'reply' ? (subject.startsWith('Re:') ? subject : `Re: ${subject}`) : subject,
         body: quoted,
       });
       setComposeOpen(true);
     },
-    [t],
+    [t, accountEmail],
   );
 
   // Login FIRST: a fresh visitor without a session sees the Login screen.
@@ -550,7 +559,9 @@ export default function App(): JSX.Element {
     }
     return (
       <Login
-        onSuccess={() => {
+        onSuccess={(email) => {
+          setAccountEmail(email);
+          storeAccountEmail(email);
           setSessionActive(true);
           setLoginOpen(false);
         }}
