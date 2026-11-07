@@ -61,6 +61,11 @@ make build                        # requires Rust 1.85+ (stable)
 sudo ./install.sh --domain mail.example.com --bin target/release/pigeon
 ```
 
+## Migration from other providers
+
+Coming from Resend, Postmark, SendGrid, Mailgun, or Amazon SES? [docs/MIGRATION.md](docs/MIGRATION.md)
+maps every provider's send payload to Pigeon's — plus the universal SMTP path.
+
 ## Deployment
 
 Three supported paths, documented in depth in [docs/DEPLOY.md](docs/DEPLOY.md):
