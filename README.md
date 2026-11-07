@@ -34,6 +34,11 @@ Carrier pigeons carried sealed letters across enemy lines for centuries — fast
 
 ## Quick start
 
+> **Private repositories:** the one-liners below download files over HTTPS and
+> only work while this repo is public. For a private clone, use the
+> [build-from-source](#build-from-source) path and run `install.sh --bin` from
+> your checkout.
+
 ```bash
 # API server only (no webmail) — recommended for agents and CI
 curl -fsSL https://raw.githubusercontent.com/dantoniomarte/Pigeon-AI-Mail/main/install.sh | bash -s -- --no-webmail --domain mail.example.com
@@ -41,17 +46,19 @@ curl -fsSL https://raw.githubusercontent.com/dantoniomarte/Pigeon-AI-Mail/main/i
 # with the webmail UI
 curl -fsSL https://raw.githubusercontent.com/dantoniomarte/Pigeon-AI-Mail/main/install.sh | bash -s -- --domain mail.example.com
 
-# or with Docker
+# or with Docker (build the image first — see docs/DEPLOY.md)
+docker build -t pigeon-mail:local .
 docker run -d -p 8000:8000 -p 25:25 -p 587:587 \
   -v pigeon-data:/var/lib/pigeon \
-  ghcr.io/dantoniomarte/pigeon-mail:latest
+  pigeon-mail:local
 ```
 
-Build from source:
+### Build from source
 
 ```bash
 git clone https://github.com/dantoniomarte/Pigeon-AI-Mail && cd Pigeon-AI-Mail
-make build   # requires Rust 1.85+ (stable)
+make build                        # requires Rust 1.85+ (stable)
+sudo ./install.sh --domain mail.example.com --bin target/release/pigeon
 ```
 
 ## Deployment
