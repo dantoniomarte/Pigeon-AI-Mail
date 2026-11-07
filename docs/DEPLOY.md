@@ -11,10 +11,9 @@ deployment style that matches your host:
 | systemd | bare-metal VPS, no container runtime | `install.sh` |
 | Kubernetes | multi-tier / managed clusters | `deploy/k8s/` (skeleton) |
 
-> **Status:** the `pigeon` binary crate is landing in a parallel PR. Until it
-> does, these files describe the contract in [ARCHITECTURE.md](ARCHITECTURE.md)
-> and cannot produce a working server. Everything marked *placeholder* below is
-> a value the binary will publish when it ships.
+> **Note:** the `pigeon` binary (`serve` / `keygen` / `mcp`) ships in this
+> repository — build it with `make build` or let `install.sh --bin` install a
+> prebuilt one.
 
 ## Ports and volumes
 
