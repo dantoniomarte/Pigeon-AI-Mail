@@ -39,6 +39,10 @@ if [[ -f "${BASH_SOURCE[0]:-}" ]]; then
     SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 fi
 
+# Early validation (before any side effects): flags that reference paths
+# must point at things that exist.
+[[ -z "$WEBMAIL_LOCAL_DIR" || -d "$WEBMAIL_LOCAL_DIR" ]] || die "--webmail-dir not found: $WEBMAIL_LOCAL_DIR"
+
 readonly KNOWN_AGENTS="pi claude cursor codex grok opencode gentle-shell hermes generic docker remote"
 readonly SERVICE_USER="pigeon"
 readonly INSTALL_BIN="/usr/local/bin/pigeon"
@@ -56,6 +60,7 @@ DOMAIN=""
 API_PORT="8000"
 DATA_DIR="/var/lib/pigeon"
 LOCAL_BIN=""
+WEBMAIL_LOCAL_DIR=""
 WANT_WEBMAIL=1
 START_SERVICE=1
 AGENT_TARGETS=()
@@ -217,6 +222,8 @@ Server options:
   --data-dir <path>   Database directory (default: /var/lib/pigeon)
   --bin <path>        Install this local `pigeon` binary instead of downloading
   --no-webmail        Do not install the optional webmail bundle
+  --webmail-dir <p>   Install the webmail from this local directory
+                      (private repos, air-gapped hosts)
   --no-start          Write everything but do not enable/start the service
 
 Agent options:
@@ -263,7 +270,15 @@ while [[ $# -gt 0 ]]; do
             LOCAL_BIN="$2"
             shift 2
             ;;
+        --webmail-dir)
+            [[ $# -ge 2 ]] || die "--webmail-dir needs a value"
+            [[ -n "$2" ]] || die "--webmail-dir needs a non-empty path"
+            [[ "$WANT_WEBMAIL" -eq 1 ]] || die "--webmail-dir conflicts with --no-webmail"
+            WEBMAIL_LOCAL_DIR="$2"
+            shift 2
+            ;;
         --no-webmail)
+            [[ -z "$WEBMAIL_LOCAL_DIR" ]] || die "--no-webmail conflicts with --webmail-dir"
             WANT_WEBMAIL=0
             shift
             ;;
@@ -468,6 +483,20 @@ fi
 
 install_webmail() {
     local archive extract_dir url code
+    # --webmail-dir <path>: install a local bundle (private repos, air-gapped)
+    if [[ -n "$WEBMAIL_LOCAL_DIR" ]]; then
+        [[ -d "$WEBMAIL_LOCAL_DIR" ]] || die "--webmail-dir not found: $WEBMAIL_LOCAL_DIR"
+        info "installing webmail from local directory: $WEBMAIL_LOCAL_DIR"
+        rm -rf -- "$WEBMAIL_DIR"
+        install -d -m 0755 -o root -g root "$WEBMAIL_DIR"
+        if ! cp -R "${WEBMAIL_LOCAL_DIR}/." "$WEBMAIL_DIR/"; then
+            rm -rf -- "$WEBMAIL_DIR"
+            die "failed to copy webmail bundle from $WEBMAIL_LOCAL_DIR (partial copy removed)"
+        fi
+        chmod -R a+rX "$WEBMAIL_DIR"
+        info "installed webmail bundle: ${WEBMAIL_DIR}"
+        return 0
+    fi
     url="${RELEASE_BASE_URL}/pigeon-webmail.tar.gz"
     archive="$(mktemp --suffix=.tar.gz)"
     extract_dir="$(mktemp -d)"
@@ -479,7 +508,7 @@ install_webmail() {
         code="${code:-000}"
     fi
     if [[ "$code" != "200" ]]; then
-        info "no webmail bundle published yet (HTTP ${code}); continuing without webmail"
+        info "no webmail bundle available (private repo or no release yet); use --webmail-dir <path> for a local bundle"
         return 1
     fi
 
@@ -523,6 +552,8 @@ PIGEON_HTTP_ADDR=:${API_PORT}
 PIGEON_MASTER_KEY_FILE=${KEY_FILE}
 PIGEON_DB_PATH=${DATA_DIR}/pigeon.db
 PIGEON_SMTP_IN_ADDR=:25
+PIGEON_SMTP_HOSTNAME=mail.${DOMAIN}
+PIGEON_SMTP_OUT_STARTTLS=required
 PIGEON_WEBMAIL=${WEBMAIL_VALUE}
 PIGEON_LOG=info,json
 EOF
@@ -639,12 +670,13 @@ Next steps:
 2. TLS: put a reverse proxy (Caddy, nginx, Traefik) in front of :${API_PORT} and
    terminate TLS there. Pigeon speaks plain HTTP on the loopback/internal port.
 
-3. Create an API key on the host your TLS terminator points at (not necessarily
-   the mail domain):
-     curl -sS -X POST https://<your-api-host>/v1/keys \\
-       -H 'Content-Type: application/json' \\
-       -d '{"name":"first-key","scopes":["send","read"]}'
-   The response carries the pk_… token; it is shown once. See docs/ARCHITECTURE.md.
+3. Create an admin account and its API key on this host:
+     set -a; . /etc/pigeon/pigeon.env; set +a
+     pigeon keygen --account admin@${DOMAIN}
+   Save the pk_… token (shown once). IGNORE the 'master key' the command
+   also prints and its rotation instructions — the master key was already
+   created by this installer at /etc/pigeon/master.key and must NOT change.
+   See docs/ARCHITECTURE.md for additional keys with specific scopes.
 
 4. Webhooks: POST /v1/webhooks registers an HTTPS endpoint; delivery events are
    HMAC-signed. See docs/ARCHITECTURE.md and docs/DEPLOY.md.
