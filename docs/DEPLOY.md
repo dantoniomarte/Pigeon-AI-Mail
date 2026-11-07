@@ -134,6 +134,40 @@ What it performs, in order:
 The installer is idempotent: re-running upgrades the binary, restarts an active
 service, and leaves the master key and database alone.
 
+## First login & 2FA (day-one operator flow)
+
+Every login — yours, on any device — requires a **code**. The code role depends
+on the account state:
+
+1. **Create the admin account** (done during install):
+   `set -a; . /etc/pigeon/pigeon.env; set +a && pigeon keygen --account admin@<domain>`
+   Save the `pk_…` token it prints once (machines/agents use it; the webmail
+   uses sessions instead).
+
+2. **Mint your one-time login token** (account has no 2FA yet):
+   ```bash
+   curl -sS -X POST http://127.0.0.1:8000/v1/orgs/1/invitations \
+     -H "Authorization: Bearer pk_…" \
+     -H "Content-Type: application/json" \
+     -d '{"email":"admin@<domain>","role":"admin"}'
+   ```
+   The `token` in the response is shown once. (Create an org first with
+   `POST /v1/orgs {"name":"…"}` if none exists.)
+
+3. **Log in to the webmail** (`https://email.<domain>` behind your TLS
+   terminator): enter the email, paste the token as the code. The session
+   cookie lasts 7 days per browser.
+
+4. **Enroll 2FA immediately** — Settings → Security → *Enroll 2FA*: scan the
+   secret with any authenticator app, confirm the 6-digit code, and **save the
+   10 recovery codes** shown once. From now on every login on every device
+   asks for the TOTP code (or a recovery code if the phone is lost) — no more
+   invitation tokens, ever.
+
+Losing the phone: sign in with a recovery code, then re-enroll. Losing both:
+there is no override (by design) — restore from a DB backup or re-provision.
+Full contract: [API.md](API.md#dashboardwebmail-session-realm).
+
 ## Kubernetes
 
 `deploy/k8s/` is a **skeleton** — read
