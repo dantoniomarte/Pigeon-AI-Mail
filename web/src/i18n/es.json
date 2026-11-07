@@ -368,7 +368,8 @@
     "continue": "Continuar",
     "confirm": "Confirmar",
     "error": "Falló el ingreso. Revisá la dirección e intentá de nuevo.",
-    "emailPlaceholder": "vos@tu-dominio.tld"
+    "emailPlaceholder": "vos@tu-dominio.tld",
+    "useApiKey": "Usar una API key en su lugar"
   },
   "security": {
     "title": "Autenticación en dos pasos",

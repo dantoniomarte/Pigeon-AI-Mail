@@ -6,9 +6,10 @@ import { login, TwoFaRequiredError } from '../api';
 
 export interface LoginProps {
   onSuccess: () => void;
+  onUseApiKey?: () => void;
 }
 
-export default function Login({ onSuccess }: LoginProps): JSX.Element {
+export default function Login({ onSuccess, onUseApiKey }: LoginProps): JSX.Element {
   const { t } = useTranslation();
   const [email, setEmail] = useState('');
   const [code, setCode] = useState('');
@@ -83,6 +84,16 @@ export default function Login({ onSuccess }: LoginProps): JSX.Element {
           {submitting ? <Loader2 size={16} className="spin" aria-hidden="true" /> : <Mail size={16} aria-hidden="true" />}
           {needsCode ? t('login.confirm') : t('login.continue')}
         </button>
+
+        {onUseApiKey ? (
+          <button
+            type="button"
+            className="login-card__api-key-link"
+            onClick={onUseApiKey}
+          >
+            {t('login.useApiKey')}
+          </button>
+        ) : null}
       </form>
     </div>
   );

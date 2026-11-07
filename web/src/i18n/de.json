@@ -368,7 +368,8 @@
     "continue": "Weiter",
     "confirm": "Bestätigen",
     "error": "Anmeldung fehlgeschlagen. Adresse prüfen und erneut versuchen.",
-    "emailPlaceholder": "du@deine-domain.tld"
+    "emailPlaceholder": "du@deine-domain.tld",
+    "useApiKey": "Stattdessen einen API-Schlüssel verwenden"
   },
   "security": {
     "title": "Zwei-Faktor-Authentifizierung",

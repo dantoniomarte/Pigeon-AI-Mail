@@ -368,7 +368,8 @@
     "continue": "Continuer",
     "confirm": "Confirmer",
     "error": "Échec de la connexion. Vérifiez l'adresse et réessayez.",
-    "emailPlaceholder": "vous@votre-domaine.tld"
+    "emailPlaceholder": "vous@votre-domaine.tld",
+    "useApiKey": "Utiliser une clé API à la place"
   },
   "security": {
     "title": "Authentification à deux facteurs",

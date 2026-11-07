@@ -3486,3 +3486,19 @@ body[data-motion="on"] .admin__body > *:nth-child(2) {
 body[data-motion="on"] .admin__body > *:nth-child(3) {
   animation-delay: 0.08s;
 }
+
+/* Login: API key fallback link */
+.login-card__api-key-link {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 12.5px;
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 4px;
+  align-self: center;
+}
+
+.login-card__api-key-link:hover {
+  color: var(--text);
+}

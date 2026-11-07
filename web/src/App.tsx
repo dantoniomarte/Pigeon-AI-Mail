@@ -116,6 +116,7 @@ export default function App(): JSX.Element {
 
   const [apiKey, setApiKey] = useState<string | null>(() => getStoredKey());
   const [sessionActive, setSessionActive] = useState<boolean>(() => hasSession());
+  const [apiKeyFallback, setApiKeyFallback] = useState<boolean>(false);
   const [view, setView] = useState<View>('inbox');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [theme, setTheme] = useState<Theme>(() => readTheme());
@@ -505,19 +506,22 @@ export default function App(): JSX.Element {
     [t],
   );
 
-  // Session realm (PR #21): a stored API key works headless, but the dashboard
-  // UI requires a browser session — show Login until the cookie exists.
-  if (apiKey !== null && !sessionActive) {
+  // Login FIRST: a fresh visitor without a session sees the Login screen.
+  // Setup (API key) is a fallback for headless/agent usage via a link.
+  if (!sessionActive) {
     return (
       <Login
         onSuccess={() => {
           setSessionActive(true);
         }}
+        onUseApiKey={() => {
+          setApiKeyFallback(true);
+        }}
       />
     );
   }
 
-  if (apiKey === null) {
+  if (apiKey === null || apiKeyFallback) {
     return (
       <Setup
         onReady={(key) => {

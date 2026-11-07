@@ -368,7 +368,8 @@
     "continue": "Continue",
     "confirm": "Confirm",
     "error": "Sign-in failed. Check the address and try again.",
-    "emailPlaceholder": "you@your-domain.tld"
+    "emailPlaceholder": "you@your-domain.tld",
+    "useApiKey": "Use an API key instead"
   },
   "security": {
     "title": "Two-factor authentication",

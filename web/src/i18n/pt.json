@@ -368,7 +368,8 @@
     "continue": "Continuar",
     "confirm": "Confirmar",
     "error": "Falha ao entrar. Confira o endereço e tente de novo.",
-    "emailPlaceholder": "voce@seu-dominio.tld"
+    "emailPlaceholder": "voce@seu-dominio.tld",
+    "useApiKey": "Usar uma API key em vez disso"
   },
   "security": {
     "title": "Autenticação em duas etapas",
