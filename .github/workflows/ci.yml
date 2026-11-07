@@ -1,0 +1,146 @@
+# Pigeon Mail CI — lanes: hygiene, OpenAPI lint, Rust (test/clippy/fmt), deploy gate.
+#
+# PR lane: fast essential checks. Deploy lane (push to main): full verification.
+# All actions pinned to 40-char SHAs.
+
+name: CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}-${{ github.event_name }}-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  hygiene:
+    name: Repo hygiene
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Verify clean (secrets, placeholders, private refs)
+        run: scripts/verify-clean.sh
+
+  openapi-lint:
+    name: OpenAPI lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Parse OpenAPI spec + resolve every local $ref
+        if: hashFiles('openapi.yaml') != ''
+        run: |
+          python3 - <<'PY'
+          import yaml, re
+          d = yaml.safe_load(open("openapi.yaml"))
+          assert d["openapi"].startswith("3."), "expected OpenAPI 3.x"
+          paths = len(d.get("paths", {}))
+          schemas = len(d.get("components", {}).get("schemas", {}))
+          print(f"openapi.yaml OK · {paths} paths · {schemas} schemas")
+          assert paths > 0 and schemas > 0
+          # every local $ref resolves — single OR double quoted (regression: the old
+          # regex only matched double quotes while the file uses single quotes).
+          text = open("openapi.yaml").read()
+          refs = set(re.findall(r'''["']#/components/(schemas|responses|headers|securitySchemes)/([A-Za-z0-9_-]+)["']''', text))
+          kmap = {"schemas": "schemas", "responses": "responses",
+                  "headers": "headers", "securitySchemes": "securitySchemes"}
+          missing = [(k, n) for k, n in refs
+                     if n not in d["components"].get(kmap[k], {})]
+          assert not missing, f"unresolved refs: {missing}"
+          print(f"all {len(refs)} local $refs resolve")
+          PY
+      - name: jsonschema spot-checks (regression pins for the v2 contract)
+        if: hashFiles('openapi.yaml') != ''
+        run: |
+          python3 -m venv /tmp/venv
+          /tmp/venv/bin/pip install -q jsonschema pyyaml
+          /tmp/venv/bin/python3 - <<'PY'
+          import yaml, jsonschema
+          d = yaml.safe_load(open("openapi.yaml"))
+          C = d["components"]
+          # Validate against REAL schemas. The registry must live at the document
+          # ROOT ("components": C) because every schema's $ref points at
+          # #/components/... — attaching it under $defs breaks those refs.
+          def make_validator(schema):
+              full = {"$id": "urn:pigeon-doc", "components": C, **schema}
+              return jsonschema.Draft202012Validator(full)
+          def check(schema, instance, label):
+              make_validator(schema).validate(instance)
+              print(f"  {label}: OK")
+          print("jsonschema spot-checks:")
+          check(C["schemas"]["WebhookCreated"],
+                {"id":"whk_12345678","url":"https://x.dev/hook","events":["email.sent"],
+                 "created_at":"2026-11-06T00:00:00Z","secret":"whsec_"+"A"*43},
+                "WebhookCreated satisfiable (N-01 pin)")
+          check(C["schemas"]["PageMeta"],
+                {"total":0,"has_more":False,"next_offset":None},
+                "PageMeta null next_offset (N-04 pin)")
+          check(C["schemas"]["ApiKeyView"],
+                {"id":"key_12345678","name":"k","scopes":["send"],
+                 "created_at":"2026-11-06T00:00:00Z","revoked":False,"sandbox":False,
+                 "last_used_at":None},
+                "ApiKeyView null last_used_at (N-04 pin)")
+          check(C["schemas"]["DecryptedMessageView"],
+                {"id":"msg_12345678","from_addr":"a@b.co",
+                 "created_at":"2026-11-06T00:00:00Z",
+                 "auth":{"spf":"pass","dkim":"pass","dmarc":"pass"},
+                 "body_html":"<p>x</p>"},
+                "DecryptedMessageView html-only (N-06 pin)")
+          # Negative pin: a broken required member MUST fail (proves the check bites)
+          import jsonschema as js
+          broken = dict(C["schemas"]["WebhookCreated"])
+          broken["required"] = broken["required"] + ["nonexistent"]
+          try:
+              make_validator(broken).validate(
+                  {"id":"whk_12345678","url":"https://x.dev/hook","events":["email.sent"],
+                   "created_at":"2026-11-06T00:00:00Z","secret":"whsec_"+"A"*43})
+              raise SystemExit("FAIL: negative pin did not bite — check is vacuous")
+          except js.ValidationError:
+              print("  negative pin (broken required) correctly rejected")
+          print("all jsonschema spot-checks OK")
+          PY
+
+  rust:
+    name: Rust build, test, lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          components: clippy, rustfmt
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1
+      - name: Test
+        run: cargo test --workspace --locked
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Format check
+        run: cargo fmt --check
+
+  deploy:
+    name: Deploy gate
+    needs: [hygiene, rust]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Bootstrap deploy gate (no deployment target yet)
+        run: echo "Deploy pipeline is wired when the first release candidate exists."

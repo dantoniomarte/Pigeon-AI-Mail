@@ -1,0 +1,287 @@
+/* ==================================================================
+   Pigeon Mail — motion
+   Every animation and transition is gated behind body[data-motion="on"]
+   and further respects prefers-reduced-motion. Durations stay within
+   150–250ms; the only exception is the send spinner, which is a
+   functional progress indicator and still obeys both switches.
+   ================================================================== */
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(7px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes fade-in-left {
+  from {
+    opacity: 0;
+    transform: translateX(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.992);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateX(14px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+}
+
+@keyframes pop {
+  0% {
+    opacity: 0;
+    transform: scale(0.94);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ---------------------------------------------------------------- */
+/* Transitions                                                      */
+/* ---------------------------------------------------------------- */
+
+body[data-motion='on'] .btn,
+body[data-motion='on'] .icon-btn,
+body[data-motion='on'] .mail-row,
+body[data-motion='on'] .nav__item,
+body[data-motion='on'] .compose-btn,
+body[data-motion='on'] .chip,
+body[data-motion='on'] .segmented__item,
+body[data-motion='on'] .motion-switch,
+body[data-motion='on'] .motion-switch__thumb,
+body[data-motion='on'] .settings__tab,
+body[data-motion='on'] .select__input,
+body[data-motion='on'] .toast__close,
+body[data-motion='on'] .attachment,
+body[data-motion='on'] .field__input,
+body[data-motion='on'] .input,
+body[data-motion='on'] .mail-list__search input,
+body[data-motion='on'] .mail-list__search-clear {
+  transition-property: background-color, border-color, color, box-shadow, transform, opacity, filter, left;
+  transition-duration: var(--dur-2);
+  transition-timing-function: var(--ease);
+}
+
+body[data-motion='on'] .btn--primary:hover:not(:disabled),
+body[data-motion='on'] .compose-btn:hover {
+  transform: translateY(-1px);
+}
+
+body[data-motion='on'] .btn--primary:active:not(:disabled),
+body[data-motion='on'] .compose-btn:active {
+  transform: translateY(0) scale(0.995);
+}
+
+body[data-motion='on'] .mail-row:hover {
+  transform: translateX(2px);
+}
+
+body[data-motion='on'] .mail-row:active {
+  transform: scale(0.997);
+}
+
+body[data-motion='on'] .nav__item:hover svg {
+  transform: translateX(1px);
+}
+
+body[data-motion='on'] .nav__item svg {
+  transition: transform var(--dur-2) var(--ease);
+}
+
+body[data-motion='on'] .motion-switch__thumb {
+  transition-property: left, background-color;
+}
+
+/* ---------------------------------------------------------------- */
+/* Entrances                                                        */
+/* ---------------------------------------------------------------- */
+
+body[data-motion='on'] .mail-group__list > li {
+  animation: fade-in-up var(--dur-3) var(--ease) both;
+}
+
+body[data-motion='on'] .mail-group__list > li:nth-child(2) {
+  animation-delay: 20ms;
+}
+
+body[data-motion='on'] .mail-group__list > li:nth-child(3) {
+  animation-delay: 40ms;
+}
+
+body[data-motion='on'] .mail-group__list > li:nth-child(4) {
+  animation-delay: 60ms;
+}
+
+body[data-motion='on'] .mail-group__list > li:nth-child(5) {
+  animation-delay: 80ms;
+}
+
+body[data-motion='on'] .mail-group__list > li:nth-child(n + 6) {
+  animation-delay: 100ms;
+}
+
+body[data-motion='on'] .demo-banner,
+body[data-motion='on'] .state-card {
+  animation: fade-in var(--dur-2) var(--ease) both;
+}
+
+body[data-motion='on'] .reader__document {
+  animation: fade-in var(--dur-2) var(--ease);
+}
+
+body[data-motion='on'] .reader__header {
+  animation: fade-in-up var(--dur-3) var(--ease) both;
+}
+
+body[data-motion='on'] .reader__body {
+  animation: fade-in var(--dur-3) var(--ease) 40ms both;
+}
+
+body[data-motion='on'] .verdict {
+  animation: pop var(--dur-2) var(--ease) both;
+}
+
+body[data-motion='on'] .verdict:nth-child(2) {
+  animation-delay: 30ms;
+}
+
+body[data-motion='on'] .verdict:nth-child(3) {
+  animation-delay: 60ms;
+}
+
+body[data-motion='on'] .verdict:nth-child(4) {
+  animation-delay: 90ms;
+}
+
+body[data-motion='on'] .compose-overlay {
+  animation: fade-in var(--dur-1) var(--ease);
+}
+
+body[data-motion='on'] .compose {
+  animation: slide-up var(--dur-3) var(--ease) both;
+}
+
+body[data-motion='on'] .toast {
+  animation: toast-in var(--dur-3) var(--ease) both;
+}
+
+body[data-motion='on'] .settings__panels > .panel {
+  animation: fade-in-up var(--dur-3) var(--ease) both;
+}
+
+body[data-motion='on'] .settings__panels > .panel:nth-child(2) {
+  animation-delay: 40ms;
+}
+
+body[data-motion='on'] .setup__pitch {
+  animation: fade-in-up var(--dur-3) var(--ease) both;
+}
+
+body[data-motion='on'] .setup__card {
+  animation: slide-up var(--dur-3) var(--ease) 50ms both;
+}
+
+body[data-motion='on'] .setup__step {
+  animation: fade-in-left var(--dur-3) var(--ease) both;
+}
+
+body[data-motion='on'] .setup__step:nth-child(2) {
+  animation-delay: 50ms;
+}
+
+body[data-motion='on'] .setup__step:nth-child(3) {
+  animation-delay: 100ms;
+}
+
+body[data-motion='on'] .setup__footer {
+  animation: fade-in var(--dur-3) var(--ease) 100ms both;
+}
+
+body[data-motion='on'] .spin {
+  animation: spin 700ms linear infinite;
+}
+
+/* ---------------------------------------------------------------- */
+/* Drawer (tablet and below)                                        */
+/* ---------------------------------------------------------------- */
+
+@media (max-width: 1024px) {
+  body[data-motion='on'] .sidebar {
+    transition: transform var(--dur-3) var(--ease);
+  }
+
+  body[data-motion='on'] .scrim {
+    transition: opacity var(--dur-2) var(--ease);
+  }
+}
+
+/* ---------------------------------------------------------------- */
+/* Motion OFF and reduced motion                                    */
+/* ---------------------------------------------------------------- */
+
+body[data-motion='off'] *,
+body[data-motion='off'] *::before,
+body[data-motion='off'] *::after {
+  animation: none !important;
+  transition: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body[data-motion='on'] *,
+  body[data-motion='on'] *::before,
+  body[data-motion='on'] *::after {
+    animation-duration: 1ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+  }
+
+  body[data-motion='on'] .btn--primary:hover:not(:disabled),
+  body[data-motion='on'] .compose-btn:hover,
+  body[data-motion='on'] .mail-row:hover,
+  body[data-motion='on'] .mail-row:active,
+  body[data-motion='on'] .btn--primary:active:not(:disabled),
+  body[data-motion='on'] .nav__item:hover svg {
+    transform: none;
+  }
+}

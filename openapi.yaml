@@ -1,0 +1,3100 @@
+openapi: 3.1.0
+info:
+  title: Pigeon Mail API
+  version: 0.1.0
+  license:
+    name: AGPL-3.0-or-later
+    identifier: AGPL-3.0-or-later
+  description: 'Self-hosted encrypted email server. Contract counterpart of docs/API.md — the two are
+    kept in lockstep (CI lints this spec; docs/API.md is the prose mirror); CI lints this file''s YAML
+    validity.
+
+    Resend compatibility (deliberate deviations, see docs/FEATURES.md): send endpoints return **202 Accepted**
+    (at-least-once pipeline; Resend returns 200), idempotent replays return **409 with the original id**
+    (Resend returns 200), and `email.delivered`-style webhook field names are documented in the Event
+    schemas below. Everything else follows the Resend send schema.
+
+    Scopes: `send` → POST /v1/emails*, DELETE /v1/emails/{id}, template and draft writes. `read` → all GETs
+    (metadata + sealed blobs). `full` → everything, including decrypted bodies, keys, webhooks, domains, suppressions,
+    account admin, and multi-tenant administration (organizations, members, invitations, catch-all routing).
+
+    Errors are RFC 7807 `application/problem+json`. Rate limits (per key): 10 req/s sustained, burst 50;
+    daily send quota per account (default 50,000). Responses carry X-RateLimit-Limit / X-RateLimit-Remaining
+    / X-RateLimit-Reset; 429 carries Retry-After. Problem types: rate-limited, quota-exceeded, idempotent-replay,
+    not-cancellable, validation, unauthorized, forbidden, not-found, conflict, last-owner, mfa-required.
+
+    '
+servers:
+- url: https://mail.example.com
+security:
+- bearerKey: []
+tags:
+- name: send
+- name: receive
+- name: templates
+- name: drafts
+- name: domains
+- name: webhooks
+- name: account
+- name: orgs
+- name: catchall
+- name: system
+paths:
+  /healthz:
+    get:
+      tags:
+      - system
+      security: []
+      summary: Liveness probe
+      operationId: healthz
+      responses:
+        '200':
+          description: OK
+  /readyz:
+    get:
+      tags:
+      - system
+      security: []
+      summary: Readiness probe (store reachable + master key present)
+      operationId: readyz
+      responses:
+        '200':
+          description: Ready
+        '503':
+          $ref: '#/components/responses/Problem'
+  /v1/emails:
+    post:
+      tags:
+      - send
+      summary: Queue an email (202 — accepted, at-least-once delivery)
+      operationId: sendEmail
+      security:
+      - bearerKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendRequest'
+      responses:
+        '202':
+          description: Queued or scheduled
+          headers:
+            X-RateLimit-Limit: &id001
+              $ref: '#/components/headers/XRateLimitLimit'
+            X-RateLimit-Remaining: &id002
+              $ref: '#/components/headers/XRateLimitRemaining'
+            X-RateLimit-Reset: &id003
+              $ref: '#/components/headers/XRateLimitReset'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SendAccepted'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '413':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+      x-scopes:
+      - send
+    get:
+      tags:
+      - send
+      summary: List sent emails (newest first; bcc is never echoed)
+      operationId: listEmails
+      security:
+      - bearerKey: []
+      parameters:
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 50
+      - name: offset
+        in: query
+        schema:
+          type: integer
+          minimum: 0
+          default: 0
+      - name: status
+        in: query
+        schema:
+          $ref: '#/components/schemas/EmailStatus'
+      - name: tag
+        in: query
+        schema:
+          type: string
+          pattern: ^[a-z0-9-]{1,40}$
+      responses:
+        '200':
+          description: Page of emails (no bodies) with pagination metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmailPage'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+      x-scopes:
+      - read
+  /v1/emails/batch:
+    post:
+      tags:
+      - send
+      summary: Queue up to 100 emails (per-item results; one bad item never blocks the rest)
+      operationId: sendBatch
+      security:
+      - bearerKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - items
+              properties:
+                items:
+                  type: array
+                  maxItems: 100
+                  items:
+                    $ref: '#/components/schemas/SendRequest'
+      responses:
+        '202':
+          description: Per-item results
+          headers:
+            X-RateLimit-Limit: *id001
+            X-RateLimit-Remaining: *id002
+            X-RateLimit-Reset: *id003
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchResults'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/Problem'
+        '413':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+      x-scopes:
+      - send
+  /v1/emails/{id}:
+    parameters:
+    - name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^eml_[a-z0-9]{8,32}$
+    get:
+      tags:
+      - send
+      summary: Email lifecycle view (bcc never echoed)
+      operationId: getEmail
+      security:
+      - bearerKey: []
+      parameters:
+      - name: raw
+        in: query
+        schema:
+          type: boolean
+        description: 'Return the exact generated MIME. Only allowed for messages created by a sandbox
+          key — a sandbox key requesting a non-sandbox message gets 403.
+
+          '
+      responses:
+        '200':
+          description: The email (or, with raw=true on a sandbox message, the SandboxMessage)
+          content:
+            application/json:
+              schema:
+                oneOf:
+                - $ref: '#/components/schemas/EmailView'
+                - $ref: '#/components/schemas/SandboxMessage'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+      x-scopes:
+      - read
+    delete:
+      tags:
+      - send
+      summary: Cancel while queued/scheduled (409 not-cancellable otherwise)
+      operationId: cancelEmail
+      security:
+      - bearerKey: []
+      responses:
+        '202':
+          description: Cancelled
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - send
+  /v1/messages:
+    get:
+      tags:
+      - receive
+      summary: List one folder of messages (metadata only, never bodies) plus per-folder counts
+      operationId: listMessages
+      security:
+      - bearerKey: []
+      parameters:
+      - name: folder
+        in: query
+        schema:
+          type: string
+          enum:
+          - inbox
+          - sent
+          - spam
+          - trash
+          default: inbox
+        description: Folder to list. Omitted means inbox.
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 500
+          default: 100
+      - name: offset
+        in: query
+        schema:
+          type: integer
+          minimum: 0
+          default: 0
+      responses:
+        '200':
+          description: 'Page of messages, newest first, with the per-folder counts the sidebar renders
+            as badges. Message pages default larger than outbound pages (500 vs 100) because inbound triage
+            scans more rows; both expose has_more.
+
+            '
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessagePage'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/Problem'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+      x-scopes:
+      - read
+  /v1/messages/empty-trash:
+    post:
+      tags:
+      - receive
+      summary: Permanently delete every message in the trash folder
+      operationId: emptyTrash
+      security:
+      - bearerKey: []
+      responses:
+        '200':
+          description: Trash emptied (idempotent; an already-empty trash answers deleted 0)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmptyTrashResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+      x-scopes:
+      - send
+  /v1/messages/{id}:
+    parameters:
+    - name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^msg_[a-z0-9]{8,32}$
+    get:
+      tags:
+      - receive
+      summary: 'One inbound message. Default returns SealedMessageView (ciphertext only). Plaintext (DecryptedMessageView)
+        requires scope full.
+
+        '
+      operationId: getMessage
+      security:
+      - bearerKey: []
+      parameters:
+      - name: sealed
+        in: query
+        schema:
+          type: boolean
+          default: true
+        description: true (default) returns the sealed blob; false requests decryption (scope full required)
+      responses:
+        '200':
+          description: Sealed view (default) or decrypted view (scope full)
+          content:
+            application/json:
+              schema:
+                oneOf:
+                - $ref: '#/components/schemas/SealedMessageView'
+                - $ref: '#/components/schemas/DecryptedMessageView'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+      x-scopes:
+      - read
+    patch:
+      tags:
+      - receive
+      summary: Move a message between folders and/or set its read state
+      operationId: patchMessage
+      security:
+      - bearerKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MessagePatch'
+      responses:
+        '200':
+          description: The updated message metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+      x-scopes:
+      - send
+    delete:
+      tags:
+      - receive
+      summary: Permanently delete a message and its lifecycle metadata (trash follows the same route)
+      operationId: deleteMessage
+      security:
+      - bearerKey: []
+      responses:
+        '204':
+          description: Deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+      x-scopes:
+      - send
+  /v1/messages/{id}/attachments/{aid}:
+    parameters:
+    - name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^msg_[a-z0-9]{8,32}$
+    - name: aid
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^atc_[a-z0-9]{8,32}$
+    - name: sealed
+      in: query
+      schema:
+        type: boolean
+        default: true
+    get:
+      tags:
+      - receive
+      summary: Download one attachment (sealed blob by default; decrypted requires scope full)
+      operationId: getMessageAttachment
+      security:
+      - bearerKey: []
+      responses:
+        '200':
+          description: Attachment bytes (application/octet-stream)
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - read
+  /v1/templates:
+    get:
+      tags:
+      - templates
+      summary: List templates
+      operationId: listTemplates
+      security:
+      - bearerKey: []
+      responses:
+        '200':
+          description: Templates
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Template'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+      x-scopes:
+      - read
+    post:
+      tags:
+      - templates
+      summary: Create template (name unique per account)
+      operationId: createTemplate
+      security:
+      - bearerKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TemplateCreate'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Template'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+      x-scopes:
+      - send
+  /v1/templates/{id}:
+    parameters:
+    - name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^tpl_[a-z0-9]{8,32}$
+    get:
+      tags:
+      - templates
+      summary: Get template
+      operationId: getTemplate
+      security:
+      - bearerKey: []
+      responses:
+        '200':
+          description: The template
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Template'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+      x-scopes:
+      - read
+    patch:
+      tags:
+      - templates
+      summary: Partial update (id/updated_at are server-owned; 409 on duplicate name)
+      operationId: updateTemplate
+      security:
+      - bearerKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TemplatePatch'
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Template'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+      x-scopes:
+      - send
+    delete:
+      tags:
+      - templates
+      summary: Delete template
+      operationId: deleteTemplate
+      security:
+      - bearerKey: []
+      responses:
+        '204':
+          description: Deleted
+        '404':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+      x-scopes:
+      - send
+  /v1/templates/{id}/test-send:
+    parameters:
+    - name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^tpl_[a-z0-9]{8,32}$
+    post:
+      tags:
+      - templates
+      summary: Send a rendered template test
+      operationId: testTemplate
+      security:
+      - bearerKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - to
+              properties:
+                to:
+                  type: array
+                  items:
+                    type: string
+                    format: idn-email
+                  maxItems: 5
+                variables:
+                  type: object
+                  additionalProperties: true
+      responses:
+        '202':
+          description: Queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SendAccepted'
+        '402':
+          $ref: '#/components/responses/Problem'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+      x-scopes:
+      - send
+  /v1/drafts:
+    get:
+      tags:
+      - drafts
+      summary: List saved drafts (newest save first)
+      operationId: listDrafts
+      security:
+      - bearerKey: []
+      parameters:
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 50
+      - name: offset
+        in: query
+        schema:
+          type: integer
+          minimum: 0
+          default: 0
+      responses:
+        '200':
+          description: Page of drafts, bodies included (a draft is small and the
+            compose box needs it back verbatim)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DraftPage'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/Problem'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+      x-scopes:
+      - read
+    post:
+      tags:
+      - drafts
+      summary: Save a new draft
+      operationId: createDraft
+      security:
+      - bearerKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DraftCreate'
+      responses:
+        '201':
+          description: Draft saved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Draft'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/Problem'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+      x-scopes:
+      - send
+  /v1/drafts/{id}:
+    parameters:
+    - name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^drf_[a-z0-9]{8,32}$
+    get:
+      tags:
+      - drafts
+      summary: Get one draft, bodies included
+      operationId: getDraft
+      security:
+      - bearerKey: []
+      responses:
+        '200':
+          description: The draft
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Draft'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - read
+    patch:
+      tags:
+      - drafts
+      summary: Partial update; present members replace, absent members are kept,
+        updated_at is bumped
+      operationId: updateDraft
+      security:
+      - bearerKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DraftPatch'
+      responses:
+        '200':
+          description: Updated draft
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Draft'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - send
+    delete:
+      tags:
+      - drafts
+      summary: Discard a draft
+      operationId: deleteDraft
+      security:
+      - bearerKey: []
+      responses:
+        '204':
+          description: Deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - send
+  /v1/drafts/{id}/send:
+    parameters:
+    - name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^drf_[a-z0-9]{8,32}$
+    post:
+      tags:
+      - drafts
+      summary: Send a draft (same validation, sealing and queue path as POST /v1/emails;
+        the draft is deleted only after the email is accepted)
+      operationId: sendDraft
+      security:
+      - bearerKey: []
+      responses:
+        '202':
+          description: Queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SendAccepted'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+      x-scopes:
+      - send
+  /v1/domains:
+    get:
+      tags:
+      - domains
+      summary: List managed domains
+      operationId: listDomains
+      security:
+      - bearerKey: []
+      responses:
+        '200':
+          description: Domains
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Domain'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - full
+    post:
+      tags:
+      - domains
+      summary: Add domain (returns DNS records to publish; priority is a separate field, never inside
+        value)
+      operationId: addDomain
+      security:
+      - bearerKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - name
+              properties:
+                name:
+                  type: string
+                  format: hostname
+      responses:
+        '201':
+          description: Added. Fetch the DNS records to publish via GET /v1/domains/{id}/dns.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Domain'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - full
+  /v1/domains/{id}:
+    parameters:
+    - name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^dom_[a-z0-9]{8,32}$
+    get:
+      tags:
+      - domains
+      summary: Domain verification status (verify=now forces a re-check)
+      operationId: getDomain
+      security:
+      - bearerKey: []
+      parameters:
+      - name: verify
+        in: query
+        schema:
+          type: string
+          enum:
+          - now
+      responses:
+        '200':
+          description: The domain
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Domain'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - full
+  /v1/domains/{id}/dns:
+    parameters:
+    - name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^dom_[a-z0-9]{8,32}$
+    get:
+      tags:
+      - domains
+      summary: Exact DNS records to publish (introspection sub-resource)
+      operationId: getDomainDns
+      security:
+      - bearerKey: []
+      responses:
+        '200':
+          description: DNS record list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DnsRecord'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - full
+  /v1/webhooks:
+    get:
+      tags:
+      - webhooks
+      summary: List webhooks (secrets are never returned after creation)
+      operationId: listWebhooks
+      security:
+      - bearerKey: []
+      responses:
+        '200':
+          description: Webhooks
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/WebhookView'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - full
+    post:
+      tags:
+      - webhooks
+      summary: Create webhook (secret returned once)
+      operationId: createWebhook
+      security:
+      - bearerKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookCreate'
+      responses:
+        '201':
+          description: Created (secret shown once)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookCreated'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - full
+  /v1/webhooks/{id}:
+    parameters:
+    - name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^whk_[a-z0-9]{8,32}$
+    get:
+      tags:
+      - webhooks
+      summary: Get webhook (no secret)
+      operationId: getWebhook
+      security:
+      - bearerKey: []
+      responses:
+        '200':
+          description: The webhook
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookView'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - full
+    delete:
+      tags:
+      - webhooks
+      summary: Delete webhook
+      operationId: deleteWebhook
+      security:
+      - bearerKey: []
+      responses:
+        '204':
+          description: Deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - full
+  /v1/suppressions:
+    get:
+      tags:
+      - account
+      summary: List suppressed recipients (hard bounces auto-add; remove only with user confirmation)
+      operationId: listSuppressions
+      security:
+      - bearerKey: []
+      parameters:
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 500
+      - name: offset
+        in: query
+        schema:
+          type: integer
+          minimum: 0
+      responses:
+        '200':
+          description: Suppressions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuppressionPage'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - full
+    post:
+      tags:
+      - account
+      summary: Suppress recipients manually
+      operationId: addSuppressions
+      security:
+      - bearerKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - addresses
+              properties:
+                addresses:
+                  type: array
+                  items:
+                    type: string
+                    format: idn-email
+                  maxItems: 100
+                reason:
+                  type: string
+                  enum:
+                  - manual
+                  - bounce
+                  - complaint
+      responses:
+        '201':
+          description: Suppressed
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - full
+  /v1/suppressions/{address}:
+    delete:
+      tags:
+      - account
+      summary: Remove one suppression (address path, idn-email)
+      operationId: removeSuppression
+      security:
+      - bearerKey: []
+      parameters:
+      - name: address
+        in: path
+        required: true
+        schema:
+          type: string
+          format: idn-email
+      responses:
+        '204':
+          description: Removed
+        '404':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - full
+  /v1/orgs:
+    get:
+      tags:
+      - orgs
+      summary: Organizations the account belongs to (empty for a personal workspace)
+      operationId: listOrgs
+      security:
+      - bearerKey: []
+      - sessionCookie: []
+      responses:
+        '200':
+          description: The organizations of the account, each carrying its role
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Org'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+      x-scopes:
+      - full
+    post:
+      tags:
+      - orgs
+      summary: Create an organization (the caller becomes its owner)
+      operationId: createOrg
+      security:
+      - bearerKey: []
+      - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+              - name
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 100
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Org'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - full
+  /v1/orgs/{id}/members:
+    get:
+      tags:
+      - orgs
+      summary: Members of an organization (owner/admin of that organization only)
+      operationId: listOrgMembers
+      security:
+      - bearerKey: []
+      - sessionCookie: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          description: Members, oldest account first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/OrgMember'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - full
+    post:
+      tags:
+      - orgs
+      summary: Create a member account and return its one-time bootstrap token
+      description: 'Creates the account immediately (there is no password realm in v0.1) and returns
+        the bootstrap token that logs it in. The token is shown once: only its Argon2id hash is
+        stored, presenting it in `code` at `POST /v1/auth/login` burns it, and a replay is refused.
+
+        '
+      operationId: createOrgMember
+      security:
+      - bearerKey: []
+      - sessionCookie: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+              - email
+              properties:
+                email:
+                  type: string
+                  format: idn-email
+                display_name:
+                  type: string
+                  maxLength: 100
+                role:
+                  type: string
+                  enum:
+                  - admin
+                  - member
+                  default: member
+                  description: '`owner` is not grantable here: ownership moves by patching an
+                    existing member.
+
+                    '
+      responses:
+        '201':
+          description: Created, with the one-time bootstrap token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrgMemberCreated'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - full
+  /v1/orgs/{id}/members/{account_id}:
+    patch:
+      tags:
+      - orgs
+      summary: Change the role and/or display name of a member
+      description: 'Only an owner may grant or take away `owner`. Demoting the last owner of an
+        organization is refused with problem type `last-owner`.
+
+        '
+      operationId: patchOrgMember
+      security:
+      - bearerKey: []
+      - sessionCookie: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+      - name: account_id
+        in: path
+        required: true
+        schema:
+          type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              minProperties: 1
+              properties:
+                role:
+                  type: string
+                  enum:
+                  - owner
+                  - admin
+                  - member
+                display_name:
+                  type: string
+                  maxLength: 100
+      responses:
+        '200':
+          description: Updated member
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrgMember'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          description: Problem type `last-owner` (the organization would lose its only owner)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - full
+  /v1/orgs/{id}/invitations:
+    get:
+      tags:
+      - orgs
+      summary: Invitations of an organization, pending and historical (owner/admin only)
+      operationId: listOrgInvitations
+      security:
+      - bearerKey: []
+      - sessionCookie: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          description: Invitations, newest first (the token is never listed)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Invitation'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - full
+    post:
+      tags:
+      - orgs
+      summary: Invite an address to the organization (returns the token once)
+      description: 'No mail is sent in v0.1: the response carries the invitation token, the admin
+        delivers it out of band, and `POST /v1/invitations/accept` redeems it. Re-inviting the same
+        address replaces the pending token.
+
+        '
+      operationId: createOrgInvitation
+      security:
+      - bearerKey: []
+      - sessionCookie: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+              - email
+              properties:
+                email:
+                  type: string
+                  format: idn-email
+                role:
+                  type: string
+                  enum:
+                  - admin
+                  - member
+                  default: member
+                  description: '`owner` is never grantable by invitation.
+
+                    '
+      responses:
+        '201':
+          description: Created, with the one-time token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InvitationCreated'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - full
+  /v1/orgs/{id}/invitations/{invitation_id}:
+    delete:
+      tags:
+      - orgs
+      summary: Revoke an invitation (the token stops working)
+      operationId: deleteOrgInvitation
+      security:
+      - bearerKey: []
+      - sessionCookie: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+      - name: invitation_id
+        in: path
+        required: true
+        schema:
+          type: integer
+      responses:
+        '204':
+          description: Deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - full
+  /v1/invitations/accept:
+    post:
+      tags:
+      - orgs
+      summary: Redeem an invitation token against the authenticated account
+      description: 'Links the authenticated account to the organization with the invited role and
+        burns the token; a replay is `404` and an already-accepted or expired token is never returned
+        by the lookup. The invitation must be addressed to the authenticated account address (`403`
+        otherwise), so one member cannot spend the invitation of another. Creating the account is
+        `POST /v1/orgs/{id}/members`, which returns a bootstrap token — accepting an invitation never
+        mints a mailbox.
+
+        '
+      operationId: acceptInvitation
+      security:
+      - bearerKey: []
+      - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+              - token
+              properties:
+                token:
+                  type: string
+                  minLength: 1
+      responses:
+        '200':
+          description: Joined; the organization and the role the account now holds
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Org'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - full
+  /v1/catchall:
+    get:
+      tags:
+      - catchall
+      summary: Every catch-all rule (owner/admin of the organization)
+      operationId: listCatchallRules
+      security:
+      - bearerKey: []
+      - sessionCookie: []
+      responses:
+        '200':
+          description: Rules, oldest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CatchallRule'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - full
+  /v1/catchall/{domain}:
+    put:
+      tags:
+      - catchall
+      summary: Set what happens to unknown local parts of a domain
+      description: '`route` delivers into `target_account_id`, which must be a mailbox of that same
+        domain; `discard` accepts the message and drops it, so a sender cannot tell a real address
+        from a made-up one. With no rule the inbound server keeps answering `550`.
+
+        '
+      operationId: putCatchallRule
+      security:
+      - bearerKey: []
+      - sessionCookie: []
+      parameters:
+      - name: domain
+        in: path
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+              - action
+              properties:
+                action:
+                  type: string
+                  enum:
+                  - route
+                  - discard
+                target_account_id:
+                  type: integer
+                  description: Required for `route`, forbidden for `discard`
+      responses:
+        '200':
+          description: The rule now in force
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CatchallRule'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - full
+    delete:
+      tags:
+      - catchall
+      summary: Remove a catch-all rule (unknown recipients go back to 550)
+      operationId: deleteCatchallRule
+      security:
+      - bearerKey: []
+      - sessionCookie: []
+      parameters:
+      - name: domain
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '204':
+          description: Deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - full
+  /v1/account/keys:
+    post:
+      tags:
+      - account
+      summary: Create API key (pk_ shown once; Argon2id hash stored)
+      operationId: createApiKey
+      security:
+      - bearerKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApiKeyCreate'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiKeyCreated'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - full
+    get:
+      tags:
+      - account
+      summary: List API keys (metadata only — never the key material)
+      operationId: listApiKeys
+      security:
+      - bearerKey: []
+      responses:
+        '200':
+          description: Keys
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ApiKeyView'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - full
+  /v1/account/keys/{id}:
+    parameters:
+    - name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^key_[a-z0-9]{8,32}$
+    patch:
+      tags:
+      - account
+      summary: 'Update key (revoke: revoked=true; sandbox toggle)'
+      operationId: updateApiKey
+      security:
+      - bearerKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApiKeyPatch'
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiKeyView'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - full
+    delete:
+      tags:
+      - account
+      summary: Delete key (immediate; audited)
+      operationId: deleteApiKey
+      security:
+      - bearerKey: []
+      responses:
+        '204':
+          description: Deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - full
+  /v1/auth/login:
+    post:
+      tags:
+      - account
+      security: []
+      summary: 'Dashboard/webmail session login (browser flows; API keys are for machines). Body: email,
+        password, and `code` in one of three roles: a TOTP or recovery code when 2FA is enrolled, a
+        one-time bootstrap/invitation token for an account that has no 2FA, or nothing at all for the
+        documented v0.1 installer-created account. Sets an HttpOnly session cookie (SameSite=Strict).
+
+        '
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - email
+              - password
+              properties:
+                email:
+                  type: string
+                  format: idn-email
+                password:
+                  type: string
+                  minLength: 8
+                code:
+                  type: string
+                  description: 'TOTP (6 or 8 digits) or one-time recovery code when 2FA is enrolled;
+                    otherwise a one-time bootstrap/invitation token from POST /v1/orgs/{id}/members
+                    or POST /v1/orgs/{id}/invitations. A code that matches nothing is a 401 — never
+                    a silent success.
+
+                    '
+      responses:
+        '200':
+          description: Session established (no 2FA enrolled, or code accepted)
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+              description: pigeon_session=...; HttpOnly; SameSite=Strict
+        '401':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '403':
+          description: 2FA enrolled and no/invalid code — problem type mfa-required (the challenge)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /v1/account/2fa/enroll:
+    post:
+      tags:
+      - account
+      summary: Begin TOTP enrollment — SESSION auth; re-auth required (current password)
+      operationId: enroll2fa
+      security:
+      - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - password
+              properties:
+                password:
+                  type: string
+      responses:
+        '200':
+          description: Provisioning data
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - secret_base32
+                - otpauth_uri
+                properties:
+                  secret_base32:
+                    type: string
+                  otpauth_uri:
+                    type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1/account/2fa/activate:
+    post:
+      tags:
+      - account
+      summary: Activate TOTP (returns 10 one-time recovery codes, shown once)
+      operationId: activate2fa
+      security:
+      - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TotpCode'
+      responses:
+        '200':
+          description: Activated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  recovery_codes:
+                    type: array
+                    items:
+                      type: string
+                    maxItems: 10
+                    minItems: 10
+        '422':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1/account/2fa/disable:
+    post:
+      tags:
+      - account
+      summary: Disable 2FA — SESSION auth; requires a current valid code (TOTP or recovery code)
+      operationId: disable2fa
+      security:
+      - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TotpCode'
+      responses:
+        '204':
+          description: Disabled
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/Problem'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/account/2fa/verify:
+    post:
+      tags:
+      - account
+      summary: Verify a TOTP/recovery code for the current session (step-up checks)
+      operationId: verify2fa
+      security:
+      - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TotpCode'
+      responses:
+        '200':
+          description: Valid
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/Problem'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+      description: 'Replay protection: the service layer persists the last-used TOTP counter (crypto crate
+        owns stateless verify; the service owes consume-once). Attempt limiting: 5 failures/15 min → 429.'
+components:
+  securitySchemes:
+    bearerKey:
+      type: http
+      scheme: bearer
+      description: 'API key pk_... (43 base64url chars). Privilege tier per operation in x-scopes: send
+        | read | full (machine-readable extension; bearer schemes cannot carry OAuth-style scopes).'
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: pigeon_session
+      description: Dashboard/webmail session (HttpOnly, SameSite=Strict). 2FA protects these sessions.
+  responses:
+    Problem:
+      description: RFC 7807 problem
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Unauthorized:
+      description: Missing/invalid key or session
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    RateLimited:
+      description: Rate limit or quota exceeded
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+            description: seconds
+        X-RateLimit-Limit:
+          $ref: '#/components/headers/XRateLimitLimit'
+        X-RateLimit-Remaining:
+          $ref: '#/components/headers/XRateLimitRemaining'
+        X-RateLimit-Reset:
+          $ref: '#/components/headers/XRateLimitReset'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+  headers:
+    XRateLimitLimit:
+      description: sustained req/s limit for the key
+      schema:
+        type: integer
+    XRateLimitRemaining:
+      description: requests remaining in the current window
+      schema:
+        type: integer
+    XRateLimitReset:
+      description: unix seconds when the window resets
+      schema:
+        type: integer
+  schemas:
+    Problem:
+      type: object
+      required:
+      - type
+      - title
+      - status
+      properties:
+        type:
+          type: string
+          enum:
+          - rate-limited
+          - quota-exceeded
+          - idempotent-replay
+          - not-cancellable
+          - validation
+          - unauthorized
+          - forbidden
+          - not-found
+          - conflict
+          - payload-too-large
+          - unavailable
+          - mfa-required
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        id:
+          type: string
+          description: original email id (idempotent-replay only)
+        quota:
+          type: object
+          properties:
+            limit:
+              type: integer
+            used:
+              type: integer
+            reset_at:
+              type: string
+              format: date-time
+        errors:
+          type: array
+          items:
+            type: object
+            required:
+            - field
+            - message
+            properties:
+              field:
+                type: string
+              code:
+                type: string
+              message:
+                type: string
+    SendRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - from
+      - to
+      properties:
+        from:
+          type: string
+          maxLength: 320
+        to:
+          type: array
+          maxItems: 50
+          items:
+            type: string
+            format: idn-email
+        cc:
+          type: array
+          items:
+            type: string
+            format: idn-email
+        bcc:
+          type: array
+          items:
+            type: string
+            format: idn-email
+        reply_to:
+          type: string
+          format: idn-email
+        subject:
+          type: string
+          maxLength: 998
+        html:
+          type: string
+        text:
+          type: string
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+          description: 'Custom headers. Server-set denylist: From, To, Cc, Bcc, Reply-To, Return-Path,
+            Received, Message-ID, Date, Content-Type, Content-Transfer-Encoding, DKIM-Signature, Authentication-Results.
+            Names and values must not contain CR/LF (422 otherwise). Bcc is envelope-only and never appears
+            in the generated MIME.
+
+            '
+        attachments:
+          type: array
+          maxItems: 10
+          items:
+            $ref: '#/components/schemas/Attachment'
+        tags:
+          type: array
+          maxItems: 10
+          items:
+            type: string
+            pattern: ^[a-z0-9-]{1,40}$
+        template_id:
+          type: string
+          pattern: ^tpl_[a-z0-9]{8,32}$
+        variables:
+          type: object
+          additionalProperties: true
+        scheduled_at:
+          type: string
+          format: date-time
+        idempotency_key:
+          type: string
+          maxLength: 255
+      description: 'Total recipients across to+cc+bcc ≤ 50. Attachments ≤ 25 MB total (base64-inflated
+        ≤ 35 MB request body → 413 beyond). Idempotency dedup: the key is held until the send completes
+        AND for 24 h after — scheduled sends are covered for their whole horizon.
+
+        '
+    Attachment:
+      type: object
+      additionalProperties: false
+      required:
+      - filename
+      - content
+      properties:
+        filename:
+          type: string
+          maxLength: 255
+        content:
+          type: string
+          contentEncoding: base64
+          description: server validates base64; ≤ 25 MB decoded, 25 MB total across attachments
+        content_id:
+          type: string
+          description: inline reference as cid:content_id
+    SendAccepted:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - status
+      properties:
+        id:
+          type: string
+          pattern: ^eml_[a-z0-9]{8,32}$
+        status:
+          type: string
+          enum:
+          - queued
+          - scheduled
+        e2e:
+          type: string
+          enum:
+          - sealed
+          - tls_only
+          - plaintext_override
+    BatchResults:
+      type: object
+      additionalProperties: false
+      required:
+      - results
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/BatchResult'
+    BatchResult:
+      type: object
+      required:
+      - index
+      properties:
+        index:
+          type: integer
+          minimum: 0
+        id:
+          type: string
+        status:
+          type: string
+        error:
+          $ref: '#/components/schemas/Problem'
+    EmailStatus:
+      type: string
+      enum:
+      - queued
+      - scheduled
+      - sending
+      - sent
+      - deferred
+      - bounced
+      - failed
+      - cancelled
+    EmailView:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - status
+      - created_at
+      properties:
+        id:
+          type: string
+        status:
+          $ref: '#/components/schemas/EmailStatus'
+        created_at:
+          type: string
+          format: date-time
+        last_event:
+          type: string
+          format: date-time
+          description: timestamp of the latest lifecycle transition
+        from:
+          type: string
+        to:
+          type: array
+          items:
+            type: string
+        cc:
+          type: array
+          items:
+            type: string
+        subject:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        sandbox:
+          type: boolean
+          description: true when created by a sandbox key
+        e2e:
+          type: string
+          enum:
+          - sealed
+          - tls_only
+          - plaintext_override
+        mx:
+          type: object
+          properties:
+            host:
+              type: string
+            ip:
+              type: string
+            tls:
+              type: string
+        deferred:
+          type: object
+          properties:
+            next_attempt_at:
+              type: string
+              format: date-time
+            attempts:
+              type: integer
+        bounced:
+          type: object
+          properties:
+            code:
+              type: string
+            reason:
+              type: string
+            hard:
+              type: boolean
+        failed:
+          type: object
+          properties:
+            reason:
+              type: string
+    SandboxMessage:
+      type: object
+      required:
+      - id
+      - mime
+      properties:
+        id:
+          type: string
+        mime:
+          type: string
+          description: exact generated MIME (sandbox only)
+    PageMeta:
+      type: object
+      required:
+      - total
+      - has_more
+      - next_offset
+      properties:
+        total:
+          type: integer
+        has_more:
+          type: boolean
+        next_offset:
+          type:
+          - integer
+          - 'null'
+    EmailPage:
+      type: object
+      required:
+      - items
+      - page
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/EmailView'
+        page:
+          $ref: '#/components/schemas/PageMeta'
+    SealedMessageView:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - from_addr
+      - created_at
+      - auth
+      - sealed_body
+      properties:
+        id:
+          type: string
+          pattern: ^msg_[a-z0-9]{8,32}$
+        from_addr:
+          type: string
+        to:
+          type: array
+          items:
+            type: string
+        subject:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        sealed_body:
+          type: string
+          contentEncoding: base64
+        auth:
+          $ref: '#/components/schemas/AuthVerdict'
+        attachments:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required:
+            - id
+            - filename
+            - size
+            properties:
+              id:
+                type: string
+                pattern: ^atc_[a-z0-9]{8,32}$
+              filename:
+                type: string
+              size:
+                type: integer
+          description: attachment ids discoverable while content stays sealed
+    DecryptedMessageView:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - from_addr
+      - created_at
+      - auth
+      properties:
+        id:
+          type: string
+        from_addr:
+          type: string
+        to:
+          type: array
+          items:
+            type: string
+        subject:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        body_text:
+          type: string
+          description: plain-text part; absent for html-only messages
+        body_html:
+          type: string
+          description: html part; absent for text-only messages
+        attachments:
+          type: array
+          items:
+            type: object
+            required:
+            - id
+            - filename
+            - size
+            properties:
+              id:
+                type: string
+                pattern: ^atc_[a-z0-9]{8,32}$
+              filename:
+                type: string
+              size:
+                type: integer
+        auth:
+          $ref: '#/components/schemas/AuthVerdict'
+    AuthVerdict:
+      type: object
+      additionalProperties: false
+      required:
+      - spf
+      - dkim
+      - dmarc
+      properties:
+        spf:
+          type: string
+          enum:
+          - pass
+          - fail
+          - softfail
+          - none
+          - neutral
+        dkim:
+          type: string
+          enum:
+          - pass
+          - fail
+          - none
+        dmarc:
+          type: string
+          enum:
+          - pass
+          - fail
+          - none
+        tls:
+          type: string
+    MessageSummary:
+      type: object
+      additionalProperties: false
+      required:
+      - folder
+      - read
+      properties:
+        id:
+          type: string
+          pattern: ^msg_[a-z0-9]{8,32}$
+        from_addr:
+          type: string
+        subject:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        folder:
+          type: string
+          enum:
+          - inbox
+          - sent
+          - spam
+          - trash
+        read:
+          type: boolean
+    MessagePage:
+      type: object
+      additionalProperties: false
+      required:
+      - items
+      - page
+      - counts
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/MessageSummary'
+        page:
+          $ref: '#/components/schemas/PageMeta'
+        counts:
+          $ref: '#/components/schemas/FolderCounts'
+    FolderCounts:
+      type: object
+      additionalProperties: false
+      required:
+      - inbox
+      - sent
+      - spam
+      - trash
+      properties:
+        inbox:
+          type: integer
+          minimum: 0
+        sent:
+          type: integer
+          minimum: 0
+        spam:
+          type: integer
+          minimum: 0
+        trash:
+          type: integer
+          minimum: 0
+    MessagePatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        folder:
+          type: string
+          enum:
+          - inbox
+          - sent
+          - spam
+          - trash
+        read:
+          type: boolean
+    EmptyTrashResult:
+      type: object
+      additionalProperties: false
+      required:
+      - deleted
+      properties:
+        deleted:
+          type: integer
+          minimum: 0
+    Template:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - name
+      - updated_at
+      properties:
+        id:
+          type: string
+          pattern: ^tpl_[a-z0-9]{8,32}$
+        name:
+          type: string
+          maxLength: 100
+        description:
+          type: string
+          maxLength: 500
+          description: short human description; omitted when empty
+        subject:
+          type: string
+        html:
+          type: string
+        text:
+          type: string
+        updated_at:
+          type: string
+          format: date-time
+    TemplateCreate:
+      type: object
+      additionalProperties: false
+      required:
+      - name
+      properties:
+        name:
+          type: string
+          maxLength: 100
+        description:
+          type: string
+          maxLength: 500
+        subject:
+          type: string
+        html:
+          type: string
+        text:
+          type: string
+    TemplatePatch:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          maxLength: 100
+        description:
+          type: string
+          maxLength: 500
+        subject:
+          type: string
+        html:
+          type: string
+        text:
+          type: string
+    Draft:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - from
+      - to
+      - cc
+      - bcc
+      - attachments
+      - tags
+      - updated_at
+      properties:
+        id:
+          type: string
+          pattern: ^drf_[a-z0-9]{8,32}$
+        from:
+          type: string
+          description: empty when the composer has no sender yet
+        to:
+          type: array
+          items:
+            type: string
+            format: idn-email
+        cc:
+          type: array
+          items:
+            type: string
+            format: idn-email
+        bcc:
+          type: array
+          items:
+            type: string
+            format: idn-email
+          description: a draft echoes bcc back to its own account — nothing has left yet
+        subject:
+          type: string
+        html:
+          type: string
+        text:
+          type: string
+        attachments:
+          type: array
+          maxItems: 10
+          items:
+            $ref: '#/components/schemas/Attachment'
+        tags:
+          type: array
+          maxItems: 10
+          items:
+            type: string
+            pattern: ^[a-z0-9-]{1,40}$
+        updated_at:
+          type: string
+          format: date-time
+    DraftCreate:
+      type: object
+      additionalProperties: false
+      description: every member is optional — a draft is written while it is still being written
+      properties:
+        from:
+          type: string
+          maxLength: 320
+        to:
+          type: array
+          maxItems: 50
+          items:
+            type: string
+            format: idn-email
+        cc:
+          type: array
+          items:
+            type: string
+            format: idn-email
+        bcc:
+          type: array
+          items:
+            type: string
+            format: idn-email
+        subject:
+          type: string
+          maxLength: 998
+        html:
+          type: string
+        text:
+          type: string
+        attachments:
+          type: array
+          maxItems: 10
+          items:
+            $ref: '#/components/schemas/Attachment'
+        tags:
+          type: array
+          maxItems: 10
+          items:
+            type: string
+            pattern: ^[a-z0-9-]{1,40}$
+    DraftPatch:
+      type: object
+      additionalProperties: false
+      description: present members replace the stored value, absent members are kept
+      properties:
+        from:
+          type: string
+          maxLength: 320
+        to:
+          type: array
+          maxItems: 50
+          items:
+            type: string
+            format: idn-email
+        cc:
+          type: array
+          items:
+            type: string
+            format: idn-email
+        bcc:
+          type: array
+          items:
+            type: string
+            format: idn-email
+        subject:
+          type: string
+          maxLength: 998
+        html:
+          type: string
+        text:
+          type: string
+        attachments:
+          type: array
+          maxItems: 10
+          items:
+            $ref: '#/components/schemas/Attachment'
+        tags:
+          type: array
+          maxItems: 10
+          items:
+            type: string
+            pattern: ^[a-z0-9-]{1,40}$
+    DraftPage:
+      type: object
+      additionalProperties: false
+      required:
+      - items
+      - page
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Draft'
+        page:
+          $ref: '#/components/schemas/PageMeta'
+    Domain:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - name
+      - verified
+      properties:
+        id:
+          type: string
+          pattern: ^dom_[a-z0-9]{8,32}$
+        name:
+          type: string
+          format: hostname
+        verified:
+          type: boolean
+        checked_at:
+          type: string
+          format: date-time
+    DnsRecord:
+      type: object
+      additionalProperties: false
+      required:
+      - type
+      - host
+      - value
+      properties:
+        type:
+          type: string
+          enum:
+          - A
+          - MX
+          - TXT
+        host:
+          type: string
+        value:
+          type: string
+          description: bare value; MX priority goes in priority
+        priority:
+          type: integer
+          description: MX only
+    WebhookCreate:
+      type: object
+      additionalProperties: false
+      required:
+      - url
+      - events
+      properties:
+        url:
+          type: string
+          format: uri
+        events:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            enum:
+            - email.sent
+            - email.delivered
+            - email.delivery_delayed
+            - email.bounced
+            - email.failed
+            - email.received
+        secret:
+          type: string
+          minLength: 32
+          pattern: ^[A-Za-z0-9_-]+$
+          description: 'Optional: server generates whsec_... when omitted. If provided: ≥32 chars of [A-Za-z0-9_-].'
+    WebhookView:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - url
+      - events
+      properties:
+        id:
+          type: string
+          pattern: ^whk_[a-z0-9]{8,32}$
+        url:
+          type: string
+          format: uri
+        events:
+          type: array
+          items:
+            type: string
+        created_at:
+          type: string
+          format: date-time
+    WebhookCreated:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - url
+      - events
+      - created_at
+      - secret
+      properties:
+        id:
+          type: string
+          pattern: ^whk_[a-z0-9]{8,32}$
+        url:
+          type: string
+          format: uri
+        events:
+          type: array
+          items:
+            type: string
+        created_at:
+          type: string
+          format: date-time
+        secret:
+          type: string
+          pattern: ^whsec_[A-Za-z0-9_-]{43}$
+          description: shown exactly once
+    SuppressionPage:
+      type: object
+      required:
+      - items
+      - page
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required:
+            - address
+            - reason
+            - created_at
+            properties:
+              address:
+                type: string
+              reason:
+                type: string
+                enum:
+                - manual
+                - bounce
+                - complaint
+              source:
+                type: string
+                description: email id or admin action
+              created_at:
+                type: string
+                format: date-time
+        page:
+          $ref: '#/components/schemas/PageMeta'
+    ApiKeyCreate:
+      type: object
+      additionalProperties: false
+      required:
+      - name
+      - scopes
+      properties:
+        name:
+          type: string
+          maxLength: 100
+        scopes:
+          type: array
+          items:
+            type: string
+            enum:
+            - send
+            - read
+            - full
+          minItems: 1
+        sandbox:
+          type: boolean
+          default: false
+    ApiKeyPatch:
+      type: object
+      additionalProperties: false
+      properties:
+        revoked:
+          type: boolean
+        sandbox:
+          type: boolean
+        name:
+          type: string
+          maxLength: 100
+    ApiKeyCreated:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - key
+      properties:
+        id:
+          type: string
+          pattern: ^key_[a-z0-9]{8,32}$
+        key:
+          type: string
+          pattern: ^pk_[A-Za-z0-9_-]{43}$
+          description: shown exactly once
+    ApiKeyView:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - name
+      - scopes
+      - created_at
+      properties:
+        id:
+          type: string
+          pattern: ^key_[a-z0-9]{8,32}$
+        name:
+          type: string
+        scopes:
+          type: array
+          items:
+            type: string
+            enum:
+            - send
+            - read
+            - full
+        sandbox:
+          type: boolean
+        revoked:
+          type: boolean
+        last_used_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+    TotpCode:
+      type: object
+      additionalProperties: false
+      required:
+      - code
+      properties:
+        code:
+          oneOf:
+          - type: string
+            pattern: ^[0-9]{6}$
+          - type: string
+            pattern: ^[0-9]{8}$
+          - type: string
+            pattern: ^[A-Za-z0-9-]{10,20}$
+            description: one-time recovery code (activation-fallback only)
+    Event:
+      type: object
+      additionalProperties: false
+      required:
+      - type
+      - created_at
+      - data
+      properties:
+        type:
+          type: string
+          enum:
+          - email.sent
+          - email.delivered
+          - email.delivery_delayed
+          - email.bounced
+          - email.failed
+          - email.received
+        created_at:
+          type: string
+          format: date-time
+        data:
+          $ref: '#/components/schemas/EventData'
+    EventData:
+      type: object
+      properties:
+        email_id:
+          type: string
+          pattern: ^eml_[a-z0-9]{8,32}$
+        message_id:
+          type: string
+          pattern: ^msg_[a-z0-9]{8,32}$
+        from_addr:
+          type: string
+        to:
+          oneOf:
+          - type: string
+            description: single recipient (delivered-style events)
+          - type: array
+            items:
+              type: string
+        subject:
+          type: string
+        mx:
+          type: string
+        attempts:
+          type: integer
+        code:
+          type: string
+          description: bounce code
+        reason:
+          type: string
+        hard:
+          type: boolean
+        auth:
+          $ref: '#/components/schemas/AuthVerdict'
+      description: 'Field names match the internal contract (from_addr, to arrays where multiple, auth
+        object). Resend-style consumers map from_addr to from. Sandbox sends NEVER emit delivery webhooks.
+
+        '
+      additionalProperties: false
+
+    Org:
+      type: object
+      required:
+      - id
+      - name
+      - created_at
+      properties:
+        id:
+          type: integer
+          description: Organization id (an integer, not an opaque handle)
+        name:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        role:
+          type: string
+          enum:
+          - owner
+          - admin
+          - member
+          description: The caller's role in this organization (present on the listings)
+    OrgMember:
+      type: object
+      required:
+      - account_id
+      - email
+      - display_name
+      - role
+      - created_at
+      properties:
+        account_id:
+          type: integer
+        email:
+          type: string
+          format: idn-email
+        display_name:
+          type: string
+          description: Empty when nobody has set one
+        role:
+          type: string
+          enum:
+          - owner
+          - admin
+          - member
+        created_at:
+          type: string
+          format: date-time
+    OrgMemberCreated:
+      type: object
+      required:
+      - member
+      - bootstrap_token
+      properties:
+        member:
+          $ref: '#/components/schemas/OrgMember'
+        bootstrap_token:
+          type: string
+          description: 'Shown once. Presenting it in `code` at `POST /v1/auth/login` (or redeeming
+            it at `POST /v1/invitations/accept`) burns it; only its Argon2id hash is stored.
+
+            '
+    Invitation:
+      type: object
+      required:
+      - id
+      - email
+      - role
+      - invited_by
+      - created_at
+      - expires_at
+      properties:
+        id:
+          type: integer
+        email:
+          type: string
+          format: idn-email
+        role:
+          type: string
+          enum:
+          - admin
+          - member
+        invited_by:
+          type: integer
+          description: Account id of the admin that created the invitation
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        accepted_at:
+          type: string
+          format: date-time
+          description: Present once redeemed (the row is kept as history)
+    InvitationCreated:
+      type: object
+      required:
+      - invitation
+      - token
+      properties:
+        invitation:
+          $ref: '#/components/schemas/Invitation'
+        token:
+          type: string
+          description: 'Shown once. Only the Argon2id hash is stored; the first redemption burns it.
+
+            '
+    CatchallRule:
+      type: object
+      required:
+      - domain
+      - action
+      - created_at
+      properties:
+        domain:
+          type: string
+        action:
+          type: string
+          enum:
+          - route
+          - discard
+        target_account_id:
+          type: integer
+          description: Mailbox that receives the mail (`route` only)
+        created_at:
+          type: string
+          format: date-time

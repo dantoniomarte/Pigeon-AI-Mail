@@ -1,0 +1,20 @@
+# Pigeon Mail — non-secret configuration.
+# Values mirror docs/ARCHITECTURE.md "Configuration (principal env vars)".
+# Secrets (the master key) are NOT here: they are mounted as files from
+# secret-masterkey.yaml.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pigeon-config
+  namespace: pigeon
+  labels:
+    app.kubernetes.io/name: pigeon-mail
+    app.kubernetes.io/part-of: pigeon
+data:
+  PIGEON_HTTP_ADDR: ":8000"
+  PIGEON_SMTP_IN_ADDR: ":25"
+  PIGEON_DB_PATH: "/var/lib/pigeon/pigeon.db"
+  PIGEON_MASTER_KEY_FILE: "/etc/pigeon/master.key"
+  PIGEON_SMTP_OUT_STARTTLS: "required"
+  PIGEON_WEBMAIL: "off"
+  PIGEON_LOG: "info,json"

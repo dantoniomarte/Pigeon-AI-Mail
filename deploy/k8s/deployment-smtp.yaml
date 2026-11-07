@@ -1,0 +1,151 @@
+# Pigeon Mail — inbound/outbound SMTP tier (stateful, exactly one replica).
+#
+# SKELETON: read README.md first.
+#
+# This is the tier that owns the store: SQLite on a ReadWriteOnce PVC. It runs
+# `pigeon serve`, which is the documented single-process mode (api, mcp, web,
+# smtp-in, smtp-out). Scaling it means moving off SQLite — see README.md.
+#
+# The PVC lives in this file instead of `volumeClaimTemplates:` because a
+# Deployment has no such field (only StatefulSets do). If you need one volume
+# per replica later, convert this to a StatefulSet with a volumeClaimTemplate.
+#
+# PORT 25: remote MX servers connect to port 25 on a *host* address. Two ways to
+# provide it:
+#   A. hostPort: 25 (as below) — the pod binds :25 on whichever node it lands on.
+#      Simple, but the pod is then pinned to a node with a free :25, and it
+#      conflicts with any other MTA on that node.
+#   B. type: LoadBalancer with externalTrafficPolicy: Local (see
+#      service-smtp.yaml) — keeps the client IP visible for SPF/DNSBL checks and
+#      avoids hostPort, at the cost of a cloud LB per node.
+# You cannot keep another MTA on the same host:25; see docs/DEPLOY.md.
+#
+# Credentials are the master key (mounted file) plus the ConfigMap. Nothing here
+# carries a secret value.
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pigeon-data
+  namespace: pigeon
+  labels:
+    app.kubernetes.io/name: pigeon-mail
+    app.kubernetes.io/part-of: pigeon
+spec:
+  # RWO: SQLite is a single-writer file store (ADR 0002). Never share this claim
+  # between pods on different nodes.
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      # Mail bodies are small but retained; start here and grow. Volume
+      # expansion depends on the StorageClass (allowVolumeExpansion: true).
+      storage: 10Gi
+  # storageClassName: ""   # uncomment and pin a class in production (not tmpfs!)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pigeon-smtp
+  namespace: pigeon
+  labels:
+    app.kubernetes.io/name: pigeon-mail
+    app.kubernetes.io/component: smtp
+    app.kubernetes.io/part-of: pigeon
+spec:
+  # Exactly one: SQLite + a single PVC + one set of queue workers.
+  replicas: 1
+  # Recreate, not RollingUpdate: two pods must never mount this claim at once.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pigeon-mail
+      app.kubernetes.io/component: smtp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pigeon-mail
+        app.kubernetes.io/component: smtp
+        app.kubernetes.io/part-of: pigeon
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        # Makes the PVC writable by uid 10001 without chowning it by hand.
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: pigeon
+          image: ghcr.io/dantoniomarte/pigeon-mail:latest
+          imagePullPolicy: IfNotPresent
+          args: ["serve"]
+          ports:
+            - name: smtp
+              containerPort: 25
+              protocol: TCP
+              # hostPort alternative (A) — comment out if using a LoadBalancer.
+              hostPort: 25
+            - name: submission
+              containerPort: 587
+              protocol: TCP
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: pigeon-config
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/pigeon
+            - name: masterkey
+              mountPath: /etc/pigeon
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+              # Binding :25/:587 as uid 10001 needs CAP_NET_BIND_SERVICE. With
+              # runc >= 1.0 (ambient caps) this works for non-root containers.
+              # If your runtime refuses it, either listen on a high port and
+              # forward, or setcap the binary in the image.
+              add: ["NET_BIND_SERVICE"]
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: pigeon-data
+        - name: masterkey
+          secret:
+            secretName: pigeon-masterkey
+            defaultMode: 0440
+            items:
+              - key: master.key
+                path: master.key
+        - name: tmp
+          emptyDir: {}

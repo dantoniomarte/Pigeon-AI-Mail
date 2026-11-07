@@ -1,0 +1,27 @@
+# Build context exclusions for the Pigeon image.
+# Keep the context small and keep secrets out of the image entirely.
+
+# Rust build output (built inside the image, never copied in).
+target/
+
+# JS tooling and generated webmail output (the webmail variant builds it).
+node_modules/
+**/node_modules/
+web/dist/
+
+# VCS and local tooling state.
+.git/
+.github/
+design/
+odd/
+
+# A local database is never part of an image.
+*.db
+*.db-wal
+*.db-shm
+
+# Secrets: compose bind-mounts ./secrets at runtime, it must never be baked in.
+.env
+.env.*
+secrets/
+*.key

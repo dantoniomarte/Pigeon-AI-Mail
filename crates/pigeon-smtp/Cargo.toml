@@ -1,0 +1,27 @@
+[package]
+name = "pigeon-smtp"
+description = "Pigeon Mail SMTP engine: inbound ESMTP server, outbound delivery worker, MX resolution"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pigeon-api.workspace = true
+pigeon-core.workspace = true
+pigeon-crypto.workspace = true
+pigeon-dkim.workspace = true
+store.workspace = true
+hickory-resolver.workspace = true
+hex.workspace = true
+rustls.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+# The queue table has no `Storage` accessor for "is this row gone?", and that is
+# the assertion the delivery tests need; read it directly from the same file.
+rusqlite.workspace = true
+tempfile.workspace = true

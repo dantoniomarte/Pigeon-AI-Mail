@@ -1,0 +1,10 @@
+[package]
+name = "pigeon-core"
+description = "Pigeon Mail core domain: config, errors, types (no I/O)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+thiserror.workspace = true

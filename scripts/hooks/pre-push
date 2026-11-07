@@ -1,0 +1,3 @@
+#!/bin/sh
+# pre-push hygiene hook — same checks as CI, so nothing private reaches the remote.
+exec scripts/verify-clean.sh

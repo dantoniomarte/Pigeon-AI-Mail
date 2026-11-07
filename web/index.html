@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#f8f9fa" />
+    <meta
+      name="description"
+      content="Pigeon Mail — encrypted, self-hosted webmail for humans and agents."
+    />
+    <title>Pigeon Mail</title>
+    <script>
+      // Paint the correct theme before first render (no flash of wrong theme).
+      (function () {
+        try {
+          var stored = localStorage.getItem('pigeon_theme');
+          var theme =
+            stored === 'light' || stored === 'dark'
+              ? stored
+              : window.matchMedia('(prefers-color-scheme: dark)').matches
+                ? 'dark'
+                : 'light';
+          document.documentElement.dataset.theme = theme;
+        } catch (error) {
+          document.documentElement.dataset.theme = 'light';
+        }
+      })();
+    </script>
+  </head>
+  <body data-motion="on">
+    <script>
+      // Restore the motion preference before first paint, mirroring the theme
+      // script: otherwise the first frame animates and then snaps off.
+      (function () {
+        try {
+          if (localStorage.getItem('pigeon_motion') === 'off') {
+            document.body.dataset.motion = 'off';
+          }
+        } catch (error) {
+          // Storage unavailable: keep the default "on".
+        }
+      })();
+    </script>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

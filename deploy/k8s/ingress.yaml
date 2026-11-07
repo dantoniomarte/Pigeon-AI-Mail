@@ -1,0 +1,44 @@
+# Pigeon Mail — HTTP ingress.
+#
+# SKELETON: see README.md.
+#
+# TLS terminates HERE, at the ingress (nginx/traefik + cert-manager or your own
+# certificate). Inside the cluster Pigeon speaks plain HTTP on :8000; the only
+# public endpoints are the API (/v1/…), the MCP-over-HTTP endpoint if you enable
+# it, and the optional webmail.
+#
+# Replace:
+#   * <ingress-class>  with your IngressClass (nginx, traefik, …)
+#   * mail.example.com with the hostname clients will call
+#   * the tls.secretName with your certificate secret (or drop the secretName and
+#     use the cert-manager annotation below)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: pigeon
+  namespace: pigeon
+  labels:
+    app.kubernetes.io/name: pigeon-mail
+    app.kubernetes.io/part-of: pigeon
+  annotations:
+    # --- placeholders: pick what your cluster actually provides ---
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-body-size: 25m
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: "<ingress-class>"
+  tls:
+    - hosts:
+        - mail.example.com
+      secretName: pigeon-tls
+  rules:
+    - host: mail.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: pigeon-api
+                port:
+                  name: http

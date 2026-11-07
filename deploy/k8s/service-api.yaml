@@ -1,0 +1,22 @@
+# Pigeon Mail — HTTP API/MCP service (cluster-internal).
+# SKELETON: see README.md. TLS terminates at the ingress; this Service is plain
+# HTTP on :8000 and must not be exposed directly.
+apiVersion: v1
+kind: Service
+metadata:
+  name: pigeon-api
+  namespace: pigeon
+  labels:
+    app.kubernetes.io/name: pigeon-mail
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: pigeon
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: pigeon-mail
+    app.kubernetes.io/component: api
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+      protocol: TCP

@@ -1,0 +1,21 @@
+[package]
+name = "pigeon-crypto"
+description = "Pigeon Mail cryptography: content sealing, key wrapping, TOTP, API-key hashing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+chacha20poly1305 = "0.10"
+argon2 = "0.5"
+hmac = "0.12"
+sha1 = "0.10"
+sha2 = "0.10"
+subtle = "2"
+zeroize.workspace = true
+hex.workspace = true
+thiserror.workspace = true
+rand_core = { version = "0.6", features = ["getrandom"] }
+
+[dev-dependencies]

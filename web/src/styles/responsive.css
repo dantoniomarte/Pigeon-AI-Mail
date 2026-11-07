@@ -1,0 +1,486 @@
+/* ==================================================================
+   Pigeon Mail — responsive layout
+   Desktop ≥ 1025px : 3 panes (sidebar · list · reader)
+   Tablet  769–1024 : 2 panes (list · reader, sidebar as drawer)
+   Mobile  ≤ 768px  : 1 pane  (list or reader, tabs at the bottom)
+   ================================================================== */
+
+@media (max-width: 1280px) {
+  :root {
+    --list-w: 344px;
+  }
+}
+
+/* ---------------------------------------------------------------- */
+/* Tablet — two panes + drawer sidebar                              */
+/* ---------------------------------------------------------------- */
+
+@media (max-width: 1024px) {
+  :root {
+    --gutter: 14px;
+  }
+
+  .shell {
+    grid-template-columns: minmax(0, 340px) minmax(0, 1fr);
+    gap: 12px;
+    padding-top: 12px;
+  }
+
+  /* Drafts renders one pane, so it takes the full width beside the drawer. */
+  .app--drafts .shell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .topbar__menu {
+    display: grid;
+  }
+
+  .topbar__center {
+    display: none;
+  }
+
+  .sidebar {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 55;
+    width: 282px;
+    max-width: 86vw;
+    border-radius: 0 var(--radius-lg) var(--radius-lg) 0;
+    border-left: 0;
+    box-shadow: var(--shadow-lg);
+    transform: translateX(-104%);
+    will-change: transform;
+    /* A closed drawer must leave the accessibility tree and the tab order, not
+       just sit off-screen where keyboard and screen-reader users still hit it. */
+    visibility: hidden;
+  }
+
+  .sidebar.is-open {
+    transform: translateX(0);
+    visibility: visible;
+  }
+
+  .sidebar__close {
+    display: grid;
+  }
+
+  .scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    display: block;
+    padding: 0;
+    border: 0;
+    background: color-mix(in srgb, #0b0d12 42%, transparent);
+    backdrop-filter: blur(3px);
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+  }
+
+  .scrim.is-open {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+  }
+
+  .settings {
+    grid-column: 1 / -1;
+  }
+
+  .admin {
+    grid-column: 1 / -1;
+  }
+
+  .admin__grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings__panels {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings__panels--single {
+    max-width: 100%;
+  }
+
+  .motion-switch__label {
+    display: none;
+  }
+
+  .setup__grid {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 0.9fr);
+    gap: 30px;
+    padding: 30px 0;
+  }
+
+  .setup__title {
+    font-size: clamp(28px, 4.2vw, 38px);
+  }
+}
+
+/* ---------------------------------------------------------------- */
+/* Mobile — one pane + bottom tabs                                  */
+/* ---------------------------------------------------------------- */
+
+@media (max-width: 768px) {
+  :root {
+    --gutter: 12px;
+    --topbar-h: 56px;
+  }
+
+  .app {
+    padding-bottom: calc(62px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .shell {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+    padding: 10px 10px 0;
+  }
+
+  .topbar {
+    gap: 10px;
+    padding: 0 12px;
+  }
+
+  .brand__name {
+    font-size: 15.5px;
+  }
+
+  .topbar__right {
+    gap: 4px;
+    margin-left: auto;
+  }
+
+  .topbar__compose {
+    display: none;
+  }
+
+  .motion-switch__state {
+    display: none;
+  }
+
+  .motion-switch {
+    padding: 6px 8px;
+  }
+
+  .topbar .select {
+    display: none;
+  }
+
+  .lang-cycle {
+    display: grid;
+  }
+
+  .mail-list {
+    border-radius: var(--radius-card);
+    height: calc(100dvh - var(--topbar-h) - 62px - env(safe-area-inset-bottom, 0px));
+  }
+
+  .reader {
+    display: none;
+    border-radius: var(--radius-card);
+    height: calc(100dvh - var(--topbar-h) - 62px - env(safe-area-inset-bottom, 0px));
+  }
+
+  .app--reading .mail-list {
+    display: none;
+  }
+
+  .app--reading .reader {
+    display: flex;
+  }
+
+  .reader__back {
+    display: grid;
+  }
+
+  .reader__bar {
+    padding: 8px 10px;
+  }
+
+  .reader__bar-actions .btn span {
+    display: none;
+  }
+
+  .reader__bar-actions .btn {
+    padding: 8px;
+  }
+
+  .reader__document {
+    padding: 18px 16px 26px;
+  }
+
+  .reader__identity {
+    align-items: flex-start;
+  }
+
+  .reader__date {
+    font-size: 10.5px;
+    max-width: 42%;
+    white-space: normal;
+  }
+
+  .reader__subject {
+    font-size: 20px;
+  }
+
+  .reader__actions {
+    flex-wrap: wrap;
+  }
+
+  .settings {
+    border-radius: var(--radius-card);
+    height: auto;
+    max-height: calc(100dvh - var(--topbar-h) - 72px);
+  }
+
+  .settings__head {
+    padding: 18px 16px 0;
+  }
+
+  .settings__title {
+    font-size: 19px;
+  }
+
+  .settings__panels {
+    padding: 16px;
+    gap: 14px;
+  }
+
+  .admin {
+    border-radius: var(--radius-card);
+    height: auto;
+    max-height: calc(100dvh - var(--topbar-h) - 72px);
+  }
+
+  .admin__head {
+    padding: 18px 16px 14px;
+  }
+
+  .admin__title {
+    font-size: 19px;
+  }
+
+  .admin__body {
+    padding: 16px;
+    gap: 14px;
+  }
+
+  .admin-table__select {
+    min-width: 104px;
+  }
+
+  .panel {
+    padding: 15px;
+  }
+
+  .record {
+    flex-wrap: wrap;
+  }
+
+  .record .btn {
+    margin-left: auto;
+  }
+
+  .pref-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+  }
+
+  .pref-row--danger .btn {
+    width: 100%;
+  }
+
+  .compose-overlay {
+    padding: 0;
+    align-items: stretch;
+  }
+
+  .compose {
+    width: 100%;
+    max-height: 100dvh;
+    height: 100dvh;
+    border: 0;
+    border-radius: 0;
+  }
+
+  .compose__foot {
+    flex-flow: row wrap;
+    padding-bottom: calc(11px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .compose__hint {
+    display: none;
+  }
+
+  .compose__foot-actions {
+    width: 100%;
+  }
+
+  .compose__foot-actions .btn {
+    flex: 1;
+  }
+
+  .toasts {
+    right: 12px;
+    left: 12px;
+    bottom: calc(74px + env(safe-area-inset-bottom, 0px));
+    width: auto;
+  }
+
+  .mobile-tabs {
+    position: fixed;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 45;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 4px;
+    padding: 8px 10px calc(8px + env(safe-area-inset-bottom, 0px));
+    background: var(--surface-glass);
+    backdrop-filter: blur(18px) saturate(1.4);
+    -webkit-backdrop-filter: blur(18px) saturate(1.4);
+    border-top: 1px solid var(--border);
+  }
+
+  .mobile-tabs__item {
+    padding: 9px 6px;
+    border: 0;
+    border-radius: 9px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 11.5px;
+    font-weight: 560;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .mobile-tabs__item.is-active {
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-weight: 650;
+  }
+
+  .mobile-tabs__item--accent {
+    background-image: linear-gradient(135deg, var(--accent-grad-a), var(--accent-grad-b));
+    color: var(--accent-contrast);
+    font-weight: 620;
+    box-shadow: var(--accent-glow);
+  }
+
+  /* Setup collapses to a single column. */
+  .setup {
+    padding: 16px 16px 22px;
+    min-height: 100dvh;
+    overflow: auto;
+  }
+
+  .setup__top {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .setup__grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 26px;
+    padding: 26px 0 10px;
+  }
+
+  .setup__pitch {
+    gap: 12px;
+  }
+
+  .setup__title {
+    font-size: clamp(28px, 8vw, 34px);
+  }
+
+  .setup__title-mark {
+    margin-top: 14px;
+  }
+
+  .setup__subtitle {
+    font-size: 13.5px;
+  }
+
+  .setup__steps {
+    gap: 12px;
+    margin-top: 4px;
+  }
+
+  .setup__card {
+    justify-self: stretch;
+    max-width: 100%;
+    padding: 20px;
+  }
+
+  .setup__footer {
+    flex-direction: column;
+    gap: 4px;
+    text-align: center;
+    padding-top: 14px;
+  }
+
+  .setup__footer-dot {
+    display: none;
+  }
+
+  .mail-list__head {
+    padding: 12px 12px 10px;
+    gap: 8px;
+  }
+
+  .mail-list__title h2 {
+    font-size: 16px;
+  }
+
+  .mail-list__scroll {
+    padding: 2px 6px 10px;
+  }
+
+  .mail-row {
+    padding: 10px 8px;
+  }
+
+  .mail-row__badges {
+    margin-top: 2px;
+  }
+}
+
+/* ---------------------------------------------------------------- */
+/* Small phones                                                     */
+/* ---------------------------------------------------------------- */
+
+@media (max-width: 420px) {
+  .motion-switch__state {
+    display: none;
+  }
+
+  .setup__controls .motion-switch {
+    padding: 6px;
+  }
+
+  .reader__bar-actions .btn span {
+    display: none;
+  }
+
+  .verdict {
+    padding: 3px 8px;
+    font-size: 10.5px;
+  }
+
+  .verdict__name {
+    font-size: 9.5px;
+  }
+
+  .mobile-tabs__item {
+    font-size: 10.5px;
+    padding: 9px 3px;
+  }
+}

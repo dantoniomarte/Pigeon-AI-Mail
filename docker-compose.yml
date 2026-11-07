@@ -1,0 +1,68 @@
+# Pigeon Mail — single-container deployment.
+#
+# One process runs everything (api, mcp, web, smtp-in, smtp-out) — the documented
+# default from docs/ARCHITECTURE.md. For the full guide see docs/DEPLOY.md.
+#
+#   cp .env.example .env                      # adjust if needed, never add secrets
+#   mkdir -p secrets
+#   openssl rand -hex 32 > secrets/master.key # 64 hex chars = 32 bytes
+#   sudo chown root:10001 secrets/master.key  # container user is uid/gid 10001
+#   sudo chmod 640 secrets/master.key         # owner root, group pigeon (10001)
+#   docker compose up -d --build              # binary only (no node image)
+#
+# Optional webmail bundle — BOTH variables, they do different jobs:
+#   WEBMAIL_TARGET selects the Dockerfile target (the only way to reach the node
+#     stage); WITH_WEBMAIL=1 is what that stage builds. Setting only one of them
+#     either keeps the binary-only image or fails the build loudly.
+#   WEBMAIL_TARGET=pigeon-webmail WITH_WEBMAIL=1 docker compose up -d --build
+
+name: pigeon
+
+services:
+  pigeon:
+    build:
+      context: .
+      # Webmail is opt-in through WEBMAIL_TARGET, not through WITH_WEBMAIL:
+      # WITH_WEBMAIL=0 is a non-empty string, so any `:+` test on it would still
+      # select the webmail target and pull node:22-slim. When WEBMAIL_TARGET is
+      # unset the rendered config has NO target line at all, which keeps the
+      # Dockerfile's default (last) stage — the binary-only image.
+      target: "${WEBMAIL_TARGET:-}"
+      args:
+        WITH_WEBMAIL: "${WITH_WEBMAIL:-0}"
+    image: pigeon-mail:local
+    restart: unless-stopped
+    # Optional: Compose >= 2.24 form. Without a .env the container simply gets
+    # the image defaults (which already match docs/ARCHITECTURE.md) instead of
+    # failing the whole `docker compose up`.
+    env_file:
+      - path: .env
+        required: false
+
+    # :25 inbound SMTP MUST be free on the host. If another MTA (postfix,
+    # exim, mailcow…) already owns :25, either free it, run Pigeon on its own
+    # IP, or use `network_mode: host` (then drop the `ports:` block — the
+    # process binds the host ports directly). Ports below 1024 are privileged:
+    # as a non-root user the process needs CAP_NET_BIND_SERVICE, which the
+    # systemd path grants via AmbientCapabilities and containers get through the
+    # runtime's default capability set; for a bare host binary run
+    #   sudo setcap cap_net_bind_service=+ep /usr/local/bin/pigeon
+    ports:
+      - "8000:8000" # HTTPS API + MCP over HTTP (terminate TLS in front)
+      - "25:25"     # inbound SMTP from remote MX
+      - "587:587"   # submission with AUTH
+
+    volumes:
+      # SQLite lives on real disk (ADR 0002: not tmpfs).
+      - pigeon-data:/var/lib/pigeon
+      # Master key: 32 bytes as 64 hex chars, owned root:pigeon(10001), mode 0640.
+      # Read-only on purpose — the server never writes the key file.
+      - ./secrets:/etc/pigeon:ro
+
+    # NO healthcheck yet: the image is distroless (no shell, no curl) and the
+    # binary has no built-in probe command yet. Probes are the contract in
+    # Kubernetes (/healthz, /readyz); this entry gets a healthcheck once the
+    # binary ships one.
+
+volumes:
+  pigeon-data:

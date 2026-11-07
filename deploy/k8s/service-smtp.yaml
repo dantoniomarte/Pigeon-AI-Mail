@@ -1,0 +1,69 @@
+# Pigeon Mail — inbound SMTP service.
+#
+# SKELETON: see README.md.
+#
+# WHY THIS IS NOT `nodePort: 25`:
+# Kubernetes rejects a nodePort outside the cluster's node-port range
+# (default 30000-32767), so a Service cannot claim the real :25. Remote MX
+# servers only ever connect to :25, therefore exactly one of these is true:
+#
+#   A. hostPort: 25 on the pod (see deployment-smtp.yaml) — traffic arrives on
+#      the node's :25 directly and this Service is only used for in-cluster
+#      access. Simplest for a single node.
+#   B. A LoadBalancer that forwards :25 -> node <NodePort>, with
+#      `externalTrafficPolicy: Local` so the SMTP client IP survives (SPF,
+#      reputation and rate-limit decisions depend on it). Then widen the
+#      Service with `port: 25` as well, or keep only 30025 and let the LB
+#      translate.
+#   C. hostNetwork: true on the pod — gives the pod the node's :25 with no
+#      Service involved; combine with a dedicated node that runs no other MTA.
+#
+# Putting :25 on a shared node is not possible: one MTA per IP:port. See
+# docs/DEPLOY.md ("DNS records") for the MX/port-25 warning.
+apiVersion: v1
+kind: Service
+metadata:
+  name: pigeon-smtp
+  namespace: pigeon
+  labels:
+    app.kubernetes.io/name: pigeon-mail
+    app.kubernetes.io/component: smtp
+    app.kubernetes.io/part-of: pigeon
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: pigeon-mail
+    app.kubernetes.io/component: smtp
+  ports:
+    # In-cluster port stays 25 so other pods can address it as :25.
+    - name: smtp
+      port: 25
+      targetPort: 25
+      protocol: TCP
+      # 30025 instead of 25: nodePorts must fall in the node-port range.
+      nodePort: 30025
+    - name: submission
+      port: 587
+      targetPort: 587
+      protocol: TCP
+      nodePort: 30587
+---
+# Alternative (B) — swap the Service above for this when a cloud LB owns :25.
+# externalTrafficPolicy: Local keeps the real client IP for SPF/DNSBL checks.
+#
+# apiVersion: v1
+# kind: Service
+# metadata:
+#   name: pigeon-smtp
+#   namespace: pigeon
+# spec:
+#   type: LoadBalancer
+#   externalTrafficPolicy: Local
+#   selector:
+#     app.kubernetes.io/name: pigeon-mail
+#     app.kubernetes.io/component: smtp
+#   ports:
+#     - name: smtp
+#       port: 25
+#       targetPort: 25
+#       protocol: TCP

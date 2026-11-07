@@ -1,0 +1,29 @@
+[package]
+name = "pigeon"
+description = "Pigeon Mail server binary: `pigeon serve` and `pigeon keygen`"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "pigeon"
+path = "src/main.rs"
+
+[dependencies]
+pigeon-api.workspace = true
+pigeon-mcp.workspace = true
+pigeon-core.workspace = true
+pigeon-crypto.workspace = true
+pigeon-smtp.workspace = true
+store.workspace = true
+axum.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tempfile.workspace = true

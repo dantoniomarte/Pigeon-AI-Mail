@@ -1,0 +1,28 @@
+[package]
+name = "pigeon-mcp"
+description = "MCP (Model Context Protocol) server for Pigeon Mail — agent integration via JSON-RPC over stdio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pigeon-core.workspace = true
+pigeon-crypto.workspace = true
+# The administration tools (organizations, catch-all, drafts, domains,
+# suppressions, API keys) reuse the API's own rules instead of re-implementing
+# them: `pigeon_api::db::ApiDb` owns the `api_*` tables, `keys::issue` mints
+# keys, `dkim::seal_private_key` seals DKIM material and `ids` generates
+# contract-shaped public ids. The dependency is one-way (nothing in
+# `pigeon-api` depends on this crate), so the MCP server adds no cycle.
+pigeon-api.workspace = true
+pigeon-dkim.workspace = true
+store.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

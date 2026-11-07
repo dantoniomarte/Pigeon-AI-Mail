@@ -1,0 +1,9 @@
+# Pigeon Mail — namespace.
+# SKELETON: see README.md in this directory before applying anything.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pigeon
+  labels:
+    app.kubernetes.io/name: pigeon-mail
+    app.kubernetes.io/part-of: pigeon

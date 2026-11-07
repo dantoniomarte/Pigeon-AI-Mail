@@ -1,0 +1,36 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.orig
+
+# Node / webmail
+node_modules/
+web/dist/
+*.tsbuildinfo
+
+# Runtime / local
+*.db
+*.db-shm
+*.db-wal
+*.sqlite*
+/data/
+keys/
+*.pem
+*.key
+.env
+.env.*
+!.env.example
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Local work notes (never part of the public repo)
+/odd/
+/design/
+
+# Local-only private-name patterns for the hygiene gate (never commit)
+scripts/hygiene.private.patterns
