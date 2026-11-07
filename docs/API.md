@@ -232,15 +232,15 @@ Payloads are the `Event` schema (openapi) — field names match the internal con
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /v1/auth/login` {email, password, code?} | Session login. **Every login requires `code`**: a TOTP code (6/8 digits), a recovery code, or the invitation/bootstrap token. See the challenge below. |
+| `POST /v1/auth/login` {email, code?} | Session login. **Every login requires `code`**: a TOTP code (6/8 digits), a recovery code, or the invitation/bootstrap token. (`password` is accepted in the body but unused — v0.1 has no password realm.) See the challenge below. |
 | `POST /v1/auth/logout` | Revokes the session the request authenticated with. `204`. |
 | `GET /v1/auth/check` | `204` when the session cookie is valid — the browser cannot read the HttpOnly cookie, so the webmail probes the server instead. |
-| `POST /v1/account/2fa/enroll` {password} | Re-auth required; → `{secret_base32, otpauth_uri}`. |
+| `POST /v1/account/2fa/enroll` | Session-only re-auth (v0.1 has no password realm — the session *is* the re-auth); no body. → `{secret_base32, otpauth_uri}`. |
 | `POST /v1/account/2fa/activate` {code} | → 10 one-time recovery codes, shown once. |
 | `POST /v1/account/2fa/verify` {code} | Step-up check for the current session → `200` valid; wrong code → `422`, `429` when limited. |
 | `POST /v1/account/2fa/disable` {code} | Disable — **POST, never DELETE** (DELETE bodies are the first thing proxies and browsers drop). Requires a current valid code: TOTP **or** a recovery code. |
 
-**The login challenge.** `POST /v1/auth/login` takes `{email, password, code?}` and has exactly two success shapes:
+**The login challenge.** `POST /v1/auth/login` takes `{email, code?}` (`password` accepted but ignored) and has exactly two success shapes:
 
 - `200` + `Set-Cookie: pigeon_session=…; HttpOnly; SameSite=Strict` — 2FA is not enrolled, or a valid `code` was supplied.
 - **`403` with problem type `mfa-required`** — 2FA is enrolled and the `code` is missing or wrong. That 403 *is* the challenge, not a hard failure: the client re-posts the same body plus `code` (a 6- or 8-digit TOTP, or a one-time recovery code). Recovery codes are accepted at login **and** at `POST /v1/account/2fa/disable`, so a lost authenticator is never a lockout.

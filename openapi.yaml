@@ -1720,14 +1720,14 @@ paths:
               type: object
               required:
               - email
-              - password
               properties:
                 email:
                   type: string
                   format: idn-email
                 password:
                   type: string
-                  minLength: 8
+                  description: 'Accepted for contract compatibility but unused — v0.1 has no
+                    password realm. Login is `email` + required `code`.'
                 code:
                   type: string
                   description: 'TOTP (6 or 8 digits) or one-time recovery code when 2FA is enrolled;
@@ -1775,21 +1775,11 @@ paths:
     post:
       tags:
       - account
-      summary: Begin TOTP enrollment — SESSION auth; re-auth required (current password)
+      summary: Begin TOTP enrollment — SESSION auth (the session is the re-auth in v0.1; a
+        password realm lands later). No request body.
       operationId: enroll2fa
       security:
       - sessionCookie: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required:
-              - password
-              properties:
-                password:
-                  type: string
       responses:
         '200':
           description: Provisioning data
