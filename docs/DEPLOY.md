@@ -143,6 +143,12 @@ single-binary vs split posture, the PVC, hostPort-vs-LoadBalancer choice for
 
 ## DNS records
 
+> **Reinstall warning — DKIM rotation.** Wiping `/var/lib/pigeon` (fresh host,
+> clean reinstall) deletes the DKIM signing key. Re-registering the domain via
+> the API generates a **new keypair**: update the `<selector>._domainkey` TXT
+> record at your DNS provider, or every outbound signature fails verification
+> while the old record stays published.
+
 An MX record is a promise that something answers on **port 25**. Publishing MX
 without a reachable `:25` silently blackholes inbound mail — no bounce, no log.
 
