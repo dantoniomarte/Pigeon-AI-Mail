@@ -299,7 +299,9 @@
   },
   "auth": {
     "unauthorized": "This key was rejected. Sign in with a valid key.",
-    "storedLocally": "Stored only in this browser"
+    "storedLocally": "Stored only in this browser",
+    "sessionMode": "Signed in by email",
+    "sessionBadge": "session"
   },
   "admin": {
     "title": "Admin console",

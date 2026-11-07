@@ -31,7 +31,7 @@ import type { LoadState } from '../App';
 import type { ToastKind } from './Toast';
 
 interface PanelsProps {
-  apiKey: string;
+  apiKey: string | null;
   notify: (kind: ToastKind, message: string) => void;
 }
 

@@ -299,7 +299,9 @@
   },
   "auth": {
     "unauthorized": "Esta chave foi recusada. Entre com uma chave válida.",
-    "storedLocally": "Guardada só neste navegador"
+    "storedLocally": "Guardada só neste navegador",
+    "sessionMode": "Sessão por e-mail",
+    "sessionBadge": "sessão"
   },
   "admin": {
     "title": "Consola de administração",

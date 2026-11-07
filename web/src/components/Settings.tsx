@@ -42,7 +42,7 @@ import { SecurityPanel } from './SecurityPanel';
 import type { ToastKind } from './Toast';
 
 export interface SettingsProps {
-  apiKey: string;
+  apiKey: string | null;
   lang: string;
   onLangChange: (lang: string) => void;
   theme: Theme;

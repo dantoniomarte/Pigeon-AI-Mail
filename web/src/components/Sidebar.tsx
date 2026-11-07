@@ -26,7 +26,7 @@ export interface SidebarProps {
   onSelect: (view: View) => void;
   onCompose: () => void;
   open: boolean;
-  apiKey: string;
+  apiKey: string | null;
   onSignOut: () => void;
   onClose: () => void;
 }
@@ -149,9 +149,15 @@ export default function Sidebar({
             </span>
             <div className="account__meta">
               <span className="account__title">{t('nav.connected')}</span>
-              <code className="account__key" title={t('auth.storedLocally')}>
-                {maskKey(apiKey)}
-              </code>
+              {apiKey !== null ? (
+                <code className="account__key" title={t('auth.storedLocally')}>
+                  {maskKey(apiKey)}
+                </code>
+              ) : (
+                <span className="account__key" title={t('auth.sessionMode')}>
+                  {t('auth.sessionBadge')}
+                </span>
+              )}
             </div>
           </div>
           <button type="button" className="btn btn--ghost btn--block" onClick={onSignOut}>

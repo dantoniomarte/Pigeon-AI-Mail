@@ -299,7 +299,9 @@
   },
   "auth": {
     "unauthorized": "Dieser Schlüssel wurde abgelehnt. Melde dich mit einem gültigen Schlüssel an.",
-    "storedLocally": "Nur in diesem Browser gespeichert"
+    "storedLocally": "Nur in diesem Browser gespeichert",
+    "sessionMode": "Angemeldet per E-Mail",
+    "sessionBadge": "Sitzung"
   },
   "admin": {
     "title": "Admin-Konsole",

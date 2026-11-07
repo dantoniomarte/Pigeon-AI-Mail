@@ -42,7 +42,7 @@ import type { LoadState } from '../App';
 import type { ToastKind } from './Toast';
 
 export interface AdminPanelProps {
-  apiKey: string;
+  apiKey: string | null;
   notify: (kind: ToastKind, message: string) => void;
 }
 

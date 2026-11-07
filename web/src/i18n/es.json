@@ -299,7 +299,9 @@
   },
   "auth": {
     "unauthorized": "Esta clave fue rechazada. Entrá con una clave válida.",
-    "storedLocally": "Guardada solo en este navegador"
+    "storedLocally": "Guardada solo en este navegador",
+    "sessionMode": "Sesión por email",
+    "sessionBadge": "sesión"
   },
   "admin": {
     "title": "Consola de administración",

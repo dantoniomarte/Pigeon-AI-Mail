@@ -302,11 +302,13 @@ export function maskKey(key: string): string {
   return `${key.slice(0, 8)}…${key.slice(-4)}`;
 }
 
-async function request<T>(key: string, path: string, init?: RequestInit): Promise<T> {
+async function request<T>(key: string | null, path: string, init?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {
     Accept: 'application/json',
-    Authorization: `Bearer ${key}`,
   };
+  if (key !== null && key.length > 0) {
+    headers.Authorization = `Bearer ${key}`;
+  }
   if (init?.body !== undefined) {
     headers['Content-Type'] = 'application/json';
   }
@@ -489,7 +491,7 @@ const DEMO_SENT: SentMessage[] = [
 /* ------------------------------------------------------------------ */
 
 export async function fetchFolder(
-  key: string,
+  key: string | null,
   folder: MailFolder,
 ): Promise<ReadResult<InboxMessage[]>> {
   try {
@@ -510,7 +512,7 @@ export async function fetchFolder(
   }
 }
 
-export async function fetchSent(key: string): Promise<ReadResult<SentMessage[]>> {
+export async function fetchSent(key: string | null): Promise<ReadResult<SentMessage[]>> {
   try {
     const page = await request<EmailPage>(key, '/v1/emails?limit=100');
     return { data: page.items, demo: false };
@@ -522,7 +524,7 @@ export async function fetchSent(key: string): Promise<ReadResult<SentMessage[]>>
   }
 }
 
-export async function fetchMessage(key: string, id: string): Promise<ReadResult<MessageDetail>> {
+export async function fetchMessage(key: string | null, id: string): Promise<ReadResult<MessageDetail>> {
   try {
     const message = await request<MessageDetail>(key, `/v1/messages/${encodeURIComponent(id)}?sealed=false`);
     return { data: message, demo: false };
@@ -556,19 +558,19 @@ export function demoEnrichment(id: string): DemoEnrichment | null {
 /* Writes                                                              */
 /* ------------------------------------------------------------------ */
 
-export async function sendEmail(key: string, payload: SendPayload): Promise<SendAccepted> {
+export async function sendEmail(key: string | null, payload: SendPayload): Promise<SendAccepted> {
   return request<SendAccepted>(key, '/v1/emails', {
     method: 'POST',
     body: JSON.stringify(payload),
   });
 }
 
-export async function fetchApiKeys(key: string): Promise<ApiKeyView[]> {
+export async function fetchApiKeys(key: string | null): Promise<ApiKeyView[]> {
   return request<ApiKeyView[]>(key, '/v1/account/keys');
 }
 
 export async function createApiKey(
-  key: string,
+  key: string | null,
   name: string,
   scopes: Scope[],
   sandbox: boolean,
@@ -579,19 +581,19 @@ export async function createApiKey(
   });
 }
 
-export async function revokeApiKey(key: string, id: string): Promise<ApiKeyView> {
+export async function revokeApiKey(key: string | null, id: string): Promise<ApiKeyView> {
   return request<ApiKeyView>(key, `/v1/account/keys/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     body: JSON.stringify({ revoked: true }),
   });
 }
 
-export async function fetchWebhooks(key: string): Promise<WebhookView[]> {
+export async function fetchWebhooks(key: string | null): Promise<WebhookView[]> {
   return request<WebhookView[]>(key, '/v1/webhooks');
 }
 
 export async function createWebhook(
-  key: string,
+  key: string | null,
   url: string,
   events: WebhookEvent[],
 ): Promise<WebhookCreated> {
@@ -601,7 +603,7 @@ export async function createWebhook(
   });
 }
 
-export async function deleteWebhook(key: string, id: string): Promise<void> {
+export async function deleteWebhook(key: string | null, id: string): Promise<void> {
   await request<void>(key, `/v1/webhooks/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
@@ -709,12 +711,12 @@ export function avatarHue(seed: string): number {
 
 // ------------------------------------------------------------- Templates
 
-export async function fetchTemplates(key: string): Promise<Template[]> {
+export async function fetchTemplates(key: string | null): Promise<Template[]> {
   return request<Template[]>(key, '/v1/templates');
 }
 
 export async function createTemplate(
-  key: string,
+  key: string | null,
   tpl: { name: string; description?: string; subject?: string; html?: string; text?: string },
 ): Promise<Template> {
   return request<Template>(key, '/v1/templates', {
@@ -723,12 +725,12 @@ export async function createTemplate(
   });
 }
 
-export async function deleteTemplate(key: string, id: string): Promise<void> {
+export async function deleteTemplate(key: string | null, id: string): Promise<void> {
   await request<void>(key, `/v1/templates/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
 export async function testSendTemplate(
-  key: string,
+  key: string | null,
   id: string,
   to: string[],
   variables: Record<string, string>,
@@ -742,12 +744,12 @@ export async function testSendTemplate(
 // ------------------------------------------------------------- Drafts
 
 /** Drafts of the account, newest save first. */
-export async function fetchDrafts(key: string, limit = 100): Promise<DraftView[]> {
+export async function fetchDrafts(key: string | null, limit = 100): Promise<DraftView[]> {
   const page = await request<DraftPage>(key, `/v1/drafts?limit=${limit}`);
   return page.items;
 }
 
-export async function createDraft(key: string, draft: DraftPayload): Promise<DraftView> {
+export async function createDraft(key: string | null, draft: DraftPayload): Promise<DraftView> {
   return request<DraftView>(key, '/v1/drafts', {
     method: 'POST',
     body: JSON.stringify(draft),
@@ -755,7 +757,7 @@ export async function createDraft(key: string, draft: DraftPayload): Promise<Dra
 }
 
 export async function updateDraft(
-  key: string,
+  key: string | null,
   id: string,
   draft: DraftPayload,
 ): Promise<DraftView> {
@@ -765,12 +767,12 @@ export async function updateDraft(
   });
 }
 
-export async function deleteDraft(key: string, id: string): Promise<void> {
+export async function deleteDraft(key: string | null, id: string): Promise<void> {
   await request<void>(key, `/v1/drafts/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
 /** Send a draft through the real send path; the draft is deleted server-side. */
-export async function sendDraft(key: string, id: string): Promise<SendAccepted> {
+export async function sendDraft(key: string | null, id: string): Promise<SendAccepted> {
   return request<SendAccepted>(key, `/v1/drafts/${encodeURIComponent(id)}/send`, {
     method: 'POST',
     body: JSON.stringify({}),
@@ -779,17 +781,17 @@ export async function sendDraft(key: string, id: string): Promise<SendAccepted> 
 
 // ------------------------------------------------------------- Domains
 
-export async function fetchDomains(key: string): Promise<DomainView[]> {
+export async function fetchDomains(key: string | null): Promise<DomainView[]> {
   return request<DomainView[]>(key, '/v1/domains');
 }
 
-export async function fetchDomainDns(key: string, id: string): Promise<DnsRecord[]> {
+export async function fetchDomainDns(key: string | null, id: string): Promise<DnsRecord[]> {
   return request<DnsRecord[]>(key, `/v1/domains/${encodeURIComponent(id)}/dns`);
 }
 
 // ------------------------------------------------------------- Suppressions
 
-export async function fetchSuppressions(key: string, limit = 100): Promise<SuppressionEntry[]> {
+export async function fetchSuppressions(key: string | null, limit = 100): Promise<SuppressionEntry[]> {
   const page = await request<{ items: SuppressionEntry[] }>(
     key,
     `/v1/suppressions?limit=${limit}`,
@@ -798,7 +800,7 @@ export async function fetchSuppressions(key: string, limit = 100): Promise<Suppr
 }
 
 export async function addSuppressions(
-  key: string,
+  key: string | null,
   addresses: string[],
   reason: 'manual' | 'bounce' | 'complaint',
 ): Promise<void> {
@@ -808,7 +810,7 @@ export async function addSuppressions(
   });
 }
 
-export async function removeSuppression(key: string, address: string): Promise<void> {
+export async function removeSuppression(key: string | null, address: string): Promise<void> {
   await request<void>(
     key,
     `/v1/suppressions/${encodeURIComponent(address)}`,
@@ -876,18 +878,18 @@ export interface CatchallRuleView {
   created_at: string;
 }
 
-export async function createOrg(key: string, name: string): Promise<OrgView> {
+export async function createOrg(key: string | null, name: string): Promise<OrgView> {
   return request<OrgView>(key, '/v1/orgs', {
     method: 'POST',
     body: JSON.stringify({ name }),
   });
 }
 
-export async function fetchMyOrgs(key: string): Promise<OrgView[]> {
+export async function fetchMyOrgs(key: string | null): Promise<OrgView[]> {
   return request<OrgView[]>(key, '/v1/orgs');
 }
 
-export async function fetchOrgMembers(key: string, orgId: number): Promise<OrgMemberView[]> {
+export async function fetchOrgMembers(key: string | null, orgId: number): Promise<OrgMemberView[]> {
   return request<OrgMemberView[]>(key, `/v1/orgs/${orgId}/members`);
 }
 
@@ -898,7 +900,7 @@ export async function fetchOrgMembers(key: string, orgId: number): Promise<OrgMe
  * and that token as the code. It is shown once and only its hash is stored.
  */
 export async function createMember(
-  key: string,
+  key: string | null,
   orgId: number,
   email: string,
   displayName: string,
@@ -913,7 +915,7 @@ export async function createMember(
 
 /** Change a role and/or a display name. At least one field must be present. */
 export async function patchMember(
-  key: string,
+  key: string | null,
   orgId: number,
   accountId: number,
   patch: { role?: OrgRole; display_name?: string },
@@ -926,7 +928,7 @@ export async function patchMember(
 
 /** Mint a one-time invitation token. Nothing is emailed: the admin delivers it. */
 export async function createInvitation(
-  key: string,
+  key: string | null,
   orgId: number,
   email: string,
   role: Exclude<OrgRole, 'owner'>,
@@ -938,7 +940,7 @@ export async function createInvitation(
 }
 
 export async function fetchInvitations(
-  key: string,
+  key: string | null,
   orgId: number,
 ): Promise<InvitationView[]> {
   return request<InvitationView[]>(key, `/v1/orgs/${orgId}/invitations`);
@@ -946,7 +948,7 @@ export async function fetchInvitations(
 
 /** Revoke an invitation: the token stops working. */
 export async function deleteInvitation(
-  key: string,
+  key: string | null,
   orgId: number,
   invitationId: number,
 ): Promise<void> {
@@ -956,7 +958,7 @@ export async function deleteInvitation(
 }
 
 /** Redeem an invitation token against the authenticated account (burns it). */
-export async function acceptInvitation(key: string, token: string): Promise<OrgView> {
+export async function acceptInvitation(key: string | null, token: string): Promise<OrgView> {
   return request<OrgView>(key, '/v1/invitations/accept', {
     method: 'POST',
     body: JSON.stringify({ token }),
@@ -969,7 +971,7 @@ export async function acceptInvitation(key: string, token: string): Promise<OrgV
  * `route` needs the mailbox that receives the mail; `discard` must not name one.
  */
 export async function setCatchall(
-  key: string,
+  key: string | null,
   domain: string,
   action: CatchallAction,
   targetAccountId?: number,
@@ -985,12 +987,12 @@ export async function setCatchall(
   });
 }
 
-export async function fetchCatchalls(key: string): Promise<CatchallRuleView[]> {
+export async function fetchCatchalls(key: string | null): Promise<CatchallRuleView[]> {
   return request<CatchallRuleView[]>(key, '/v1/catchall');
 }
 
 /** Remove a rule, restoring the `550` for unknown local parts. */
-export async function deleteCatchall(key: string, domain: string): Promise<void> {
+export async function deleteCatchall(key: string | null, domain: string): Promise<void> {
   await request<void>(key, `/v1/catchall/${encodeURIComponent(domain)}`, { method: 'DELETE' });
 }
 
@@ -1096,7 +1098,7 @@ export async function hasSession(): Promise<boolean> {
 // ------------------------------------------------------------- Folders / read state (PR #20)
 
 export async function patchMessage(
-  key: string,
+  key: string | null,
   id: string,
   patch: { folder?: MailFolder; read?: boolean },
 ): Promise<void> {
@@ -1106,11 +1108,11 @@ export async function patchMessage(
   });
 }
 
-export async function deleteMessage(key: string, id: string): Promise<void> {
+export async function deleteMessage(key: string | null, id: string): Promise<void> {
   await request<void>(key, `/v1/messages/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
-export async function emptyTrash(key: string): Promise<number> {
+export async function emptyTrash(key: string | null): Promise<number> {
   const result = await request<{ deleted: number }>(key, '/v1/messages/empty-trash', {
     method: 'POST',
   });

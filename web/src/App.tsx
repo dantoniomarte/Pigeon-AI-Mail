@@ -211,7 +211,7 @@ export default function App(): JSX.Element {
 
   /* Mailbox data. */
   useEffect(() => {
-    if (apiKey === null) {
+    if (apiKey === null && !sessionActive) {
       setInbox([]);
       setSent([]);
       setListState('idle');
@@ -238,9 +238,12 @@ export default function App(): JSX.Element {
           return;
         }
         if (error instanceof ApiError && error.isUnauthorized) {
-          // A revoked or typo'd key sends the user back to Setup.
+          // A revoked/typo'd key or an expired session sends the user back
+          // to re-auth (Setup for key mode, Login for session mode).
           storeKey(null);
           setApiKey(null);
+          setSessionActive(false);
+          setApiKeyFallback(false);
           setListState('idle');
           notify('error', i18nInstance.t('auth.unauthorized'));
           return;
@@ -250,11 +253,11 @@ export default function App(): JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, [apiKey, activeFolder, reloadToken, notify, i18nInstance]);
+  }, [apiKey, activeFolder, reloadToken, sessionActive, notify, i18nInstance]);
 
   /* Drafts, fetched separately so their load state can be shown on its own. */
   useEffect(() => {
-    if (apiKey === null) {
+    if (apiKey === null && !sessionActive) {
       setDrafts([]);
       setDraftsState('idle');
       return;
@@ -278,11 +281,11 @@ export default function App(): JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, [apiKey, reloadToken]);
+  }, [apiKey, reloadToken, sessionActive]);
 
   /* Selected message body. Sent mail lives on /v1/emails (metadata only). */
   useEffect(() => {
-    if (apiKey === null || selectedId === null || view === 'sent') {
+    if ((apiKey === null && !sessionActive) || selectedId === null || view === 'sent') {
       setDetail(null);
       setDetailState('idle');
       return;
@@ -318,7 +321,7 @@ export default function App(): JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, [apiKey, selectedId, detailToken, view]);
+  }, [apiKey, selectedId, detailToken, view, sessionActive]);
 
   const refresh = useCallback(() => setReloadToken((token) => token + 1), []);
 
@@ -544,7 +547,7 @@ export default function App(): JSX.Element {
     );
   }
 
-  if (apiKey === null || apiKeyFallback) {
+  if ((apiKey === null && !sessionActive) || apiKeyFallback) {
     return (
       <Setup
         onReady={(key) => {

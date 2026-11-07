@@ -299,7 +299,9 @@
   },
   "auth": {
     "unauthorized": "Cette clé a été refusée. Connectez-vous avec une clé valide.",
-    "storedLocally": "Stockée uniquement dans ce navigateur"
+    "storedLocally": "Stockée uniquement dans ce navigateur",
+    "sessionMode": "Session par e-mail",
+    "sessionBadge": "session"
   },
   "admin": {
     "title": "Console d'administration",

@@ -35,7 +35,7 @@ import type { ComposeSeed } from '../App';
 import type { ToastKind } from './Toast';
 
 export interface ComposeProps {
-  apiKey: string;
+  apiKey: string | null;
   seed: ComposeSeed;
   onClose: () => void;
   onSent: (from: string) => void;
