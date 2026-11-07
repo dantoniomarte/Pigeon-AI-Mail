@@ -1,27 +1,31 @@
-# Instrucciones para agentes (plantilla — vale para todos los proyectos)
+# Agent instructions (template — applies to every project)
 
-## Aislamiento de sesión — OBLIGATORIO
+## Session isolation — MANDATORY
 
-Antes de escribir el primer archivo de una tarea nueva:
+Before writing the first file of a new task:
 
-1. Si ya estás en un worktree propio de esta tarea, continuá ahí.
-2. Si no, creá un worktree aislado en una rama nueva, siempre desde `origin/<rama-default>`
-   recién sincronizada, sin arrastrar otras ramas, sesiones ni PRs — por ejemplo
-   `git worktree add ../<repo>-worktrees/<tarea> -b feat/<tarea> origin/main` — y trabajá
-   exclusivamente ahí.
-3. Nunca trabajes, commitees ni cambies de rama en el checkout principal ni en worktrees que
-   no creó esta sesión. Si `git status` muestra archivos que no creaste vos, reportálos.
-4. Cada sesión abre, mergea y despliega SÓLO los PRs que abrió ella.
-5. Al terminar y mergear el PR, eliminá el worktree (`git worktree remove <ruta>`) para limpiar.
+1. If you are already in a worktree created for this task, continue there.
+2. Otherwise, create an isolated worktree on a new branch, always from a freshly
+   synced `origin/<default-branch>` — for example
+   `git worktree add ../<repo>-worktrees/<task> -b feat/<task> origin/main` — and
+   work exclusively there.
+3. Never work, commit, or switch branches in the main checkout or in worktrees
+   this session did not create. If `git status` shows files you did not create,
+   report them.
+4. Each session opens, merges, and deploys only the PRs it opened itself.
+5. After merging a PR, remove its worktree (`git worktree remove <path>`) to
+   clean up.
 
-## Revisión independiente antes del merge
+## Independent review before merge
 
-Todo PR lleva una sección `## Independent review` en su cuerpo, hecha por un agente distinto
-del que escribió el cambio. Sin ese artefacto, el PR no está listo para mergear.
+Every PR carries a `## Independent review` section in its body, written by an
+agent other than the one that authored the change. Without that artifact, the
+PR is not ready to merge.
 
-## Convenciones del flujo
+## Workflow conventions
 
-- 1 tarea = 1 rama (cortada desde `origin/main` fresco) = 1 PR.
-- El merge es squash (1 commit por PR) y la rama se borra sola.
-- Test primero, con mutación para verificar que el test puede fallar.
-- Si el proyecto usa Postgres: todo SQL nuevo se prueba contra Postgres desde el día uno.
+- 1 task = 1 branch (cut from a fresh `origin/main`) = 1 PR.
+- Merge is squash (1 commit per PR); the branch is deleted afterward.
+- Tests first, with a mutation check to prove the test can fail.
+- If the project uses Postgres: every new SQL query is tested against Postgres
+  from day one.

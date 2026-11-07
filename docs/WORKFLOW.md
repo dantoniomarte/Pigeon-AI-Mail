@@ -1,27 +1,32 @@
-# Flujo de trabajo (plantilla — condensado)
+# Workflow (template — condensed)
 
-## El ciclo
+## The cycle
 
 ```
-reproducir el error → test que falla → arreglo (verde) → rama nueva → PR
-→ revisión independiente → merge (squash) → deploy verificado
+reproduce the bug → failing test → fix (green) → new branch → PR
+→ independent review → merge (squash) → verified deploy
 ```
 
-## Reglas
+## Rules
 
-1. **Rama desde `origin/main` fresco**, nunca desde un main local viejo ni desde otra rama:
-   creá un worktree aislado en una rama nueva cortada desde `origin/main` recién sincronizado,
-   por ejemplo `git worktree add ../<repo>-worktrees/<tarea> -b feat/<tarea> origin/main`.
-2. **Un commit por cambio lógico**, con su test y su doc en el mismo commit.
-3. **Test primero** y verificar el test con una mutación: si sigue verde con el código roto,
-   el test no sirve.
-4. **Postgres primero** (si aplica): SQL nuevo sin prueba contra Postgres no está probado.
-5. **PR con cuerpo completo**: síntoma, causa, cambio, verificación + sección
-   `## Independent review` (agente distinto del autor).
-6. **Merge squash** con la CI del carril de PR en verde; la suite completa corre en `main`
-   antes del deploy.
-7. **Limpieza**: eliminá el worktree (`git worktree remove <ruta>`) después del merge.
+1. **Branch from a fresh `origin/main`**, never from a stale local main or
+   another branch: create an isolated worktree on a new branch cut from a
+   freshly synced `origin/main`, for example
+   `git worktree add ../<repo>-worktrees/<task> -b feat/<task> origin/main`.
+2. **One commit per logical change**, with its test and its doc in the same
+   commit.
+3. **Tests first**, and verify the test with a mutation: if it stays green with
+   the code broken, the test is worthless.
+4. **Postgres first** (when applicable): new SQL without a test against
+   Postgres is not tested.
+5. **PR with a complete body**: symptom, cause, change, verification + an
+   `## Independent review` section (a different agent from the author).
+6. **Squash merge** with the PR-lane CI green; the full suite runs on `main`
+   before deploy.
+7. **Cleanup**: remove the worktree (`git worktree remove <path>`) after the
+   merge.
 
-## Consulta antes de mergear (sin excepciones)
+## Consult before merging (no exceptions)
 
-Cambios sin vuelta atrás: facturación, autenticación/permisos, datos guardados, secretos.
+Hard-to-reverse changes: billing, authentication/permissions, stored data,
+secrets.
