@@ -687,6 +687,10 @@ Next steps:
    created by this installer at /etc/pigeon/master.key and must NOT change.
    See docs/ARCHITECTURE.md for additional keys with specific scopes.
 
+   Webmail login needs a one-time code per device until 2FA is enrolled —
+   mint it from the invitation endpoint and enroll 2FA right after your
+   first login (full day-one flow: docs/DEPLOY.md, "First login & 2FA").
+
 4. Webhooks: POST /v1/webhooks registers an HTTPS endpoint; delivery events are
    HMAC-signed. See docs/ARCHITECTURE.md and docs/DEPLOY.md.
 
