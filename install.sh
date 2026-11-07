@@ -39,10 +39,6 @@ if [[ -f "${BASH_SOURCE[0]:-}" ]]; then
     SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 fi
 
-# Early validation (before any side effects): flags that reference paths
-# must point at things that exist.
-[[ -z "$WEBMAIL_LOCAL_DIR" || -d "$WEBMAIL_LOCAL_DIR" ]] || die "--webmail-dir not found: $WEBMAIL_LOCAL_DIR"
-
 readonly KNOWN_AGENTS="pi claude cursor codex grok opencode gentle-shell hermes generic docker remote"
 readonly SERVICE_USER="pigeon"
 readonly INSTALL_BIN="/usr/local/bin/pigeon"
