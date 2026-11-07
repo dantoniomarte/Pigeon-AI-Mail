@@ -1,0 +1,12 @@
+{
+  "_note": "Remote agent access. v0.1 ships the REST API over HTTPS (see api-examples.md) and the stdio MCP server. The URL entry below is the registration to use once your client speaks MCP over HTTP against Pigeon; until that mount point is published, point remote agents at the REST API with the same pk_ key.",
+  "mcpServers": {
+    "pigeon-mail": {
+      "url": "https://mail.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${PIGEON_API_KEY}"
+      },
+      "description": "Pigeon Mail over HTTPS — send and read mail with a pk_ API key"
+    }
+  }
+}

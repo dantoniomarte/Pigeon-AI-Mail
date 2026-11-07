@@ -4,7 +4,7 @@
   <img src="assets/logo/pigeon.svg" alt="Pigeon Mail mascot — a carrier pigeon carrying an envelope" width="180">
   <p><strong>Self-hosted encrypted email infrastructure with an API-first soul.</strong><br>
   Send and receive email through a clean HTTP API (Resend-compatible), from any AI agent via MCP, or from an optional beautiful webmail. End-to-end encrypted where possible, always encrypted in transit and at rest.</p>
-  <p><a href="#status">Status</a> · <a href="#features">Features</a> · <a href="#quick-start">Quick start</a> · <a href="docs/API.md">API</a> · <a href="#for-ai-agents-mcp">Agents / MCP</a> · <a href="#security">Security</a> · <a href="#development">Development</a></p>
+  <p><a href="#status">Status</a> · <a href="#features">Features</a> · <a href="#quick-start">Quick start</a> · <a href="docs/API.md">API</a> · <a href="#for-ai-agents-mcp">Agents / MCP</a> · <a href="#connect-any-agent">Agent configs</a> · <a href="#security">Security</a> · <a href="#development">Development</a></p>
 </div>
 
 ---
@@ -139,6 +139,37 @@ re-issued, never recovered.
 > `send_email` and `draft_send` accept and validate the message today; the handoff
 to the delivery queue lands with the binary integration that wires the HTTP send
 pipeline into the MCP server (see [docs/ROADMAP.md](docs/ROADMAP.md)).
+
+## Connect any agent
+
+Pigeon talks to whatever harness you already run. [`config/`](config/) ships the
+**exact file format each platform expects**, ready to copy, with a `SETUP.md` per
+folder covering the placement path, the environment and a one-minute smoke test.
+Full guide: [docs/AGENTS.md](docs/AGENTS.md).
+
+| Agent | Config file | How to connect |
+|---|---|---|
+| **Pi** | [`config/pi/mcp.json`](config/pi/mcp.json) | copy to `~/.pi/agent/mcp.json` (user) or `.pi/mcp.json` (project), then `/mcp` |
+| **Gentle Shell** | [`config/gentle-shell/settings.json`](config/gentle-shell/settings.json) | merge `mcpServers` into `~/.gentle-shell/config.json`, then `/mcp` |
+| **Claude Desktop** | [`config/claude/claude_desktop_config.json`](config/claude/claude_desktop_config.json) | merge into the app's config dir, quit Claude completely, reopen |
+| **Cursor** | [`config/cursor/mcp.json`](config/cursor/mcp.json) | copy to `~/.cursor/mcp.json` or `.cursor/mcp.json`, reload the window |
+| **Codex CLI** | [`config/codex/config.toml`](config/codex/config.toml) | merge the `[mcp_servers.pigeon-mail]` tables into `~/.codex/config.toml`, then `/mcp` |
+| **Grok CLI** | [`config/grok/mcp.json`](config/grok/mcp.json) | copy to `~/.grok/mcp.json` (or the `mcpServers` block of `user-settings.json`) |
+| **opencode** | [`config/opencode/mcp.json`](config/opencode/mcp.json) | merge the `mcp` object into `opencode.json`, then `/mcp` |
+| **Hermes** | [`config/hermes/mcp.yaml`](config/hermes/mcp.yaml) | copy to the Hermes config dir as `mcp.yaml` |
+| **Any MCP client** | [`config/generic/mcp-stdio.json`](config/generic/mcp-stdio.json) | stdio descriptor: `pigeon mcp` + `PIGEON_DB_PATH`, `PIGEON_MASTER_KEY_FILE` |
+| **Docker (remote host)** | [`config/docker/mcp-docker.json`](config/docker/mcp-docker.json) | stdio through `docker exec -i <container> pigeon mcp` — no key leaves the host |
+| **Remote over HTTPS** | [`config/remote/`](config/remote/) | `PIGEON_URL` + `PIGEON_API_KEY` (`pk_…`); REST equivalents of all 25 tools in [`api-examples.md`](config/remote/api-examples.md) |
+
+```bash
+# copy a platform config and print its placement steps
+./install.sh --agent claude
+./install.sh --agent all --agent-dir ./pigeon-agent-config
+```
+
+The local (stdio) path opens the database and master key directly, so it is for
+agents running on the mail server. Everywhere else, use the Docker bridge or a
+`pk_…` key over HTTPS — same tools, same scopes, same audit log.
 
 ## Security
 

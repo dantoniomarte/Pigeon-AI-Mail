@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "pigeon-mail": {
+      "command": "pigeon",
+      "args": ["mcp"],
+      "env": {
+        "PIGEON_DB_PATH": "/var/lib/pigeon/pigeon.db",
+        "PIGEON_MASTER_KEY_FILE": "/etc/pigeon/master.key"
+      }
+    }
+  }
+}

@@ -1,0 +1,27 @@
+# Pigeon Mail — production docker-compose example
+# Place behind a TLS reverse proxy (Caddy/nginx) for HTTPS access
+services:
+  pigeon:
+    image: pigeon-mail:v0.1.0
+    container_name: pigeon-mail
+    restart: unless-stopped
+    network_mode: host  # required for SMTP :25 + direct DNS resolution
+    volumes:
+      - /var/lib/pigeon:/var/lib/pigeon
+      - /etc/pigeon/master.key:/etc/pigeon/master.key:ro
+    environment:
+      PIGEON_MASTER_KEY_FILE: /etc/pigeon/master.key
+      PIGEON_DB_PATH: /var/lib/pigeon/pigeon.db
+      PIGEON_HTTP_ADDR: "0.0.0.0:8000"
+      PIGEON_SMTP_IN_ADDR: ":25"
+      PIGEON_SMTP_OUT_STARTTLS: "required"
+      PIGEON_SMTP_HOSTNAME: "mail.example.com"
+      PIGEON_WEBMAIL: "on"
+      PIGEON_WEBMAIL_DIR: /usr/local/share/pigeon/web
+      PIGEON_PUBLIC_IP: "${PIGEON_PUBLIC_IP}"
+      PIGEON_LOG: info
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"

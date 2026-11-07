@@ -1,0 +1,14 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "pigeon-mail": {
+      "type": "local",
+      "command": ["pigeon", "mcp"],
+      "environment": {
+        "PIGEON_DB_PATH": "/var/lib/pigeon/pigeon.db",
+        "PIGEON_MASTER_KEY_FILE": "/etc/pigeon/master.key"
+      },
+      "enabled": true
+    }
+  }
+}

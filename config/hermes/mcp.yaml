@@ -1,0 +1,26 @@
+# Pigeon Mail — Hermes agent MCP configuration.
+#
+# Hermes reads MCP servers from a YAML document. Local servers are stdio
+# processes; remote servers are HTTPS endpoints with a bearer token.
+#
+# Place at: <hermes config dir>/mcp.yaml (project or user scope).
+
+version: 1
+
+mcp:
+  servers:
+    pigeon-mail:
+      transport: stdio
+      command: pigeon
+      args:
+        - mcp
+      env:
+        PIGEON_DB_PATH: /var/lib/pigeon/pigeon.db
+        PIGEON_MASTER_KEY_FILE: /etc/pigeon/master.key
+      # Startup budget: the process opens SQLite and the master key.
+      startup_timeout_seconds: 20
+      tool_timeout_seconds: 120
+      enabled: true
+      description: >-
+        Pigeon Mail — send and read mail, manage organizations, catch-all
+        routing, drafts, folders, domains, suppressions and API keys.

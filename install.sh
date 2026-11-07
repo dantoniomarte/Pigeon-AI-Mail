@@ -24,10 +24,22 @@
 # the existing master key and database untouched.
 #
 # No eval anywhere; every expansion is quoted.
+#
+# Agent configs: `--agent <platform>` copies the ready-made MCP configuration for
+# that platform (from ./config/<platform>/) and prints where to place it. Used
+# WITHOUT --domain it does only that — no root, no service, no files written
+# outside the destination directory.
 
 set -euo pipefail
 
 readonly SCRIPT_NAME="${0##*/}"
+# Directory this script lives in; empty when piped from curl (no checkout).
+SCRIPT_DIR=""
+if [[ -f "${BASH_SOURCE[0]:-}" ]]; then
+    SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+fi
+
+readonly KNOWN_AGENTS="pi claude cursor codex grok opencode gentle-shell hermes generic docker remote"
 readonly SERVICE_USER="pigeon"
 readonly INSTALL_BIN="/usr/local/bin/pigeon"
 readonly CONFIG_DIR="/etc/pigeon"
@@ -46,6 +58,9 @@ DATA_DIR="/var/lib/pigeon"
 LOCAL_BIN=""
 WANT_WEBMAIL=1
 START_SERVICE=1
+AGENT_TARGETS=()
+AGENT_DIR=""
+AGENT_CONFIG_SRC="${PIGEON_CONFIG_SRC:-}"
 
 info() { printf '==> %s\n' "$*"; }
 warn() { printf 'warning: %s\n' "$*" >&2; }
@@ -65,29 +80,164 @@ cleanup_temp() {
 }
 trap cleanup_temp EXIT
 
+# ---------------------------------------------------------------------------
+# Agent configuration helpers
+# ---------------------------------------------------------------------------
+
+# add_agents <value>: accept "claude", "pi,codex" or "all" (repeatable flag).
+add_agents() {
+    local raw="$1" item known
+    local -a items=()
+    [[ -n "$raw" ]] || die "--agent needs a value"
+    # Split on commas only; the loop below keeps the default IFS so the "all"
+    # expansion (a space-separated list) still works.
+    IFS=',' read -r -a items <<<"$raw"
+    for item in ${items[@]+"${items[@]}"}; do
+        item="${item// /}"
+        [[ -n "$item" ]] || continue
+        if [[ "$item" == "all" ]]; then
+            for known in $KNOWN_AGENTS; do
+                AGENT_TARGETS+=("$known")
+            done
+            continue
+        fi
+        case " $KNOWN_AGENTS " in
+            *" $item "*) AGENT_TARGETS+=("$item") ;;
+            *) die "unknown --agent '${item}' (choose: ${KNOWN_AGENTS// /, }, or all)" ;;
+        esac
+    done
+}
+
+# agent_config_source: the config/ tree that ships with the checkout.
+agent_config_source() {
+    if [[ -n "$AGENT_CONFIG_SRC" ]]; then
+        printf '%s\n' "$AGENT_CONFIG_SRC"
+        return 0
+    fi
+    if [[ -n "$SCRIPT_DIR" && -d "${SCRIPT_DIR}/config" ]]; then
+        printf '%s\n' "${SCRIPT_DIR}/config"
+        return 0
+    fi
+    return 1
+}
+
+# agent_place_hint <platform>: where the copied file belongs.
+agent_place_hint() {
+    case "$1" in
+        pi) printf '~/.pi/agent/mcp.json (user) or <project>/.pi/mcp.json\n' ;;
+        claude) printf 'claude_desktop_config.json -> the Claude config dir (macOS: ~/Library/Application Support/Claude)\n' ;;
+        cursor) printf 'mcp.json -> ~/.cursor/mcp.json (global) or <project>/.cursor/mcp.json\n' ;;
+        codex) printf 'config.toml -> ~/.codex/config.toml (merge the [mcp_servers.pigeon-mail] tables)\n' ;;
+        grok) printf 'mcp.json -> ~/.grok/mcp.json (or the mcpServers block of user-settings.json)\n' ;;
+        opencode) printf 'mcp.json -> ~/.config/opencode/opencode.json (merge the "mcp" object)\n' ;;
+        gentle-shell) printf 'settings.json -> ~/.gentle-shell/config.json (merge the "mcpServers" object)\n' ;;
+        hermes) printf 'mcp.yaml -> ~/.hermes/mcp.yaml (or the Hermes config directory)\n' ;;
+        generic) printf "any client's mcpServers map (command: pigeon mcp)\n" ;;
+        docker) printf "any client's mcpServers map (docker exec -i <container> pigeon mcp)\n" ;;
+        remote) printf 'nothing to place: export PIGEON_URL and PIGEON_API_KEY for the agent\n' ;;
+        *) printf '(see SETUP.md)\n' ;;
+    esac
+}
+
+# agent_test_hint <platform>: the shortest proof that the connection works.
+agent_test_hint() {
+    case "$1" in
+        remote)
+            printf 'curl -sS "$PIGEON_URL/readyz"   # then GET /v1/messages with the key\n'
+            ;;
+        docker)
+            printf 'docker exec -i <container> /usr/local/bin/pigeon mcp  <<< initialize/tools-list\n'
+            ;;
+        *)
+            printf "pigeon mcp with an initialize + tools/list request on stdin  # expect 25 tools\n"
+            ;;
+    esac
+}
+
+# export_agent_configs <dest-root>: copy every selected platform folder and print
+# the placement + test for each. Idempotent: re-running overwrites the copies.
+# Nothing secret is copied — the configs only carry paths, and an API key is
+# never written by this installer.
+export_agent_configs() {
+    local dest_root="$1" src platform file seen count=0
+    local -a selected=()
+
+    src="$(agent_config_source)" || die "agent configs not found — run this from a checkout, or set PIGEON_CONFIG_SRC=/path/to/repo/config"
+    [[ -d "$src" ]] || die "agent config directory not found: ${src}"
+
+    # De-duplicate while keeping the order the operator asked for.
+    for platform in ${AGENT_TARGETS[@]+"${AGENT_TARGETS[@]}"}; do
+        for seen in ${selected[@]+"${selected[@]}"}; do
+            [[ "$seen" == "$platform" ]] && continue 2
+        done
+        selected+=("$platform")
+    done
+
+    for platform in ${selected[@]+"${selected[@]}"}; do
+        [[ -d "${src}/${platform}" ]] || die "no config for '${platform}' under ${src}"
+    done
+
+    install -d -m 0755 -- "$dest_root"
+    for platform in ${selected[@]+"${selected[@]}"}; do
+        install -d -m 0755 -- "${dest_root}/${platform}"
+        for file in "${src}/${platform}"/*; do
+            [[ -f "$file" ]] || continue
+            install -m 0644 -- "$file" "${dest_root}/${platform}/$(basename -- "$file")"
+        done
+        count=$((count + 1))
+    done
+
+    printf '\nAgent configuration exported to %s\n\n' "$dest_root"
+    for platform in ${selected[@]+"${selected[@]}"}; do
+        printf '  [%s]  %s/\n' "$platform" "${dest_root}/${platform}"
+        printf '      place : %s\n' "$(agent_place_hint "$platform")"
+        printf '      test  : %s\n' "$(agent_test_hint "$platform")"
+        printf '      setup : %s/%s/SETUP.md   (guide: docs/AGENTS.md)\n\n' \
+            "$dest_root" "$platform"
+    done
+    printf '  %d platform(s) exported. Full guide: docs/AGENTS.md\n' "$count"
+    printf '  These files contain no secrets (paths and URLs only).\n\n'
+}
+
 usage() {
     cat <<'USAGE'
 Pigeon Mail installer (Linux + systemd).
 
 Usage: install.sh --domain <domain> [options]
+       install.sh --agent <platform> [--agent <platform>...] [--agent-dir <path>]
 
-Required:
+Required (server install):
   --domain <domain>   Mail domain this instance serves (e.g. example.com).
                       MX, SPF, DKIM and DMARC are published ON this domain; the
                       host that answers :25 is mail.<domain> in the printed
                       records. Change the host name if it differs.
 
-Options:
+Server options:
   --port <port>       API/MCP HTTP port (default: 8000)
   --data-dir <path>   Database directory (default: /var/lib/pigeon)
   --bin <path>        Install this local `pigeon` binary instead of downloading
   --no-webmail        Do not install the optional webmail bundle
   --no-start          Write everything but do not enable/start the service
+
+Agent options:
+  --agent <platform>  Copy the ready-made agent configuration and print where to
+                      place it. Repeatable or comma-separated. Platforms:
+                        pi, claude, cursor, codex, grok, opencode, gentle-shell,
+                        hermes, generic, docker, remote, all
+                      Given WITHOUT --domain this only exports configs and exits
+                      (no root needed, nothing else is touched).
+  --agent-dir <path>  Destination root for --agent.
+                      Default: ./pigeon-agent-config in config-only mode,
+                      /etc/pigeon/agents with --domain.
+
   -h, --help          Show this help
 
 Examples:
   sudo ./install.sh --domain example.com
   sudo ./install.sh --domain example.com --bin ./target/release/pigeon --no-start
+  sudo ./install.sh --domain example.com --agent all
+  ./install.sh --agent claude
+  ./install.sh --agent pi,codex --agent-dir ~/.config/pigeon-agents
 USAGE
 }
 
@@ -121,6 +271,16 @@ while [[ $# -gt 0 ]]; do
             START_SERVICE=0
             shift
             ;;
+        --agent)
+            [[ $# -ge 2 ]] || die "--agent needs a value"
+            add_agents "$2"
+            shift 2
+            ;;
+        --agent-dir)
+            [[ $# -ge 2 ]] || die "--agent-dir needs a value"
+            AGENT_DIR="$2"
+            shift 2
+            ;;
         -h | --help)
             usage
             exit 0
@@ -136,10 +296,24 @@ done
 # Preconditions
 # ---------------------------------------------------------------------------
 
-[[ -n "$DOMAIN" ]] || {
+[[ -n "$DOMAIN" || ${#AGENT_TARGETS[@]} -gt 0 ]] || {
     usage >&2
-    die "--domain is required"
+    die "--domain is required (or --agent to export an agent configuration)"
 }
+
+# ---------------------------------------------------------------------------
+# Config-only mode: --agent without --domain writes nothing but the copies.
+# ---------------------------------------------------------------------------
+
+if [[ -z "$DOMAIN" ]]; then
+    if [[ -z "$AGENT_DIR" ]]; then
+        AGENT_DIR="${PWD}/pigeon-agent-config"
+    fi
+    info "config-only mode (--agent without --domain): no service, no root needed"
+    export_agent_configs "$AGENT_DIR"
+    exit 0
+fi
+
 [[ "$DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]] || die "invalid --domain: ${DOMAIN}"
 [[ "$API_PORT" =~ ^[0-9]+$ ]] || die "invalid --port: ${API_PORT}"
 # 10# forces base 10 so a leading zero ("08000") is not read as octal.
@@ -404,6 +578,19 @@ if [[ "$START_SERVICE" -eq 1 ]]; then
     systemctl --no-pager --lines=0 status pigeon.service || true
 else
     info "not starting (--no-start). Enable with: systemctl daemon-reload && systemctl enable --now pigeon"
+fi
+
+# ---------------------------------------------------------------------------
+# Agent configuration (optional)
+# ---------------------------------------------------------------------------
+
+if [[ ${#AGENT_TARGETS[@]} -gt 0 ]]; then
+    # Server-owned copy by default; the operator copies it to the agent's own
+    # config path as the agent's user. The files hold paths and URLs only.
+    if [[ -z "$AGENT_DIR" ]]; then
+        AGENT_DIR="${CONFIG_DIR}/agents"
+    fi
+    export_agent_configs "$AGENT_DIR"
 fi
 
 # ---------------------------------------------------------------------------
