@@ -50,6 +50,7 @@ export default function Login({ onSuccess, onUseApiKey }: LoginProps): JSX.Eleme
             className="input"
             type="email"
             autoComplete="username"
+            autoFocus
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             placeholder={t('login.emailPlaceholder')}

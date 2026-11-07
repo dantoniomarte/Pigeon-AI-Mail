@@ -394,5 +394,16 @@
     "disabled": "2FA desactivado",
     "enrollFailed": "No se pudo iniciar la activación",
     "badCode": "Código incorrecto o vencido"
+  },
+  "landing": {
+    "badge": "Cifrado por defecto",
+    "title": "Correo sellado que sos dueño de verdad",
+    "subtitle": "Un servidor de email chico y rápido con API limpia, acceso por agentes IA vía MCP y cifrado extremo a extremo cuando es posible — en infraestructura que controlás vos.",
+    "signIn": "Ingresar con email",
+    "apiKey": "Usar una API key",
+    "pointEncrypted": "Cifrado en tránsito y en reposo — extremo a extremo cuando el destinatario publica clave",
+    "pointAgents": "Servidor MCP de 25 tools: cualquier agente IA opera toda la plataforma",
+    "pointSelfHosted": "Un binario Rust, SQLite, Docker o systemd",
+    "footerTagline": "Pigeon Mail — AGPL-3.0 · infraestructura de email self-hosted"
   }
 }

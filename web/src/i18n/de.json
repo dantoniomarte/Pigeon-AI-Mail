@@ -394,5 +394,16 @@
     "disabled": "2FA deaktiviert",
     "enrollFailed": "Start fehlgeschlagen",
     "badCode": "Falscher oder abgelaufener Code"
+  },
+  "landing": {
+    "badge": "Standardmäßig verschlüsselt",
+    "title": "Versiegelte Post, die wirklich Ihnen gehört",
+    "subtitle": "Ein kleiner, schneller Mailserver mit sauberer API, KI-Agent-Zugang über MCP und Ende-zu-Ende-Verschlüsselung, wo möglich — auf Infrastruktur, die Sie kontrollieren.",
+    "signIn": "Mit E-Mail anmelden",
+    "apiKey": "API-Schlüssel verwenden",
+    "pointEncrypted": "Verschlüsselt in Transit und Ruhezustand — Ende-zu-Ende, wenn der Empfänger einen Schlüssel veröffentlicht",
+    "pointAgents": "MCP-Server mit 25 Tools: jeder KI-Agent steuert die gesamte Plattform",
+    "pointSelfHosted": "Ein Rust-Binary, SQLite, Docker oder systemd",
+    "footerTagline": "Pigeon Mail — AGPL-3.0 · selbst gehostete E-Mail-Infrastruktur"
   }
 }

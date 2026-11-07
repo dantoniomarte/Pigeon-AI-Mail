@@ -34,6 +34,7 @@ import DraftsList from './components/DraftsList';
 import MailList, { type MailListItem } from './components/MailList';
 import MailView from './components/MailView';
 import Settings from './components/Settings';
+import Landing from './components/Landing';
 import Login from './components/Login';
 import Setup from './components/Setup';
 import { hasSession } from './api';
@@ -119,6 +120,7 @@ export default function App(): JSX.Element {
   const [sessionActive, setSessionActive] = useState<boolean>(false);
   const [sessionChecked, setSessionChecked] = useState<boolean>(false);
   const [apiKeyFallback, setApiKeyFallback] = useState<boolean>(false);
+  const [loginOpen, setLoginOpen] = useState<boolean>(false);
 
   // Resolve the HttpOnly session cookie once on mount (JD-A-003).
   useEffect(() => {
@@ -450,6 +452,7 @@ export default function App(): JSX.Element {
     setReadIds(new Set<string>());
     setSessionActive(false);
     setApiKeyFallback(false);
+    setLoginOpen(false);
     notify('info', t('toast.signedOut'));
   }, [notify, t]);
 
@@ -535,12 +538,24 @@ export default function App(): JSX.Element {
   }
 
   if (!sessionActive && !apiKeyFallback) {
+    if (!loginOpen) {
+      return (
+        <Landing
+          onLogin={() => setLoginOpen(true)}
+          onApiKey={() => {
+            setApiKeyFallback(true);
+          }}
+        />
+      );
+    }
     return (
       <Login
         onSuccess={() => {
           setSessionActive(true);
+          setLoginOpen(false);
         }}
         onUseApiKey={() => {
+          setLoginOpen(false);
           setApiKeyFallback(true);
         }}
       />
@@ -554,6 +569,7 @@ export default function App(): JSX.Element {
           storeKey(key);
           setApiKey(key);
           setApiKeyFallback(false);
+          setSessionActive(true); // Bearer-only sessions are valid; skip Landing
         }}
         lang={lang}
         onLangChange={(code) => {

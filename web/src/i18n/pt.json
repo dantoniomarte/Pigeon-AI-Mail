@@ -394,5 +394,16 @@
     "disabled": "2FA desativado",
     "enrollFailed": "Não foi possível iniciar",
     "badCode": "Código incorreto ou expirado"
+  },
+  "landing": {
+    "badge": "Criptografado por padrão",
+    "title": "E-mail selado que é realmente seu",
+    "subtitle": "Um servidor de e-mail pequeno e rápido com API limpa, acesso por agentes de IA via MCP e criptografia ponta a ponta quando possível — em infraestrutura que você controla.",
+    "signIn": "Entrar com e-mail",
+    "apiKey": "Usar uma API key",
+    "pointEncrypted": "Criptografado em trânsito e em repouso — ponta a ponta quando o destinatário publica chave",
+    "pointAgents": "Servidor MCP de 25 tools: qualquer agente de IA opera toda a plataforma",
+    "pointSelfHosted": "Um binário Rust, SQLite, Docker ou systemd",
+    "footerTagline": "Pigeon Mail — AGPL-3.0 · infraestrutura de e-mail self-hosted"
   }
 }

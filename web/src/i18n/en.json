@@ -394,5 +394,16 @@
     "disabled": "2FA disabled",
     "enrollFailed": "Could not start enrollment",
     "badCode": "Wrong or expired code"
+  },
+  "landing": {
+    "badge": "Encrypted by default",
+    "title": "Sealed mail you actually own",
+    "subtitle": "A small, fast email server with a clean API, AI-agent access over MCP, and end-to-end encryption where possible — running on infrastructure you control.",
+    "signIn": "Sign in with email",
+    "apiKey": "Use an API key",
+    "pointEncrypted": "Encrypted in transit and at rest — end-to-end when the recipient publishes a key",
+    "pointAgents": "25-tool MCP server: any AI agent operates the full deployment",
+    "pointSelfHosted": "One Rust binary, SQLite storage, Docker or systemd",
+    "footerTagline": "Pigeon Mail — AGPL-3.0 · self-hosted email infrastructure"
   }
 }
