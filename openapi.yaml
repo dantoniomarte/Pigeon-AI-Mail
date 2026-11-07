@@ -14,14 +14,17 @@ info:
     (Resend returns 200), and `email.delivered`-style webhook field names are documented in the Event
     schemas below. Everything else follows the Resend send schema.
 
-    Scopes: `send` → POST /v1/emails*, DELETE /v1/emails/{id}, template and draft writes. `read` → all GETs
-    (metadata + sealed blobs). `full` → everything, including decrypted bodies, keys, webhooks, domains, suppressions,
-    account admin, and multi-tenant administration (organizations, members, invitations, catch-all routing).
+    Scopes: `send` → POST /v1/emails*, DELETE /v1/emails/{id}, template and draft writes, the sender-alias self
+    view (`GET /v1/aliases`) and the caller''s own catch-all pause (`POST /v1/catchall/me/pause|resume`). `read` → all
+    other GETs (metadata + sealed blobs). `full` → everything, including decrypted bodies, keys, webhooks, domains,
+    suppressions, account admin, sender-alias administration, and multi-tenant administration (organizations,
+    members, invitations, catch-all routing).
 
     Errors are RFC 7807 `application/problem+json`. Rate limits (per key): 10 req/s sustained, burst 50;
     daily send quota per account (default 50,000). Responses carry X-RateLimit-Limit / X-RateLimit-Remaining
     / X-RateLimit-Reset; 429 carries Retry-After. Problem types: rate-limited, quota-exceeded, idempotent-replay,
-    not-cancellable, validation, unauthorized, forbidden, not-found, conflict, last-owner, mfa-required.
+    not-cancellable, validation, unauthorized, forbidden, from-not-allowed, not-found, conflict, last-owner,
+    mfa-required.
 
     '
 servers:
@@ -38,6 +41,7 @@ tags:
 - name: account
 - name: orgs
 - name: catchall
+- name: aliases
 - name: system
 paths:
   /healthz:
@@ -284,6 +288,16 @@ paths:
           type: integer
           minimum: 0
           default: 0
+      - name: delivered_for
+        in: query
+        schema:
+          type: string
+          format: email
+        description: 'Only the inbox copies delivered **for** this address: a sender alias or the catch-all
+          local part the sender wrote. This is the webmail pseudo-folder filter; the message itself stays in
+          `inbox`. When it is present the listing is pinned to the inbox and `folder` is ignored.
+
+          '
       responses:
         '200':
           description: 'Page of messages, newest first, with the per-folder counts the sidebar renders
@@ -1243,6 +1257,9 @@ paths:
         the bootstrap token that logs it in. The token is shown once: only its Argon2id hash is
         stored, presenting it in `code` at `POST /v1/auth/login` burns it, and a replay is refused.
 
+        The address must be free: a mailbox that already exists and a **sender alias** both answer
+        `409 conflict`, because an address is either a mailbox or an alias, never both.
+
         '
       operationId: createOrgMember
       security:
@@ -1532,11 +1549,23 @@ paths:
     get:
       tags:
       - catchall
-      summary: Every catch-all rule (owner/admin of the organization)
+      summary: Catch-all rules and their assignees, as visible to the caller
+      description: 'An owner/admin sees every rule with every assignee. A member sees only the domains
+        where they hold the catch-all, and only their own row: a listing must never leak who else receives
+        that mail.
+
+        '
       operationId: listCatchallRules
       security:
       - bearerKey: []
       - sessionCookie: []
+      parameters:
+      - name: mine
+        in: query
+        schema:
+          type: boolean
+          default: false
+        description: Only the catch-alls the caller holds (their own pause switches).
       responses:
         '200':
           description: Rules, oldest first
@@ -1548,8 +1577,6 @@ paths:
                   $ref: '#/components/schemas/CatchallRule'
         '401':
           $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Problem'
       x-scopes:
       - full
   /v1/catchall/{domain}:
@@ -1557,9 +1584,11 @@ paths:
       tags:
       - catchall
       summary: Set what happens to unknown local parts of a domain
-      description: '`route` delivers into `target_account_id`, which must be a mailbox of that same
-        domain; `discard` accepts the message and drops it, so a sender cannot tell a real address
-        from a made-up one. With no rule the inbound server keeps answering `550`.
+      description: 'The rule is the **domain-level decision**, not a recipient list: `route` copies the
+        message into every non-paused assignee (see `POST /v1/catchall/{domain}/assign`), and `discard` accepts
+        and drops it so a sender cannot tell a real address from a made-up one. Re-putting a domain replaces
+        the action and keeps the assignees, so flipping the decision never forgets who was receiving the
+        mail. With no rule at all the inbound server keeps answering `550`.
 
         '
       operationId: putCatchallRule
@@ -1587,12 +1616,9 @@ paths:
                   enum:
                   - route
                   - discard
-                target_account_id:
-                  type: integer
-                  description: Required for `route`, forbidden for `discard`
       responses:
         '200':
-          description: The rule now in force
+          description: The rule now in force, with its assignees
           content:
             application/json:
               schema:
@@ -1601,8 +1627,6 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Problem'
-        '404':
-          $ref: '#/components/responses/Problem'
         '422':
           $ref: '#/components/responses/Problem'
       x-scopes:
@@ -1610,7 +1634,7 @@ paths:
     delete:
       tags:
       - catchall
-      summary: Remove a catch-all rule (unknown recipients go back to 550)
+      summary: Remove a catch-all rule and its assignees (unknown recipients go back to 550)
       operationId: deleteCatchallRule
       security:
       - bearerKey: []
@@ -1624,6 +1648,410 @@ paths:
       responses:
         '204':
           description: Deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - full
+  /v1/catchall/{domain}/assign:
+    post:
+      tags:
+      - catchall
+      summary: Give one account a copy of a domain catch-all mail (owner/admin)
+      description: 'A mailbox may hold the catch-all of its own domain only, and several mailboxes may
+        hold the same one. Assigning twice is `409 conflict`; a message is never delivered twice to the
+        same mailbox because of it.
+
+        The domain rule has to exist first: with no `PUT /v1/catchall/{domain}` this answers
+        `404 not-found` and writes nothing, because an assignment the rule can never apply to would be
+        a grant the listing shows and delivery ignores.
+
+        '
+      operationId: assignCatchall
+      security:
+      - bearerKey: []
+      - sessionCookie: []
+      parameters:
+      - name: domain
+        in: path
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+              - account_id
+              properties:
+                account_id:
+                  type: integer
+      responses:
+        '200':
+          description: The rule with its assignees after the change
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CatchallRule'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - full
+  /v1/catchall/{domain}/assign/{account_id}:
+    delete:
+      tags:
+      - catchall
+      summary: Stop one account receiving a domain catch-all (owner/admin)
+      description: Messages already delivered stay in the mailbox; only future delivery stops.
+      operationId: unassignCatchall
+      security:
+      - bearerKey: []
+      - sessionCookie: []
+      parameters:
+      - name: domain
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: account_id
+        in: path
+        required: true
+        schema:
+          type: integer
+      responses:
+        '204':
+          description: Unassigned
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - full
+  /v1/catchall/{domain}/assignments/{account_id}:
+    patch:
+      tags:
+      - catchall
+      summary: Pause or force-resume one member's catch-all copy (owner/admin)
+      description: 'The administrator override: a member pauses their own copy with `POST /v1/catchall/me/pause`,
+        and an owner/admin can pause **or resume** it here. Force-resuming somebody who paused and never
+        came back is why this exists; every call is audited as `catchall.force`.
+
+        '
+      operationId: patchCatchallAssignment
+      security:
+      - bearerKey: []
+      - sessionCookie: []
+      parameters:
+      - name: domain
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: account_id
+        in: path
+        required: true
+        schema:
+          type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+              - paused
+              properties:
+                paused:
+                  type: boolean
+      responses:
+        '200':
+          description: The assignment after the change
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CatchallAssignment'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - full
+  /v1/catchall/me/pause:
+    post:
+      tags:
+      - catchall
+      summary: Pause the caller's own catch-all copy (any member)
+      description: 'Session or API key; only the caller own row. Omit `domain` when the account holds
+        exactly one catch-all; holding several requires naming one, because guessing would pause the wrong
+        address. `409 conflict` when the caller holds none.
+
+        '
+      operationId: pauseOwnCatchall
+      security:
+      - bearerKey: []
+      - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CatchallSelfScope'
+      responses:
+        '200':
+          description: The assignment, now paused
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CatchallAssignment'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - send
+  /v1/catchall/me/resume:
+    post:
+      tags:
+      - catchall
+      summary: Resume the caller's own catch-all copy (any member)
+      operationId: resumeOwnCatchall
+      security:
+      - bearerKey: []
+      - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CatchallSelfScope'
+      responses:
+        '200':
+          description: The assignment, now live
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CatchallAssignment'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - send
+  /v1/aliases:
+    get:
+      tags:
+      - aliases
+      summary: Sender aliases visible to the caller
+      description: 'An owner/admin sees every alias of the deployment with its assignees. A member sees
+        only the aliases assigned to them, which is what the compose From list offers. `?mine=1` always
+        narrows to the caller own aliases, whatever their role.
+
+        '
+      operationId: listAliases
+      security:
+      - bearerKey: []
+      - sessionCookie: []
+      parameters:
+      - name: mine
+        in: query
+        schema:
+          type: boolean
+          default: false
+        description: Only the aliases assigned to the caller (the compose-box list).
+      responses:
+        '200':
+          description: Aliases, oldest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SenderAlias'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - send
+    post:
+      tags:
+      - aliases
+      summary: Claim a free address on a served domain as a sender alias (owner/admin)
+      description: 'An alias owns no mailbox: mail to it is copied into every assignee inbox and every
+        assignee may send as it. The address must parse, its domain must be one this deployment serves
+        (an account on it or a DKIM key for it), and it must collide with neither an account address nor
+        another alias.
+
+        The rule holds in both directions: an existing account cannot become an alias (`422`), and a new
+        mailbox can never be created on an alias address (`409 conflict` on `POST /v1/orgs/{id}/members`
+        and from the installer), so a shared address is never diverted into one inbox.
+
+        '
+      operationId: createAlias
+      security:
+      - bearerKey: []
+      - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+              - address
+              properties:
+                address:
+                  type: string
+                  format: email
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SenderAlias'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - full
+  /v1/aliases/{id}:
+    delete:
+      tags:
+      - aliases
+      summary: Delete a sender alias and every assignment to it (owner/admin)
+      description: Mail already delivered keeps its `delivered_for` marker; revoking a grant never rewrites
+        a mailbox history.
+      operationId: deleteAlias
+      security:
+      - bearerKey: []
+      - sessionCookie: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+      responses:
+        '204':
+          description: Deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - full
+  /v1/aliases/{id}/assign:
+    post:
+      tags:
+      - aliases
+      summary: Let one account send as the alias and receive its mail (owner/admin)
+      operationId: assignAlias
+      security:
+      - bearerKey: []
+      - sessionCookie: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+              - account_id
+              properties:
+                account_id:
+                  type: integer
+      responses:
+        '200':
+          description: The alias with its assignees after the change
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SenderAlias'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+      x-scopes:
+      - full
+  /v1/aliases/{id}/unassign:
+    post:
+      tags:
+      - aliases
+      summary: Stop one account sending as the alias and receiving its mail (owner/admin)
+      operationId: unassignAlias
+      security:
+      - bearerKey: []
+      - sessionCookie: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+              - account_id
+              properties:
+                account_id:
+                  type: integer
+      responses:
+        '200':
+          description: The alias with its assignees after the change
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SenderAlias'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -2487,6 +2915,14 @@ components:
           - trash
         read:
           type: boolean
+        delivered_for:
+          type: string
+          format: email
+          description: 'Address this copy was delivered for, when it is not the mailbox own: a sender
+            alias (`sales@example.com`) or the catch-all local part. Absent on ordinary mail; the webmail
+            groups the inbox by it.
+
+            '
     MessagePage:
       type: object
       additionalProperties: false
@@ -2503,6 +2939,25 @@ components:
           $ref: '#/components/schemas/PageMeta'
         counts:
           $ref: '#/components/schemas/FolderCounts'
+        delivered_for_counts:
+          type: array
+          description: Inbox counts per shared address, so a client renders one pseudo-folder per alias
+            or catch-all without a second request.
+          items:
+            $ref: '#/components/schemas/DeliveredForCount'
+    DeliveredForCount:
+      type: object
+      additionalProperties: false
+      required:
+      - address
+      - count
+      properties:
+        address:
+          type: string
+          format: email
+        count:
+          type: integer
+          minimum: 0
     FolderCounts:
       type: object
       additionalProperties: false
@@ -3214,6 +3669,7 @@ components:
             '
     CatchallRule:
       type: object
+      additionalProperties: false
       required:
       - domain
       - action
@@ -3226,9 +3682,79 @@ components:
           enum:
           - route
           - discard
-        target_account_id:
+        assignments:
+          type: array
+          description: Every account holding the catch-all, paused or live. A `route` rule copies the
+            message to each non-paused one; `discard` stores nothing and leaves the list alone.
+          items:
+            $ref: '#/components/schemas/CatchallAssignment'
+        created_at:
+          type: string
+          format: date-time
+    CatchallAssignment:
+      type: object
+      additionalProperties: false
+      required:
+      - account_id
+      - paused
+      - created_at
+      properties:
+        account_id:
           type: integer
-          description: Mailbox that receives the mail (`route` only)
+        email:
+          type: string
+          format: email
+          description: The mailbox address, so a client does not have to join two listings.
+        paused:
+          type: boolean
+          description: True suspends only this member's copy.
+        created_at:
+          type: string
+          format: date-time
+    CatchallSelfScope:
+      type: object
+      additionalProperties: false
+      properties:
+        domain:
+          type: string
+          description: Which catch-all to change. Omit it when the account holds exactly one.
+    SenderAlias:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - address
+      - domain
+      - created_at
+      properties:
+        id:
+          type: integer
+        address:
+          type: string
+          format: email
+          description: Normalized address (`sales@example.com`).
+        domain:
+          type: string
+        assignments:
+          type: array
+          description: Accounts that may send as the alias and receive a copy of its mail.
+          items:
+            $ref: '#/components/schemas/AliasAssignment'
+        created_at:
+          type: string
+          format: date-time
+    AliasAssignment:
+      type: object
+      additionalProperties: false
+      required:
+      - account_id
+      - created_at
+      properties:
+        account_id:
+          type: integer
+        email:
+          type: string
+          format: email
         created_at:
           type: string
           format: date-time

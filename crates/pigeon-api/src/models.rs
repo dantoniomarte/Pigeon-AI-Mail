@@ -925,6 +925,9 @@ pub struct SealedMessageView {
     pub subject: Option<String>,
     /// Arrival time.
     pub created_at: String,
+    /// Address this copy was delivered for, when it is not the account's own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivered_for: Option<String>,
     /// base64 sealed body.
     pub sealed_body: String,
     /// Authentication verdicts.
@@ -949,6 +952,9 @@ pub struct DecryptedMessageView {
     pub subject: Option<String>,
     /// Arrival time.
     pub created_at: String,
+    /// Address this copy was delivered for, when it is not the account's own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivered_for: Option<String>,
     /// Plain-text part.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body_text: Option<String>,
@@ -981,6 +987,11 @@ pub struct MessageSummary {
     pub folder: String,
     /// True once the message has been read (`read_at` set on the row).
     pub read: bool,
+    /// The address this copy was delivered for, when it is not the mailbox's own:
+    /// a sender alias or the catch-all local part. Absent on ordinary mail; the
+    /// webmail groups the inbox by it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivered_for: Option<String>,
 }
 
 /// `MessagePage.counts` — per-folder totals for the caller's account.
@@ -999,6 +1010,15 @@ pub struct FolderCounts {
     pub trash: i64,
 }
 
+/// One `delivered_for` marker with its inbox count: the webmail's pseudo-folder.
+#[derive(Debug, Clone, Serialize)]
+pub struct DeliveredForCount {
+    /// The alias or catch-all address the mail was delivered for.
+    pub address: String,
+    /// Inbox messages carrying that marker.
+    pub count: i64,
+}
+
 /// `MessagePage`.
 #[derive(Debug, Clone, Serialize)]
 pub struct MessagePage {
@@ -1008,6 +1028,10 @@ pub struct MessagePage {
     pub page: PageMeta,
     /// Per-folder counts for the account (sidebar badges).
     pub counts: FolderCounts,
+    /// Inbox counts per shared address (`delivered_for`), so a client can render
+    /// one pseudo-folder per alias or catch-all without a second request.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub delivered_for_counts: Vec<DeliveredForCount>,
 }
 
 /// `MessagePatch` — partial update of folder and/or read state.
@@ -1578,15 +1602,50 @@ pub struct InvitationCreated {
 }
 
 /// `CatchallRule` — what the inbound server does with unknown local parts of a
-/// managed domain.
+/// managed domain, plus who currently receives a routed copy.
 #[derive(Debug, Clone, Serialize)]
 pub struct CatchallRuleView {
     pub domain: String,
     /// `route` or `discard`.
     pub action: String,
-    /// Mailbox that receives the message (`route` only).
+    /// Every account holding the catch-all, paused or live. `route` copies the
+    /// message to each **non-paused** one; `discard` stores nothing and therefore
+    /// ignores this list without deleting it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub assignments: Vec<CatchallAssignmentView>,
+    pub created_at: String,
+}
+
+/// One account holding a catch-all, with its own pause switch.
+#[derive(Debug, Clone, Serialize)]
+pub struct CatchallAssignmentView {
+    pub account_id: i64,
+    /// The mailbox address, so a client does not have to join two listings.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub target_account_id: Option<i64>,
+    pub email: Option<String>,
+    /// `true` suspended only this member's copy.
+    pub paused: bool,
+    pub created_at: String,
+}
+
+/// `SenderAlias` — a secondary address on a served domain.
+#[derive(Debug, Clone, Serialize)]
+pub struct AliasView {
+    pub id: i64,
+    /// Normalized address (`sales@example.com`).
+    pub address: String,
+    pub domain: String,
+    /// Accounts that may send as the alias and receive a copy of its mail.
+    pub assignments: Vec<AliasAssignmentView>,
+    pub created_at: String,
+}
+
+/// One account holding a sender alias.
+#[derive(Debug, Clone, Serialize)]
+pub struct AliasAssignmentView {
+    pub account_id: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
     pub created_at: String,
 }
 
@@ -1642,14 +1701,55 @@ pub struct InvitationAccept {
 }
 
 /// `PUT /v1/catchall/{domain}` body.
+///
+/// Only the domain-level decision lives here: the recipients are assignments
+/// (`POST /v1/catchall/{domain}/assign`), because several accounts may hold the
+/// same catch-all and each may pause its own copy.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatchallUpsert {
     /// `route` or `discard`.
     pub action: String,
-    /// Required for `route`, forbidden for `discard`.
+}
+
+/// `POST /v1/catchall/{domain}/assign` body.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatchallAssign {
+    pub account_id: i64,
+}
+
+/// `PATCH /v1/catchall/{domain}/assignments/{account_id}` body: the admin force.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatchallAssignmentPatch {
+    /// `true` pauses that member's copy, `false` resumes it.
+    pub paused: bool,
+}
+
+/// `POST /v1/catchall/me/pause` and `/resume` body.
+///
+/// `domain` may be omitted when the caller holds exactly one catch-all; holding
+/// several requires naming one, because guessing would pause the wrong address.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatchallSelfScope {
     #[serde(default)]
-    pub target_account_id: Option<i64>,
+    pub domain: Option<String>,
+}
+
+/// `POST /v1/aliases` body: the address being claimed.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AliasCreate {
+    pub address: String,
+}
+
+/// `POST /v1/aliases/{id}/assign` body.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AliasAssign {
+    pub account_id: i64,
 }
 
 #[cfg(test)]

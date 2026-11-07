@@ -52,7 +52,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
 ```
 
 Then in Hermes, list connected servers (`/mcp` or the agent's tool panel) and
-confirm `pigeon-mail` reports 27 tools.
+confirm `pigeon-mail` reports 33 tools.
 
 ## Troubleshooting
 

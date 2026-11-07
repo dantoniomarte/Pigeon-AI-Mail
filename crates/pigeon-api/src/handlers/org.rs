@@ -54,7 +54,8 @@ use store::{InvitationRow, OrgAccountRow, OrgRow, Storage, StoreError};
 use crate::auth::ApiKeyContext;
 use crate::handlers::{blocking, ProblemJson};
 use crate::models::{
-    CatchallRuleView, CatchallUpsert, InvitationAccept, InvitationCreate, InvitationCreated,
+    CatchallAssign, CatchallAssignmentPatch, CatchallAssignmentView, CatchallRuleView,
+    CatchallSelfScope, CatchallUpsert, InvitationAccept, InvitationCreate, InvitationCreated,
     InvitationView, OrgCreate, OrgMemberCreate, OrgMemberCreated, OrgMemberPatch, OrgMemberView,
     OrgView,
 };
@@ -189,7 +190,7 @@ pub async fn create_member(
         let account_id = state
             .store
             .create_member_account(&email, &display_name, org_id, role)
-            .map_err(Problem::from)?;
+            .map_err(problem_for_member_create)?;
         // The bootstrap token is an invitation row for the account that was just
         // created: login (`POST /v1/auth/login` with it in `code`) and
         // `POST /v1/invitations/accept` are the same redemption path, and both
@@ -475,107 +476,346 @@ pub async fn accept_invitation(
     }
 }
 
-/// `PUT /v1/catchall/{domain}` — set the rule for one domain.
+/// `PUT /v1/catchall/{domain}` — set the domain-level decision.
 ///
 /// Full scope, and the caller must be an owner/admin of its own organization: a
 /// catch-all decides where **every** unknown address of a domain lands, which is a
 /// company-wide decision, not a personal preference. A personal workspace account
 /// is its own owner, so a single-account deployment can still configure it.
+///
+/// The recipients are **not** part of this body: they are assignments
+/// (`POST /v1/catchall/{domain}/assign`), so flipping the action never forgets who
+/// was receiving the mail.
 pub async fn put_catchall(
     State(state): State<AppState>,
     axum::extract::Extension(context): axum::extract::Extension<ApiKeyContext>,
     Path(domain): Path<String>,
     ProblemJson(request): ProblemJson<CatchallUpsert>,
 ) -> Response {
-    let result =
-        blocking(move || {
-            require_org_admin_of_own(&state, context.account_id)?;
-            let action = parse_action(&request.action)?;
-            match (action, request.target_account_id) {
-                (CatchallAction::Route, Some(target_account_id)) => {
-                    let (_, target_email) = state.store.get_account(target_account_id).map_err(
-                        |error| match error {
-                            StoreError::NotFound => {
-                                not_found(format!("account {target_account_id} does not exist"))
-                            }
-                            other => Problem::from(other),
-                        },
-                    )?;
-                    let rule_domain = domain.trim().to_ascii_lowercase();
-                    if target_email.domain() != rule_domain {
-                        return Err(validation(vec![FieldError::with_code(
-                            "target_account_id",
-                            "invalid",
-                            format!(
-                            "the catch-all target must be a mailbox of {rule_domain}, but account \
-                             {target_account_id} is {}",
-                            target_email
-                        ),
-                        )]));
-                    }
+    let result = blocking(move || {
+        require_org_admin_of_own(&state, context.account_id)?;
+        let action = parse_action(&request.action)?;
+        let rule_domain = domain.trim().trim_end_matches('.').to_ascii_lowercase();
+        state
+            .store
+            .set_catchall(&rule_domain, action)
+            .map_err(|error| match error {
+                StoreError::InvalidArgument(message) => {
+                    validation(vec![FieldError::with_code("domain", "invalid", message)])
                 }
-                (CatchallAction::Route, None) => {
-                    return Err(validation(vec![FieldError::with_code(
-                        "target_account_id",
-                        "required",
-                        "action=route needs the account that receives the mail",
-                    )]))
-                }
-                (CatchallAction::Discard, Some(_)) => {
-                    return Err(validation(vec![FieldError::with_code(
-                        "target_account_id",
-                        "invalid",
-                        "action=discard must not name a target: nothing is stored",
-                    )]))
-                }
-                (CatchallAction::Discard, None) => {}
-            }
-            state
-                .store
-                .set_catchall(&domain, action, request.target_account_id)
-                .map_err(|error| match error {
-                    StoreError::InvalidArgument(message) => {
-                        validation(vec![FieldError::with_code("domain", "invalid", message)])
-                    }
-                    other => Problem::from(other),
-                })?;
-            audit(
-                &state,
-                &context,
-                "catchall.put",
-                &format!(
-                    "domain={} action={}",
-                    domain.trim().to_ascii_lowercase(),
-                    action.as_str()
-                ),
-            );
-            let rule = state
-                .store
-                .get_catchall(&domain)
-                .map_err(Problem::from)?
-                .ok_or_else(|| not_found("the rule that was just written is gone"))?;
-            Ok(to_catchall_view(&rule))
-        })
-        .await;
+                other => Problem::from(other),
+            })?;
+        audit(
+            &state,
+            &context,
+            "catchall.put",
+            &format!("domain={rule_domain} action={}", action.as_str()),
+        );
+        let rule = state
+            .store
+            .get_catchall(&rule_domain)
+            .map_err(Problem::from)?
+            .ok_or_else(|| not_found("the rule that was just written is gone"))?;
+        to_catchall_view(&state, &rule)
+    })
+    .await;
     match result {
         Ok(view) => Json(view).into_response(),
         Err(problem) => problem.into_response(),
     }
 }
 
-/// `GET /v1/catchall` — every catch-all rule.
+/// `GET /v1/catchall` — the rules and assignments visible to the caller.
+///
+/// An owner/admin sees every rule with every assignee (it administers the whole
+/// domain). A member sees only the domains where **they** hold the catch-all, and
+/// only their own row: the listing must never leak who else receives that mail.
+/// `?mine=1` narrows any role to the caller's own assignments.
 pub async fn list_catchalls(
     State(state): State<AppState>,
     axum::extract::Extension(context): axum::extract::Extension<ApiKeyContext>,
+    axum::extract::Query(params): axum::extract::Query<crate::handlers::Params>,
 ) -> Response {
     let result = blocking(move || {
-        require_org_admin_of_own(&state, context.account_id)?;
-        let rules = state.store.list_catchalls().map_err(Problem::from)?;
-        Ok(rules.iter().map(to_catchall_view).collect::<Vec<_>>())
+        // `mine=1` is the caller's own list whatever their role: the settings
+        // screen has to show the pause switches *it* owns, not the whole domain.
+        let mine_only = crate::handlers::bool_param(&params, "mine", false)?;
+        let (_, role) = state
+            .store
+            .get_account_membership(context.account_id)
+            .map_err(Problem::from)?;
+        if role.is_admin() && !mine_only {
+            let rules = state.store.list_catchalls().map_err(Problem::from)?;
+            let mut views = Vec::with_capacity(rules.len());
+            for rule in &rules {
+                views.push(to_catchall_view(&state, rule)?);
+            }
+            return Ok(views);
+        }
+        let mine = state
+            .store
+            .catchall_assignments_for_account(context.account_id)
+            .map_err(Problem::from)?;
+        let mut views = Vec::with_capacity(mine.len());
+        for assignment in mine {
+            let Some(rule) = state
+                .store
+                .get_catchall(&assignment.domain)
+                .map_err(Problem::from)?
+            else {
+                continue;
+            };
+            let (_, email) = state
+                .store
+                .get_account(context.account_id)
+                .map_err(Problem::from)?;
+            views.push(CatchallRuleView {
+                domain: rule.domain,
+                action: rule.action.as_str().to_string(),
+                assignments: vec![CatchallAssignmentView {
+                    account_id: assignment.account_id,
+                    email: Some(email.to_string()),
+                    paused: assignment.paused,
+                    created_at: assignment.created_at,
+                }],
+                created_at: rule.created_at,
+            });
+        }
+        Ok(views)
     })
     .await;
     match result {
         Ok(views) => Json(views).into_response(),
+        Err(problem) => problem.into_response(),
+    }
+}
+
+/// `POST /v1/catchall/{domain}/assign` — give one account a copy of the mail.
+pub async fn assign_catchall(
+    State(state): State<AppState>,
+    axum::extract::Extension(context): axum::extract::Extension<ApiKeyContext>,
+    Path(domain): Path<String>,
+    ProblemJson(request): ProblemJson<CatchallAssign>,
+) -> Response {
+    let result = blocking(move || {
+        require_org_admin_of_own(&state, context.account_id)?;
+        let rule_domain = domain.trim().trim_end_matches('.').to_ascii_lowercase();
+        let target = require_mailbox_of_domain(&state, request.account_id, &rule_domain)?;
+        state
+            .store
+            .assign_catchall(&rule_domain, request.account_id, context.account_id)
+            .map_err(|error| match error {
+                StoreError::Conflict => Problem::new(
+                    StatusCode::CONFLICT,
+                    ProblemType::Conflict,
+                    format!("{target} already holds the catch-all of {rule_domain}"),
+                ),
+                // The rule has to exist first: an assignment it can never apply to
+                // would be a grant the admin listing shows and delivery ignores.
+                StoreError::NotFound => not_found(format!(
+                    "no catch-all rule for {rule_domain:?}: set the action with PUT \
+                     /v1/catchall/{rule_domain} first"
+                )),
+                other => Problem::from(other),
+            })?;
+        audit(
+            &state,
+            &context,
+            "catchall.assign",
+            &format!("domain={rule_domain} account={}", request.account_id),
+        );
+        let rule = state
+            .store
+            .get_catchall(&rule_domain)
+            .map_err(Problem::from)?
+            .ok_or_else(|| not_found(format!("no catch-all rule for {rule_domain:?}")))?;
+        to_catchall_view(&state, &rule)
+    })
+    .await;
+    match result {
+        Ok(view) => Json(view).into_response(),
+        Err(problem) => problem.into_response(),
+    }
+}
+
+/// `DELETE /v1/catchall/{domain}/assign/{account_id}` — stop one copy.
+pub async fn unassign_catchall(
+    State(state): State<AppState>,
+    axum::extract::Extension(context): axum::extract::Extension<ApiKeyContext>,
+    Path((domain, account_id)): Path<(String, String)>,
+) -> Response {
+    let result = blocking(move || {
+        require_org_admin_of_own(&state, context.account_id)?;
+        let rule_domain = domain.trim().trim_end_matches('.').to_ascii_lowercase();
+        let account_id = path_id(&account_id)?;
+        state
+            .store
+            .unassign_catchall(&rule_domain, account_id)
+            .map_err(|error| match error {
+                StoreError::NotFound => not_found(format!(
+                    "account {account_id} does not hold the catch-all of {rule_domain}"
+                )),
+                other => Problem::from(other),
+            })?;
+        audit(
+            &state,
+            &context,
+            "catchall.unassign",
+            &format!("domain={rule_domain} account={account_id}"),
+        );
+        Ok(())
+    })
+    .await;
+    match result {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(problem) => problem.into_response(),
+    }
+}
+
+/// `PATCH /v1/catchall/{domain}/assignments/{account_id}` — the admin force.
+///
+/// An administrator can pause or **resume** somebody else's copy, and the audit
+/// row says so (`catchall.force`): a member who paused while on holiday and never
+/// came back must not be able to silence a shared address forever.
+pub async fn patch_catchall_assignment(
+    State(state): State<AppState>,
+    axum::extract::Extension(context): axum::extract::Extension<ApiKeyContext>,
+    Path((domain, account_id)): Path<(String, String)>,
+    ProblemJson(request): ProblemJson<CatchallAssignmentPatch>,
+) -> Response {
+    let result = blocking(move || {
+        require_org_admin_of_own(&state, context.account_id)?;
+        let rule_domain = domain.trim().trim_end_matches('.').to_ascii_lowercase();
+        let account_id = path_id(&account_id)?;
+        state
+            .store
+            .set_catchall_paused(&rule_domain, account_id, request.paused)
+            .map_err(|error| match error {
+                StoreError::NotFound => not_found(format!(
+                    "account {account_id} does not hold the catch-all of {rule_domain}"
+                )),
+                other => Problem::from(other),
+            })?;
+        audit(
+            &state,
+            &context,
+            "catchall.force",
+            &format!(
+                "domain={rule_domain} account={account_id} paused={}",
+                request.paused
+            ),
+        );
+        let assignment = state
+            .store
+            .get_catchall_assignment(&rule_domain, account_id)
+            .map_err(Problem::from)?
+            .ok_or_else(|| not_found("the assignment that was just written is gone"))?;
+        Ok(to_assignment_view(&state, &assignment))
+    })
+    .await;
+    match result {
+        Ok(view) => Json(view).into_response(),
+        Err(problem) => problem.into_response(),
+    }
+}
+
+/// `POST /v1/catchall/me/pause` — suspend the caller's own copy.
+///
+/// Session or API key, and only the caller's row: pausing somebody else is the
+/// admin surface above. `409` when the caller does not hold a catch-all, so a
+/// client cannot believe it silenced mail it never received.
+pub async fn pause_own_catchall(
+    State(state): State<AppState>,
+    axum::extract::Extension(context): axum::extract::Extension<ApiKeyContext>,
+    ProblemJson(request): ProblemJson<CatchallSelfScope>,
+) -> Response {
+    set_own_pause(state, context, request, true).await
+}
+
+/// `POST /v1/catchall/me/resume` — resume the caller's own copy.
+pub async fn resume_own_catchall(
+    State(state): State<AppState>,
+    axum::extract::Extension(context): axum::extract::Extension<ApiKeyContext>,
+    ProblemJson(request): ProblemJson<CatchallSelfScope>,
+) -> Response {
+    set_own_pause(state, context, request, false).await
+}
+
+/// Shared body of the two self-service endpoints.
+async fn set_own_pause(
+    state: AppState,
+    context: ApiKeyContext,
+    request: CatchallSelfScope,
+    paused: bool,
+) -> Response {
+    let result = blocking(move || {
+        let domain = match request.domain.as_deref().map(str::trim) {
+            Some(raw) if !raw.is_empty() => Some(raw.trim_end_matches('.').to_ascii_lowercase()),
+            _ => None,
+        };
+        let assignments = state
+            .store
+            .catchall_assignments_for_account(context.account_id)
+            .map_err(Problem::from)?;
+        let matching: Vec<&store::CatchallAssignmentRow> = match &domain {
+            Some(domain) => assignments
+                .iter()
+                .filter(|row| &row.domain == domain)
+                .collect(),
+            // No domain named: the caller must hold exactly one, otherwise the
+            // answer would be a guess about which shared address they meant.
+            None => assignments.iter().collect(),
+        };
+        if matching.is_empty() {
+            return Err(Problem::new(
+                StatusCode::CONFLICT,
+                ProblemType::Conflict,
+                match &domain {
+                    Some(domain) => format!("you do not hold the catch-all of {domain}"),
+                    None => "you do not hold any catch-all".to_string(),
+                },
+            ));
+        }
+        if domain.is_none() && matching.len() > 1 {
+            return Err(validation(vec![FieldError::with_code(
+                "domain",
+                "required",
+                format!(
+                    "you hold {} catch-alls ({}); name the one to change",
+                    matching.len(),
+                    matching
+                        .iter()
+                        .map(|row| row.domain.clone())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            )]));
+        }
+        let row = matching[0];
+        state
+            .store
+            .set_catchall_paused(&row.domain, context.account_id, paused)
+            .map_err(Problem::from)?;
+        audit(
+            &state,
+            &context,
+            if paused {
+                "catchall.pause"
+            } else {
+                "catchall.resume"
+            },
+            &format!("domain={} account={}", row.domain, context.account_id),
+        );
+        let assignment = state
+            .store
+            .get_catchall_assignment(&row.domain, context.account_id)
+            .map_err(Problem::from)?
+            .ok_or_else(|| not_found("the assignment that was just written is gone"))?;
+        Ok(to_assignment_view(&state, &assignment))
+    })
+    .await;
+    match result {
+        Ok(view) => Json(view).into_response(),
         Err(problem) => problem.into_response(),
     }
 }
@@ -588,21 +828,19 @@ pub async fn delete_catchall(
 ) -> Response {
     let result = blocking(move || {
         require_org_admin_of_own(&state, context.account_id)?;
+        let rule_domain = domain.trim().trim_end_matches('.').to_ascii_lowercase();
         state
             .store
-            .delete_catchall(&domain)
+            .delete_catchall(&rule_domain)
             .map_err(|error| match error {
-                StoreError::NotFound => not_found(format!(
-                    "no catch-all rule for {:?}",
-                    domain.trim().to_ascii_lowercase()
-                )),
+                StoreError::NotFound => not_found(format!("no catch-all rule for {rule_domain:?}")),
                 other => Problem::from(other),
             })?;
         audit(
             &state,
             &context,
             "catchall.delete",
-            &format!("domain={}", domain.trim().to_ascii_lowercase()),
+            &format!("domain={rule_domain}"),
         );
         Ok(())
     })
@@ -749,6 +987,29 @@ fn map_role_error(error: StoreError) -> Problem {
     }
 }
 
+/// Map a member-creation failure onto the contract.
+///
+/// Both collision kinds are `409 conflict`; the detail is what differs, because
+/// "that address already has a mailbox" and "that address is a sender alias" lead
+/// an operator to different fixes.
+fn problem_for_member_create(error: StoreError) -> Problem {
+    match error {
+        StoreError::Conflict => Problem::new(
+            StatusCode::CONFLICT,
+            ProblemType::Conflict,
+            "that address already has an account: one address is one mailbox",
+        ),
+        StoreError::AliasShadow(address) => Problem::new(
+            StatusCode::CONFLICT,
+            ProblemType::Conflict,
+            format!(
+                "{address} is a sender alias: an account cannot own that address. Delete the                  alias first, or invite another address"
+            ),
+        ),
+        other => Problem::from(other),
+    }
+}
+
 /// Map an invitation-acceptance failure onto the contract.
 fn problem_for_accept(error: StoreError) -> Problem {
     match error {
@@ -793,13 +1054,69 @@ fn to_invitation_view(invitation: &InvitationRow) -> InvitationView {
     }
 }
 
-fn to_catchall_view(rule: &store::CatchallRuleRow) -> CatchallRuleView {
-    CatchallRuleView {
+fn to_catchall_view(
+    state: &AppState,
+    rule: &store::CatchallRuleRow,
+) -> Result<CatchallRuleView, Problem> {
+    let assignments = state
+        .store
+        .catchall_assignees(&rule.domain)
+        .map_err(Problem::from)?;
+    Ok(CatchallRuleView {
         domain: rule.domain.clone(),
         action: rule.action.as_str().to_string(),
-        target_account_id: rule.target_account_id,
+        assignments: assignments
+            .iter()
+            .map(|row| to_assignment_view(state, row))
+            .collect(),
         created_at: rule.created_at.clone(),
+    })
+}
+
+fn to_assignment_view(
+    state: &AppState,
+    assignment: &store::CatchallAssignmentRow,
+) -> CatchallAssignmentView {
+    // The address is best-effort: an account deleted between the two queries
+    // leaves the row behind for a reread, and the listing must not fail for it.
+    let email = state
+        .store
+        .get_account(assignment.account_id)
+        .ok()
+        .map(|(_, email)| email.to_string());
+    CatchallAssignmentView {
+        account_id: assignment.account_id,
+        email,
+        paused: assignment.paused,
+        created_at: assignment.created_at.clone(),
     }
+}
+
+/// The address of an account that must belong to `domain`, or the problem that
+/// says why the assignment cannot be made.
+fn require_mailbox_of_domain(
+    state: &AppState,
+    account_id: i64,
+    domain: &str,
+) -> Result<EmailAddress, Problem> {
+    let (_, email) = state
+        .store
+        .get_account(account_id)
+        .map_err(|error| match error {
+            StoreError::NotFound => not_found(format!("account {account_id} does not exist")),
+            other => Problem::from(other),
+        })?;
+    if email.domain() != domain {
+        return Err(validation(vec![FieldError::with_code(
+            "account_id",
+            "invalid",
+            format!(
+                "a catch-all assignee must be a mailbox of {domain}, but account {account_id} is \
+                 {email}"
+            ),
+        )]));
+    }
+    Ok(email)
 }
 
 /// Best-effort audit row: an audit failure is logged, never returned.

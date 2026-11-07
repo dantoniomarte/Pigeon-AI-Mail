@@ -128,6 +128,34 @@ fn membership(state: &McpState, actor: &Actor) -> Result<(Option<i64>, OrgRole),
         .map_err(|error| store_error("could not read the account's organization", error))
 }
 
+/// Refuse a sender the acting account may not use.
+///
+/// The mirror of the HTTP `from-not-allowed` rule: the account's own address, or
+/// any sender alias assigned to it. MCP acts as the bootstrap account, so the
+/// aliases it may use are that account's aliases and no other.
+pub fn ensure_from_allowed(
+    state: &McpState,
+    actor: &Actor,
+    from: &EmailAddress,
+) -> Result<(), String> {
+    let normalized = from.normalized();
+    if actor.email.normalized() == normalized {
+        return Ok(());
+    }
+    let aliases = state
+        .store
+        .aliases_for_account(actor.account_id)
+        .map_err(|error| store_error("could not read the account's aliases", error))?;
+    if aliases.iter().any(|alias| alias.address == normalized) {
+        return Ok(());
+    }
+    Err(format!(
+        "{normalized} is neither {} nor an alias assigned to it: ask an administrator to assign \
+         the alias first",
+        actor.email.normalized()
+    ))
+}
+
 /// Record an audit row; a failure is logged, never a reason to fail the call.
 pub fn audit(state: &McpState, action: &str, detail: &str) {
     if let Err(error) = state.store.audit(ACTOR, action, detail) {

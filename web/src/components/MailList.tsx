@@ -25,6 +25,14 @@ export interface MailListItem {
   unread: boolean;
   encrypted: boolean;
   status?: SentStatus;
+  /** The shared address (alias or catch-all) this copy arrived for, when it did. */
+  deliveredFor?: string;
+}
+
+/** One selectable "Delivered to" value with the inbox count behind it. */
+export interface DeliveredOption {
+  address: string;
+  count: number;
 }
 
 export interface MailListProps {
@@ -34,6 +42,11 @@ export interface MailListProps {
   selectedId: string | null;
   demo: boolean;
   counts?: FolderCounts | null;
+  /** Inbox counts per shared address: one pseudo-folder per alias/catch-all. */
+  deliveredOptions?: DeliveredOption[];
+  /** Active "Delivered to" filter, `null` for the whole folder. */
+  deliveredFilter?: string | null;
+  onDeliveredFilter?: (address: string | null) => void;
   onMarkRead?: (id: string, read: boolean) => void;
   onMove?: (id: string, folder: 'inbox' | 'spam' | 'trash') => void;
   onDelete?: (id: string) => void;
@@ -97,6 +110,9 @@ export default function MailList({
   selectedId,
   demo,
   counts,
+  deliveredOptions,
+  deliveredFilter,
+  onDeliveredFilter,
   onMarkRead,
   onMove,
   onDelete,
@@ -315,6 +331,27 @@ export default function MailList({
             </button>
           ) : null}
         </div>
+        {view === 'inbox' &&
+        deliveredOptions !== undefined &&
+        (deliveredOptions.length > 0 || (deliveredFilter ?? null) !== null) ? (
+          <label className="mail-list__delivered">
+            <span className="segmented__label">{t('mail.deliveredTo')}</span>
+            <select
+              className="input input--small"
+              value={deliveredFilter ?? ''}
+              onChange={(event) =>
+                onDeliveredFilter?.(event.target.value.length > 0 ? event.target.value : null)
+              }
+            >
+              <option value="">{t('mail.deliveredAll')}</option>
+              {deliveredOptions.map((option) => (
+                <option key={option.address} value={option.address}>
+                  {t('mail.deliveredOption', { address: option.address, count: option.count })}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
         {view === 'inbox' ? (
           <div className="segmented" role="group" aria-label={t('mail.all')}>
             <button
@@ -385,6 +422,14 @@ export default function MailList({
                               {item.status !== undefined ? (
                                 <span className={`badge badge--status is-${item.status}`}>
                                   {t(`mail.status.${item.status}`)}
+                                </span>
+                              ) : null}
+                              {item.deliveredFor !== undefined ? (
+                                <span
+                                  className="badge badge--muted"
+                                  title={t('mail.deliveredFor', { address: item.deliveredFor })}
+                                >
+                                  {t('mail.deliveredForShort', { address: item.deliveredFor })}
                                 </span>
                               ) : null}
                               {item.unread ? (

@@ -15,10 +15,11 @@ pub mod storage;
 pub use error::{Result, StoreError};
 pub use migrations::MIGRATIONS;
 pub use storage::{
-    CatchallRuleRow, ClaimedJob, DeadJob, DraftRow, InvitationRow, MessageRow, NewDraft,
-    NewMessage, OrgAccountRow, OrgRow, SessionRow, SqliteStorage, Storage, TemplateRow,
-    TotpEnrollmentRow, INVITATION_TTL_SECS, MAX_INVITATION_SCAN, MAX_LEASE_SECS, MAX_PAGE_LIMIT,
-    MAX_SESSION_TTL_SECS, MAX_TRASH_RETENTION_DAYS,
+    AliasAssignmentRow, CatchallAssignmentRow, CatchallRuleRow, ClaimedJob, DeadJob, DraftRow,
+    InvitationRow, MessageRow, NewDraft, NewMessage, OrgAccountRow, OrgRow, SenderAliasRow,
+    SessionRow, SqliteStorage, Storage, TemplateRow, TotpEnrollmentRow, INVITATION_TTL_SECS,
+    MAX_INVITATION_SCAN, MAX_LEASE_SECS, MAX_PAGE_LIMIT, MAX_SESSION_TTL_SECS,
+    MAX_TRASH_RETENTION_DAYS,
 };
 
 #[cfg(test)]

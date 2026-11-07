@@ -2,6 +2,9 @@ import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   AlertTriangle,
+  AtSign,
+  BellOff,
+  BellRing,
   FileText,
   Globe,
   Loader2,
@@ -16,12 +19,19 @@ import {
   addSuppressions,
   createTemplate,
   deleteTemplate,
+  fetchAliases,
+  fetchCatchalls,
   fetchDomainDns,
   fetchDomains,
   fetchSuppressions,
   fetchTemplates,
+  pauseMyCatchall,
   removeSuppression,
+  resumeMyCatchall,
   testSendTemplate,
+  type AliasView,
+  type CatchallAssignment,
+  type CatchallRuleView,
   type DnsRecord,
   type DomainView,
   type SuppressionEntry,
@@ -354,6 +364,161 @@ export function SuppressionsPanel({ apiKey, notify }: PanelsProps): JSX.Element 
           {t('settings.suppressAddBtn')}
         </button>
       </form>
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Send as (sender aliases + the caller's own catch-all copies)
+// ---------------------------------------------------------------------------
+
+/**
+ * What the account may send as, and which catch-alls it receives.
+ *
+ * Both are read from the caller's own rows (`?mine=1`): the settings screen is a
+ * self view, and administering other people's aliases belongs to the admin panel.
+ * The catch-all switch is the member's own pause — the one thing a member may
+ * change about a company-wide setting.
+ */
+export function SendAsPanel({ apiKey, notify }: PanelsProps): JSX.Element {
+  const { t } = useTranslation();
+  const [aliases, setAliases] = useState<AliasView[]>([]);
+  const [rules, setRules] = useState<CatchallRuleView[]>([]);
+  const [state, setState] = useState<LoadState>('idle');
+  const [token, setToken] = useState(0);
+  const [busy, setBusy] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setState('loading');
+    void Promise.all([fetchAliases(apiKey, true), fetchCatchalls(apiKey, true)])
+      .then(([aliasList, ruleList]) => {
+        if (cancelled) {
+          return;
+        }
+        setAliases(aliasList);
+        setRules(ruleList);
+        setState('ready');
+      })
+      .catch((error: unknown) => {
+        if (cancelled) {
+          return;
+        }
+        setState(error instanceof ApiError && error.isForbidden ? 'forbidden' : 'error');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [apiKey, token]);
+
+  const ownAssignment = (rule: CatchallRuleView): CatchallAssignment | null =>
+    rule.assignments !== undefined && rule.assignments.length > 0 ? rule.assignments[0] : null;
+
+  const toggleCatchall = useCallback(
+    (domain: string, paused: boolean) => {
+      setBusy(domain);
+      const call = paused ? resumeMyCatchall(apiKey, domain) : pauseMyCatchall(apiKey, domain);
+      void call
+        .then(() => {
+          notify('success', paused ? t('settings.catchallResumed') : t('settings.catchallPaused'));
+          setToken((current) => current + 1);
+        })
+        .catch(() => notify('error', t('common.error')))
+        .finally(() => setBusy(null));
+    },
+    [apiKey, notify, t],
+  );
+
+  const body = ((): JSX.Element => {
+    if (state === 'loading' || state === 'idle') {
+      return (
+        <div className="stack" aria-busy="true" aria-label={t('common.loading')}>
+          <span className="skeleton skeleton--line" />
+          <span className="skeleton skeleton--line skeleton--short" />
+        </div>
+      );
+    }
+    if (state === 'error' || state === 'forbidden') {
+      return (
+        <div className="state-card state-card--compact" role="alert">
+          <span className="state-card__icon">
+            <AlertTriangle size={20} />
+          </span>
+          <h3>{t('settings.sendAsUnavailable')}</h3>
+          <button type="button" className="btn btn--ghost" onClick={() => setToken((n) => n + 1)}>
+            {t('common.retry')}
+          </button>
+        </div>
+      );
+    }
+    return (
+      <div className="stack">
+        <div>
+          <h3 className="settings__subtitle">{t('settings.sendAsAliases')}</h3>
+          {aliases.length === 0 ? (
+            <p className="admin__hint">{t('settings.sendAsNone')}</p>
+          ) : (
+            <ul className="tag-list">
+              {aliases.map((alias) => (
+                <li key={alias.id} className="badge badge--enc">
+                  <AtSign size={11} aria-hidden="true" />
+                  {alias.address}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        <div>
+          <h3 className="settings__subtitle">{t('settings.catchallMine')}</h3>
+          {rules.length === 0 ? (
+            <p className="admin__hint">{t('settings.catchallMineNone')}</p>
+          ) : (
+            <ul className="stack">
+              {rules.map((rule) => {
+                const assignment = ownAssignment(rule);
+                const paused = assignment?.paused ?? false;
+                return (
+                  <li key={rule.domain} className="row-between">
+                    <span className="mono">{rule.domain}</span>
+                    <span className="badge badge--muted">
+                      {paused ? t('settings.catchallPausedBadge') : t('settings.catchallLiveBadge')}
+                    </span>
+                    <button
+                      type="button"
+                      className="btn btn--small btn--ghost"
+                      onClick={() => toggleCatchall(rule.domain, paused)}
+                      disabled={busy === rule.domain}
+                    >
+                      {busy === rule.domain ? (
+                        <Loader2 size={14} className="spin" aria-hidden="true" />
+                      ) : paused ? (
+                        <BellRing size={14} aria-hidden="true" />
+                      ) : (
+                        <BellOff size={14} aria-hidden="true" />
+                      )}
+                      {paused ? t('settings.catchallResume') : t('settings.catchallPause')}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+      </div>
+    );
+  })();
+
+  return (
+    <section className="panel">
+      <div className="panel__head">
+        <h2>
+          <Send size={15} aria-hidden="true" />
+          {t('settings.sendAsTitle')}
+        </h2>
+        <p>{t('settings.sendAsBody')}</p>
+      </div>
+      {body}
     </section>
   );
 }

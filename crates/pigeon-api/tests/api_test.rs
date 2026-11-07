@@ -202,7 +202,9 @@ fn build(
 
 fn valid_send() -> Value {
     json!({
-        "from": "Dana <dana@example.com>",
+        // The caller's own address: `from` is checked against the account and its
+        // sender aliases (see `send_from_an_unassigned_alias_is_refused`).
+        "from": "Dana <owner@example.com>",
         "to": ["carol@example.org"],
         "cc": ["dave@example.net"],
         "bcc": ["secret@example.org"],
@@ -243,7 +245,7 @@ async fn post_emails_queues_and_returns_a_lifecycle_view() {
     assert_eq!(view.body["id"], id.as_str());
     assert_eq!(view.body["status"], "queued");
     assert_eq!(view.body["subject"], "Invoice #2041 paid");
-    assert_eq!(view.body["from"], "dana@example.com");
+    assert_eq!(view.body["from"], "owner@example.com");
     assert_eq!(view.body["to"][0], "carol@example.org");
     assert_eq!(view.body["tags"][0], "billing");
     assert_eq!(view.body["sandbox"], false);
@@ -737,7 +739,7 @@ async fn templates_carry_a_description_and_have_no_cap() {
 
 fn draft_body() -> Value {
     json!({
-        "from": "Dana <dana@example.com>",
+        "from": "Dana <owner@example.com>",
         "to": ["carol@example.org"],
         "cc": ["dave@example.net"],
         "bcc": ["secret@example.org"],
@@ -1117,7 +1119,7 @@ async fn mailbox_folders_read_state_and_trash_purge() {
         message_id.starts_with("msg_"),
         "the mailbox surface speaks msg_ ids, got {message_id}"
     );
-    assert_eq!(items[0]["from_addr"], "dana@example.com");
+    assert_eq!(items[0]["from_addr"], "owner@example.com");
     assert_eq!(items[0]["folder"], "inbox");
     assert_eq!(items[0]["read"], false, "a new message is unread");
     assert_eq!(inbox.body["page"]["total"], 1);
@@ -1328,6 +1330,7 @@ fn seed_stored_message(
                 subject: subject.to_string(),
                 sealed_body: sealed,
                 idempotency_key: None,
+                delivered_for: None,
             },
             reserved,
         )
@@ -2062,6 +2065,22 @@ impl TestApp {
     }
 
     /// `POST /v1/orgs` and return `(id, name)`.
+    /// An organization with an owner and one plain `member`.
+    ///
+    /// A personal-workspace account is its own `owner`, so "this call needs an
+    /// admin" can only be proven with somebody who is a `member` of somebody
+    /// else's organization.
+    async fn org_member(&self, owner_email: &str, member_email: &str) -> (i64, String) {
+        let (_, owner_key) = self.account_with_key(owner_email);
+        let org_id = self.create_org(&owner_key, "Team").await;
+        let (member_id, member_key) = self.account_with_key(member_email);
+        self.state
+            .store
+            .set_account_org(member_id, Some(org_id), pigeon_core::types::OrgRole::Member)
+            .expect("member joins");
+        (member_id, member_key)
+    }
+
     async fn create_org(&self, key: &str, name: &str) -> i64 {
         let response = self
             .post("/v1/orgs", Some(key), json!({"name": name}))
@@ -2444,28 +2463,64 @@ async fn inbox_subjects(app: &TestApp, account_id: i64) -> Vec<String> {
         .collect()
 }
 
+/// `PUT /v1/catchall/{domain}` with an action, as the contract now shapes it.
+async fn put_catchall(app: &TestApp, key: &str, domain: &str, action: &str) -> Response {
+    app.call(build(
+        Method::PUT,
+        &format!("/v1/catchall/{domain}"),
+        Some(key),
+        Some(json!({ "action": action })),
+        &[],
+    ))
+    .await
+}
+
+/// Assign one account to a domain's catch-all.
+async fn assign_catchall(app: &TestApp, key: &str, domain: &str, account_id: i64) -> Response {
+    app.call(build(
+        Method::POST,
+        &format!("/v1/catchall/{domain}/assign"),
+        Some(key),
+        Some(json!({ "account_id": account_id })),
+        &[],
+    ))
+    .await
+}
+
 #[tokio::test]
-async fn catchall_route_delivers_an_unknown_recipient_to_the_target_mailbox() {
+async fn catchall_route_copies_the_mail_to_every_assignee() {
     let app = TestApp::new();
-    // A mailbox on the managed domain: `ops@example.com` already exists as the
-    // owner account, so the rule can target it.
-    let rule = app
-        .call(build(
-            Method::PUT,
-            "/v1/catchall/example.com",
-            Some(&app.full_key),
-            Some(json!({"action": "route", "target_account_id": app.account_id})),
-            &[],
-        ))
-        .await;
+    let (second_id, _) = app.account_with_key("second@example.com");
+
+    let rule = put_catchall(&app, &app.full_key, "example.com", "route").await;
     assert_eq!(rule.status, StatusCode::OK, "{:?}", rule.body);
     assert_eq!(rule.body["domain"], "example.com");
     assert_eq!(rule.body["action"], "route");
-    assert_eq!(rule.body["target_account_id"], app.account_id);
 
-    let listed = app.get("/v1/catchall", Some(&app.full_key)).await;
-    assert_eq!(listed.status, StatusCode::OK, "{:?}", listed.body);
-    assert_eq!(listed.body.as_array().expect("array").len(), 1);
+    // Two mailboxes hold the same catch-all; a third assignment is a conflict.
+    for account_id in [app.account_id, second_id] {
+        let assigned = assign_catchall(&app, &app.full_key, "example.com", account_id).await;
+        assert_eq!(assigned.status, StatusCode::OK, "{:?}", assigned.body);
+    }
+    let assignees = app.get("/v1/catchall", Some(&app.full_key)).await;
+    assert_eq!(assignees.status, StatusCode::OK, "{:?}", assignees.body);
+    let assignments = assignees.body[0]["assignments"]
+        .as_array()
+        .expect("assignments");
+    assert_eq!(assignments.len(), 2, "{:?}", assignees.body);
+    assert!(assignments.iter().all(|row| row["paused"] == false));
+    assert_eq!(assignments[0]["email"], "owner@example.com");
+
+    let duplicate = assign_catchall(&app, &app.full_key, "example.com", second_id).await;
+    duplicate.assert_problem(StatusCode::CONFLICT, "conflict");
+
+    // A mailbox of another domain cannot hold this catch-all.
+    let (elsewhere_id, _) = app.account_with_key("dana@other.example");
+    let mismatched = assign_catchall(&app, &app.full_key, "example.com", elsewhere_id).await;
+    mismatched.assert_problem(StatusCode::UNPROCESSABLE_ENTITY, "validation");
+    assert_eq!(mismatched.body["errors"][0]["field"], "account_id");
+    let unknown = assign_catchall(&app, &app.full_key, "example.com", 9_999).await;
+    unknown.assert_problem(StatusCode::NOT_FOUND, "not-found");
 
     let (address, stop) = start_inbound(&app).await;
     let mut client = SmtpClient::connect(address).await;
@@ -2479,30 +2534,42 @@ async fn catchall_route_delivers_an_unknown_recipient_to_the_target_mailbox() {
     assert_eq!(code, 250, "{text}");
     assert!(text.contains("queued as"), "{text}");
 
-    // The message landed in the target mailbox, addressed to the unknown local
-    // part, and its body opens with the target account's AAD.
-    let rows = app
-        .state
-        .store
-        .list_folder(app.account_id, pigeon_core::MessageFolder::Inbox, 10, 0)
-        .expect("inbox");
-    assert_eq!(rows.len(), 1, "{rows:?}");
-    assert_eq!(rows[0].subject, "hello catch-all");
-    assert_eq!(rows[0].from_addr.to_string(), "dana@example.org");
-    assert_eq!(
-        rows[0]
-            .to_addrs
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>(),
-        vec!["nobody-here@example.com"]
-    );
-    let events = app.state.store.list_events(rows[0].id).expect("events");
-    assert!(
-        events[0].1.contains("via=catchall"),
-        "the delivery event records why it arrived: {:?}",
-        events[0]
-    );
+    // Every assignee gets its own copy, marked with the address it arrived for.
+    for account_id in [app.account_id, second_id] {
+        let rows = app
+            .state
+            .store
+            .list_folder(account_id, pigeon_core::MessageFolder::Inbox, 10, 0)
+            .expect("inbox");
+        assert_eq!(rows.len(), 1, "account {account_id}: {rows:?}");
+        assert_eq!(rows[0].subject, "hello catch-all");
+        assert_eq!(
+            rows[0].delivered_for.as_deref(),
+            Some("nobody-here@example.com"),
+            "the copy records the address it was delivered for"
+        );
+        assert_eq!(
+            rows[0]
+                .to_addrs
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            vec!["nobody-here@example.com"]
+        );
+        let events = app.state.store.list_events(rows[0].id).expect("events");
+        assert!(
+            events[0].1.contains("via=catchall"),
+            "the delivery event records why it arrived: {:?}",
+            events[0]
+        );
+        assert!(
+            events[0]
+                .1
+                .contains("delivered_for=nobody-here@example.com"),
+            "{:?}",
+            events[0]
+        );
+    }
 
     // A recipient of a domain without a rule still gets the ordinary 550.
     let mut client = SmtpClient::connect(address).await;
@@ -2520,18 +2587,14 @@ async fn catchall_route_delivers_an_unknown_recipient_to_the_target_mailbox() {
 #[tokio::test]
 async fn catchall_discard_accepts_and_stores_nothing() {
     let app = TestApp::new();
-    let rule = app
-        .call(build(
-            Method::PUT,
-            "/v1/catchall/example.com",
-            Some(&app.full_key),
-            Some(json!({"action": "discard"})),
-            &[],
-        ))
-        .await;
+    let rule = put_catchall(&app, &app.full_key, "example.com", "discard").await;
     assert_eq!(rule.status, StatusCode::OK, "{:?}", rule.body);
     assert_eq!(rule.body["action"], "discard");
-    assert!(rule.body.get("target_account_id").is_none());
+    assert!(
+        rule.body.get("assignments").is_none(),
+        "a discard rule names nobody: {:?}",
+        rule.body
+    );
 
     let (address, stop) = start_inbound(&app).await;
     let mut client = SmtpClient::connect(address).await;
@@ -2564,84 +2627,642 @@ async fn catchall_discard_accepts_and_stores_nothing() {
 }
 
 #[tokio::test]
-async fn catchall_rules_require_a_matching_target_and_a_real_domain() {
+async fn catchall_pause_is_per_member_and_an_admin_can_force_a_resume() {
     let app = TestApp::new();
-    let (other_id, other_key) = app.account_with_key("dana@other.example");
-
-    // The target must be a mailbox of the rule's own domain.
-    let mismatched = app
-        .call(build(
-            Method::PUT,
-            "/v1/catchall/example.com",
-            Some(&app.full_key),
-            Some(json!({"action": "route", "target_account_id": other_id})),
-            &[],
-        ))
+    let (member_id, member_key) = app
+        .org_member("team-lead@example.com", "eli@example.com")
         .await;
-    mismatched.assert_problem(StatusCode::UNPROCESSABLE_ENTITY, "validation");
-    assert_eq!(mismatched.body["errors"][0]["field"], "target_account_id");
+    put_catchall(&app, &app.full_key, "example.com", "route").await;
 
-    // A route rule with no target, and a discard rule with one, are both refused.
-    let no_target = app
-        .call(build(
-            Method::PUT,
-            "/v1/catchall/example.com",
-            Some(&app.full_key),
-            Some(json!({"action": "route"})),
-            &[],
-        ))
+    // Pausing before holding anything is a conflict, not a silent no-op.
+    let never_assigned = app
+        .post("/v1/catchall/me/pause", Some(&member_key), json!({}))
         .await;
-    no_target.assert_problem(StatusCode::UNPROCESSABLE_ENTITY, "validation");
+    never_assigned.assert_problem(StatusCode::CONFLICT, "conflict");
+
+    assign_catchall(&app, &app.full_key, "example.com", app.account_id).await;
+    let paused = app
+        .post("/v1/catchall/me/pause", Some(&app.full_key), json!({}))
+        .await;
+    assert_eq!(paused.status, StatusCode::OK, "{:?}", paused.body);
+    assert_eq!(paused.body["paused"], true);
+    assert_eq!(paused.body["email"], "owner@example.com");
+
+    // A paused copy is not delivered, and the message is still accepted.
+    let (address, stop) = start_inbound(&app).await;
+    let mut client = SmtpClient::connect(address).await;
+    let (code, text) = client
+        .deliver(
+            "dana@example.org",
+            "nobody-here@example.com",
+            "Subject: while paused\r\n\r\nbody",
+        )
+        .await;
+    assert_eq!(code, 250, "{text}");
+    assert!(
+        inbox_subjects(&app, app.account_id).await.is_empty(),
+        "a paused assignee receives nothing"
+    );
+
+    let resumed = app
+        .post("/v1/catchall/me/resume", Some(&app.full_key), json!({}))
+        .await;
+    assert_eq!(resumed.status, StatusCode::OK, "{:?}", resumed.body);
+    assert_eq!(resumed.body["paused"], false);
+
+    // The member holds nothing yet, so their listing is empty rather than a 403.
+    let member_view = app.get("/v1/catchall", Some(&member_key)).await;
+    assert_eq!(member_view.status, StatusCode::OK, "{:?}", member_view.body);
+    assert_eq!(member_view.body.as_array().expect("array").len(), 0);
+
+    // The admin force: assign the member, then pause and resume them.
+    assign_catchall(&app, &app.full_key, "example.com", member_id).await;
+    let forced = app
+        .patch(
+            &format!("/v1/catchall/example.com/assignments/{member_id}"),
+            Some(&app.full_key),
+            json!({"paused": true}),
+        )
+        .await;
+    assert_eq!(forced.status, StatusCode::OK, "{:?}", forced.body);
+    assert_eq!(forced.body["paused"], true);
+    let forced_back = app
+        .patch(
+            &format!("/v1/catchall/example.com/assignments/{member_id}"),
+            Some(&app.full_key),
+            json!({"paused": false}),
+        )
+        .await;
+    assert_eq!(forced_back.status, StatusCode::OK, "{:?}", forced_back.body);
+    assert_eq!(forced_back.body["paused"], false);
+
+    // The member now sees exactly their own row.
+    let member_view = app.get("/v1/catchall", Some(&member_key)).await;
+    assert_eq!(member_view.status, StatusCode::OK, "{:?}", member_view.body);
+    let own = member_view.body.as_array().expect("array");
+    assert_eq!(own.len(), 1);
+    assert_eq!(own[0]["assignments"].as_array().expect("rows").len(), 1);
+    assert_eq!(own[0]["assignments"][0]["account_id"], member_id);
+
+    // Removing the assignment stops delivery and the self-service pause.
+    let removed = app
+        .delete(
+            &format!("/v1/catchall/example.com/assign/{member_id}"),
+            Some(&app.full_key),
+        )
+        .await;
+    assert_eq!(removed.status, StatusCode::NO_CONTENT, "{:?}", removed.body);
+    let gone = app
+        .post("/v1/catchall/me/pause", Some(&member_key), json!({}))
+        .await;
+    gone.assert_problem(StatusCode::CONFLICT, "conflict");
+
+    // And the message sent while the owner was paused is still the only one: the
+    // resumed owner receives the next message, nobody receives the old one.
+    let mut client = SmtpClient::connect(address).await;
+    let (code, text) = client
+        .deliver(
+            "dana@example.org",
+            "another-ghost@example.com",
+            "Subject: after resume\r\n\r\nbody",
+        )
+        .await;
+    assert_eq!(code, 250, "{text}");
+    assert_eq!(
+        inbox_subjects(&app, app.account_id).await,
+        vec!["after resume".to_string()]
+    );
+    assert!(
+        inbox_subjects(&app, member_id).await.is_empty(),
+        "an unassigned mailbox receives nothing"
+    );
+    let _ = stop.send(());
+}
+
+#[tokio::test]
+async fn catchall_rules_require_a_real_domain_and_an_admin() {
+    let app = TestApp::new();
+
     let discard_with_target = app
         .call(build(
             Method::PUT,
             "/v1/catchall/example.com",
             Some(&app.full_key),
-            Some(json!({"action": "discard", "target_account_id": other_id})),
+            Some(json!({"action": "discard", "target_account_id": app.account_id})),
             &[],
         ))
         .await;
     discard_with_target.assert_problem(StatusCode::UNPROCESSABLE_ENTITY, "validation");
 
     // The domain itself is validated, and an unknown action is a 422.
-    let bad_domain = app
-        .call(build(
-            Method::PUT,
-            "/v1/catchall/not-a-domain",
-            Some(&app.full_key),
-            Some(json!({"action": "discard"})),
-            &[],
-        ))
-        .await;
+    let bad_domain = put_catchall(&app, &app.full_key, "not-a-domain", "discard").await;
     bad_domain.assert_problem(StatusCode::UNPROCESSABLE_ENTITY, "validation");
-    let bad_action = app
-        .call(build(
-            Method::PUT,
-            "/v1/catchall/example.com",
-            Some(&app.full_key),
-            Some(json!({"action": "bounce"})),
-            &[],
-        ))
-        .await;
+    let bad_action = put_catchall(&app, &app.full_key, "example.com", "bounce").await;
     bad_action.assert_problem(StatusCode::UNPROCESSABLE_ENTITY, "validation");
 
-    // A personal workspace's owner may configure it; a plain member may not.
-    let (member_id, member_key) = app.account_with_key("eli@other.example");
-    let org_id = app.create_org(&other_key, "Other").await;
-    app.state
-        .store
-        .set_account_org(member_id, Some(org_id), pigeon_core::types::OrgRole::Member)
-        .expect("member joins");
-    let forbidden = app
-        .call(build(
-            Method::PUT,
-            "/v1/catchall/other.example",
-            Some(&member_key),
-            Some(json!({"action": "discard"})),
-            &[],
-        ))
+    // A plain member may not change the domain decision, and may not assign.
+    let (member_id, member_key) = app
+        .org_member("lead@other.example", "eli@other.example")
         .await;
+    let forbidden = put_catchall(&app, &member_key, "other.example", "discard").await;
     forbidden.assert_problem(StatusCode::FORBIDDEN, "forbidden");
-    let member_listing = app.get("/v1/catchall", Some(&member_key)).await;
-    member_listing.assert_problem(StatusCode::FORBIDDEN, "forbidden");
+    let forbidden_assign = assign_catchall(&app, &member_key, "other.example", member_id).await;
+    forbidden_assign.assert_problem(StatusCode::FORBIDDEN, "forbidden");
+}
+
+// ---------------------------------------------------------------------------
+// Sender aliases
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sender_aliases_are_free_addresses_an_admin_shares() {
+    let app = TestApp::new();
+
+    // A free address on a served domain: created by the owner, `201`.
+    let created = app
+        .post(
+            "/v1/aliases",
+            Some(&app.full_key),
+            json!({"address": "Sales@Example.com"}),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
+    assert_eq!(
+        created.body["address"], "sales@example.com",
+        "the stored alias is normalized"
+    );
+    assert_eq!(created.body["domain"], "example.com");
+    let alias_id = created.body["id"].as_i64().expect("alias id");
+
+    // Collisions and nonsense are refused with distinct answers.
+    let duplicate = app
+        .post(
+            "/v1/aliases",
+            Some(&app.full_key),
+            json!({"address": "sales@example.com"}),
+        )
+        .await;
+    duplicate.assert_problem(StatusCode::CONFLICT, "conflict");
+    let owned_by_an_account = app
+        .post(
+            "/v1/aliases",
+            Some(&app.full_key),
+            json!({"address": "owner@example.com"}),
+        )
+        .await;
+    owned_by_an_account.assert_problem(StatusCode::UNPROCESSABLE_ENTITY, "validation");
+    assert_eq!(owned_by_an_account.body["errors"][0]["field"], "address");
+    let foreign_domain = app
+        .post(
+            "/v1/aliases",
+            Some(&app.full_key),
+            json!({"address": "sales@elsewhere.example"}),
+        )
+        .await;
+    foreign_domain.assert_problem(StatusCode::UNPROCESSABLE_ENTITY, "validation");
+    let not_an_address = app
+        .post(
+            "/v1/aliases",
+            Some(&app.full_key),
+            json!({"address": "sales"}),
+        )
+        .await;
+    not_an_address.assert_problem(StatusCode::UNPROCESSABLE_ENTITY, "validation");
+
+    // A member may read their own list and nothing else.
+    let (member_id, member_key) = app
+        .org_member("team-lead@example.com", "eli@example.com")
+        .await;
+    let member_create = app
+        .post(
+            "/v1/aliases",
+            Some(&member_key),
+            json!({"address": "soporte@example.com"}),
+        )
+        .await;
+    member_create.assert_problem(StatusCode::FORBIDDEN, "forbidden");
+    let member_list = app.get("/v1/aliases", Some(&member_key)).await;
+    assert_eq!(member_list.status, StatusCode::OK, "{:?}", member_list.body);
+    assert_eq!(member_list.body.as_array().expect("array").len(), 0);
+
+    // Assigning shares the address; assigning twice is a conflict.
+    let assigned = app
+        .post(
+            &format!("/v1/aliases/{alias_id}/assign"),
+            Some(&app.full_key),
+            json!({"account_id": member_id}),
+        )
+        .await;
+    assert_eq!(assigned.status, StatusCode::OK, "{:?}", assigned.body);
+    assert_eq!(assigned.body["assignments"][0]["account_id"], member_id);
+    assert_eq!(assigned.body["assignments"][0]["email"], "eli@example.com");
+    let again = app
+        .post(
+            &format!("/v1/aliases/{alias_id}/assign"),
+            Some(&app.full_key),
+            json!({"account_id": member_id}),
+        )
+        .await;
+    again.assert_problem(StatusCode::CONFLICT, "conflict");
+
+    // The member now sees it: this is the compose-box list.
+    let mine = app.get("/v1/aliases?mine=1", Some(&member_key)).await;
+    assert_eq!(mine.status, StatusCode::OK, "{:?}", mine.body);
+    assert_eq!(mine.body.as_array().expect("array").len(), 1);
+    assert_eq!(mine.body[0]["address"], "sales@example.com");
+
+    // Unassigning stops it being theirs; deleting the alias removes it entirely.
+    let unassigned = app
+        .post(
+            &format!("/v1/aliases/{alias_id}/unassign"),
+            Some(&app.full_key),
+            json!({"account_id": member_id}),
+        )
+        .await;
+    assert_eq!(unassigned.status, StatusCode::OK, "{:?}", unassigned.body);
+    assert!(unassigned.body["assignments"]
+        .as_array()
+        .expect("array")
+        .is_empty());
+    let unassigned_again = app
+        .post(
+            &format!("/v1/aliases/{alias_id}/unassign"),
+            Some(&app.full_key),
+            json!({"account_id": member_id}),
+        )
+        .await;
+    unassigned_again.assert_problem(StatusCode::NOT_FOUND, "not-found");
+
+    let deleted = app
+        .delete(&format!("/v1/aliases/{alias_id}"), Some(&app.full_key))
+        .await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{:?}", deleted.body);
+    let deleted_again = app
+        .delete(&format!("/v1/aliases/{alias_id}"), Some(&app.full_key))
+        .await;
+    deleted_again.assert_problem(StatusCode::NOT_FOUND, "not-found");
+}
+
+#[tokio::test]
+async fn a_member_account_cannot_take_a_sender_alias_address() {
+    let app = TestApp::new();
+    let org_id = app.create_org(&app.full_key, "Acme").await;
+    let alias = app
+        .post(
+            "/v1/aliases",
+            Some(&app.full_key),
+            json!({"address": "sales@example.com"}),
+        )
+        .await;
+    assert_eq!(alias.status, StatusCode::CREATED, "{:?}", alias.body);
+    let alias_id = alias.body["id"].as_i64().expect("alias id");
+
+    // The invariant: an address is either a mailbox or an alias, never both. A
+    // mailbox on top of an alias would divert the shared address into one inbox.
+    let refused = app
+        .post(
+            &format!("/v1/orgs/{org_id}/members"),
+            Some(&app.full_key),
+            json!({"email": "sales@example.com", "display_name": "Sales", "role": "member"}),
+        )
+        .await;
+    refused.assert_problem(StatusCode::CONFLICT, "conflict");
+    assert!(
+        refused.body["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("sender alias")),
+        "the detail has to say why: {:?}",
+        refused.body
+    );
+
+    // Nothing was created, and the alias still owns the address.
+    let members = app
+        .get(&format!("/v1/orgs/{org_id}/members"), Some(&app.full_key))
+        .await;
+    assert_eq!(members.status, StatusCode::OK, "{:?}", members.body);
+    let listed = members.body.as_array().expect("members");
+    assert_eq!(listed.len(), 1, "only the owner exists: {listed:?}");
+    assert!(
+        listed
+            .iter()
+            .all(|member| member["email"] != "sales@example.com"),
+        "{listed:?}"
+    );
+    assert!(
+        app.state
+            .store
+            .get_account_by_email("sales@example.com")
+            .expect("lookup")
+            .is_none(),
+        "no mailbox took the alias address"
+    );
+
+    // Delivery is not diverted: mail to the alias still goes to its holders, and
+    // to nobody else.
+    app.post(
+        &format!("/v1/aliases/{alias_id}/assign"),
+        Some(&app.full_key),
+        json!({"account_id": app.account_id}),
+    )
+    .await;
+    let (address, stop) = start_inbound(&app).await;
+    let mut client = SmtpClient::connect(address).await;
+    let (code, text) = client
+        .deliver(
+            "dana@example.org",
+            "sales@example.com",
+            "Subject: sigue siendo alias\r\n\r\nbody",
+        )
+        .await;
+    assert_eq!(code, 250, "{text}");
+    let _ = stop.send(());
+    let inbox = app
+        .state
+        .store
+        .list_folder(app.account_id, pigeon_core::MessageFolder::Inbox, 10, 0)
+        .expect("inbox");
+    assert_eq!(inbox.len(), 1, "{inbox:?}");
+    assert_eq!(
+        inbox[0].delivered_for.as_deref(),
+        Some("sales@example.com")
+    );
+
+    // A genuine duplicate mailbox is still a `409`, with its own detail: the two
+    // collisions are distinguishable for whoever has to fix them.
+    let duplicate = app
+        .post(
+            &format!("/v1/orgs/{org_id}/members"),
+            Some(&app.full_key),
+            json!({"email": "owner@example.com", "role": "member"}),
+        )
+        .await;
+    duplicate.assert_problem(StatusCode::CONFLICT, "conflict");
+    assert!(
+        duplicate.body["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("already has an account")),
+        "{:?}",
+        duplicate.body
+    );
+}
+
+#[tokio::test]
+async fn a_catchall_assignment_without_a_rule_is_a_404_and_changes_nothing() {
+    let app = TestApp::new();
+
+    // The rule is the domain decision; an assignment it can never apply to would
+    // be a grant the listing shows and delivery ignores.
+    let refused = assign_catchall(&app, &app.full_key, "example.com", app.account_id).await;
+    refused.assert_problem(StatusCode::NOT_FOUND, "not-found");
+    assert!(
+        refused.body["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("no catch-all rule")),
+        "{:?}",
+        refused.body
+    );
+
+    // Nothing persisted: the refused call must not leave a row the next listing
+    // would report.
+    let listed = app.get("/v1/catchall", Some(&app.full_key)).await;
+    assert_eq!(listed.status, StatusCode::OK, "{:?}", listed.body);
+    assert!(
+        listed.body.as_array().expect("array").is_empty(),
+        "{:?}",
+        listed.body
+    );
+    assert!(
+        app.state
+            .store
+            .list_catchall_assignments()
+            .expect("assignments")
+            .is_empty(),
+        "a refused assignment writes no row"
+    );
+
+    // With the rule in place the same call succeeds.
+    let rule = put_catchall(&app, &app.full_key, "example.com", "route").await;
+    assert_eq!(rule.status, StatusCode::OK, "{:?}", rule.body);
+    let assigned = assign_catchall(&app, &app.full_key, "example.com", app.account_id).await;
+    assert_eq!(assigned.status, StatusCode::OK, "{:?}", assigned.body);
+    assert_eq!(
+        assigned.body["assignments"][0]["account_id"],
+        app.account_id
+    );
+}
+
+#[tokio::test]
+async fn the_alias_self_view_needs_send_scope_and_the_mutations_need_full() {
+    let app = TestApp::new();
+    let send_key = app.key_with(&[ApiKeyScope::Send], false);
+
+    // The compose box asks with a `send` key: the self view must answer it.
+    let mine = app.get("/v1/aliases?mine=1", Some(&send_key)).await;
+    assert_eq!(mine.status, StatusCode::OK, "{:?}", mine.body);
+
+    // Creating one is account administration, not a send.
+    let refused = app
+        .post(
+            "/v1/aliases",
+            Some(&send_key),
+            json!({"address": "sales@example.com"}),
+        )
+        .await;
+    refused.assert_problem(StatusCode::FORBIDDEN, "forbidden");
+
+    // The member's own pause switch is `send` too (it changes where their mail
+    // lands, but only their own): it answers 409 for a caller holding nothing,
+    // which is proof the scope gate let it through.
+    let pause = app
+        .post("/v1/catchall/me/pause", Some(&send_key), json!({}))
+        .await;
+    pause.assert_problem(StatusCode::CONFLICT, "conflict");
+}
+
+#[tokio::test]
+async fn a_sender_may_only_send_as_itself_or_an_assigned_alias() {
+    let app = TestApp::new();
+    let (member_id, member_key) = app
+        .org_member("team-lead@example.com", "eli@example.com")
+        .await;
+
+    let alias = app
+        .post(
+            "/v1/aliases",
+            Some(&app.full_key),
+            json!({"address": "sales@example.com"}),
+        )
+        .await;
+    let alias_id = alias.body["id"].as_i64().expect("alias id");
+
+    // Not assigned yet: the member cannot send as it.
+    let refused = app
+        .post(
+            "/v1/emails",
+            Some(&member_key),
+            json!({
+                "from": "sales@example.com",
+                "to": ["carol@example.org"],
+                "subject": "hi",
+                "text": "x",
+            }),
+        )
+        .await;
+    refused.assert_problem(StatusCode::FORBIDDEN, "from-not-allowed");
+
+    app.post(
+        &format!("/v1/aliases/{alias_id}/assign"),
+        Some(&app.full_key),
+        json!({"account_id": member_id}),
+    )
+    .await;
+
+    // Assigned: sending as the alias is allowed, in any letter case.
+    let accepted = app
+        .post(
+            "/v1/emails",
+            Some(&member_key),
+            json!({
+                "from": "Sales <Sales@Example.com>",
+                "to": ["carol@example.org"],
+                "subject": "from the alias",
+                "text": "x",
+            }),
+        )
+        .await;
+    assert_eq!(accepted.status, StatusCode::ACCEPTED, "{:?}", accepted.body);
+    let id = accepted.body["id"].as_str().expect("id");
+    let view = app
+        .get(&format!("/v1/emails/{id}"), Some(&member_key))
+        .await;
+    // The local part keeps the case the caller wrote (SMTP may treat it as
+    // significant); only the domain is folded, which is what the check compared.
+    assert_eq!(view.body["from"], "Sales@example.com");
+
+    // Somebody else's address is still refused, alias or not.
+    let stranger = app
+        .post(
+            "/v1/emails",
+            Some(&member_key),
+            json!({
+                "from": "owner@example.com",
+                "to": ["carol@example.org"],
+                "subject": "spoof",
+                "text": "x",
+            }),
+        )
+        .await;
+    stranger.assert_problem(StatusCode::FORBIDDEN, "from-not-allowed");
+}
+
+#[tokio::test]
+async fn mail_to_an_alias_reaches_every_assignee_and_files_under_its_address() {
+    let app = TestApp::new();
+    let (second_id, _) = app.account_with_key("second@example.com");
+    let alias = app
+        .post(
+            "/v1/aliases",
+            Some(&app.full_key),
+            json!({"address": "sales@example.com"}),
+        )
+        .await;
+    let alias_id = alias.body["id"].as_i64().expect("alias id");
+    for account_id in [app.account_id, second_id] {
+        app.post(
+            &format!("/v1/aliases/{alias_id}/assign"),
+            Some(&app.full_key),
+            json!({"account_id": account_id}),
+        )
+        .await;
+    }
+
+    let (address, stop) = start_inbound(&app).await;
+    let mut client = SmtpClient::connect(address).await;
+    let (code, text) = client
+        .deliver(
+            "dana@example.org",
+            "sales@example.com",
+            "Subject: pedido nuevo\r\nFrom: dana@example.org\r\n\r\nbody",
+        )
+        .await;
+    assert_eq!(code, 250, "{text}");
+
+    for account_id in [app.account_id, second_id] {
+        let rows = app
+            .state
+            .store
+            .list_folder(account_id, pigeon_core::MessageFolder::Inbox, 10, 0)
+            .expect("inbox");
+        assert_eq!(rows.len(), 1, "account {account_id}: {rows:?}");
+        assert_eq!(rows[0].subject, "pedido nuevo");
+        assert_eq!(rows[0].delivered_for.as_deref(), Some("sales@example.com"));
+        let events = app.state.store.list_events(rows[0].id).expect("events");
+        assert!(events[0].1.contains("via=alias"), "{:?}", events[0]);
+    }
+
+    // The pseudo-folder listing narrows the inbox to that address, and carries a
+    // count so the sidebar can render it without a second request.
+    let filtered = app
+        .get(
+            "/v1/messages?folder=inbox&delivered_for=sales@example.com",
+            Some(&app.full_key),
+        )
+        .await;
+    assert_eq!(filtered.status, StatusCode::OK, "{:?}", filtered.body);
+    assert_eq!(filtered.body["page"]["total"], 1);
+    assert_eq!(
+        filtered.body["items"][0]["delivered_for"],
+        "sales@example.com"
+    );
+    assert_eq!(
+        filtered.body["delivered_for_counts"][0]["address"],
+        "sales@example.com"
+    );
+    assert_eq!(filtered.body["delivered_for_counts"][0]["count"], 1);
+
+    let empty = app
+        .get(
+            "/v1/messages?delivered_for=nobody@example.com",
+            Some(&app.full_key),
+        )
+        .await;
+    assert_eq!(empty.body["page"]["total"], 0);
+    let invalid = app
+        .get(
+            "/v1/messages?delivered_for=not-an-address",
+            Some(&app.full_key),
+        )
+        .await;
+    invalid.assert_problem(StatusCode::UNPROCESSABLE_ENTITY, "validation");
+
+    // Removing one holder stops that mailbox receiving the next one; the alias
+    // itself keeps delivering to whoever is left.
+    let removed = app
+        .post(
+            &format!("/v1/aliases/{alias_id}/unassign"),
+            Some(&app.full_key),
+            json!({"account_id": second_id}),
+        )
+        .await;
+    assert_eq!(removed.status, StatusCode::OK, "{:?}", removed.body);
+    let mut client = SmtpClient::connect(address).await;
+    let (code, text) = client
+        .deliver(
+            "dana@example.org",
+            "sales@example.com",
+            "Subject: segunda orden\r\n\r\nbody",
+        )
+        .await;
+    assert_eq!(code, 250, "{text}");
+    assert_eq!(
+        inbox_subjects(&app, app.account_id).await.len(),
+        2,
+        "the remaining holder keeps receiving"
+    );
+    assert_eq!(
+        inbox_subjects(&app, second_id).await,
+        vec!["pedido nuevo".to_string()],
+        "the removed holder receives nothing new"
+    );
+    let _ = stop.send(());
 }

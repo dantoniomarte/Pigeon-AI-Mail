@@ -3657,3 +3657,69 @@ body[data-motion="on"] .landing__hero > *:nth-child(4) { animation-delay: 0.24s;
 @media (prefers-reduced-motion: reduce) {
   .landing__hero > * { animation: none !important; }
 }
+
+/* ---------------------------------------------------------------- alignment */
+/* Sender aliases + multi-assignee catch-all: the small chip lists and the
+   inline "add a mailbox" rows that both admin panels render. */
+
+.tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.tag-list .badge {
+  gap: 5px;
+}
+
+.icon-btn--tiny {
+  width: 20px;
+  height: 20px;
+  min-height: 20px;
+  padding: 0;
+  margin-left: 2px;
+  border-radius: 6px;
+  opacity: 0.75;
+}
+
+.icon-btn--tiny:hover {
+  opacity: 1;
+}
+
+.row-inline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-top: 6px;
+}
+
+.row-between {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.segmented__label {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.mail-list__delivered {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  padding: 0 4px;
+}
+
+.mail-list__delivered .input {
+  width: auto;
+  min-width: 180px;
+  max-width: 100%;
+}

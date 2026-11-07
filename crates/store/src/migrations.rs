@@ -107,6 +107,36 @@ use crate::error::Result;
 /// until they are moved to the trash again: an upgrade must not delete mail whose
 /// countdown never started.
 ///
+/// `0013` adds sender aliases and the delivery marker.
+///
+/// A **sender alias** is a second address on a domain the deployment already
+/// serves (`sales@example.com`): it owns no mailbox, so it can be handed
+/// to several people at once. Two tables, not one, because the relationship is
+/// many-to-many: `sender_aliases` holds the address, `sender_alias_assignments`
+/// holds who may send as it and receive its mail. A single
+/// `assigned_account_id` column could not express "everyone in sales gets a
+/// copy", which is the whole point of the feature.
+///
+/// `messages.delivered_for` records *which* address a stored copy was delivered
+/// for when that address is not the mailbox's own (an alias, or a catch-all
+/// local part). The folder stays a real folder — `inbox` — because SQLite
+/// `CHECK` constraints cannot express "any address", so a pseudo-folder invented
+/// as a folder value would either be one fixed string or force a table rebuild
+/// on every alias. The webmail groups the inbox by this column instead, which is
+/// also why `folder` keeps its four-value contract and every existing client
+/// keeps working.
+///
+/// `0014` makes a catch-all **multi-recipient and pausable**.
+///
+/// `catchall_rules` keeps the domain-level decision (`route` or `discard`);
+/// `catchall_assignments` holds who receives a routed copy. `paused` is per
+/// (domain, account) on purpose: one member going on holiday must not stop the
+/// shared sales inbox, and the member — not an admin — is the one who knows.
+/// The legacy `catchall_rules.target_account_id` column is left in place but is
+/// no longer read or written (SQLite cannot drop it portably); the backfill below
+/// moves any existing target into the assignment table so an upgraded deployment
+/// keeps receiving its catch-all mail.
+///
 /// The schema is **unreleased**, so checks that SQLite cannot add later
 /// (`CHECK` constraints, `AUTOINCREMENT` on `accounts.id`) are edited in place in
 /// `0001` rather than shipped as a table rebuild.
@@ -460,6 +490,83 @@ ALTER TABLE messages ADD COLUMN trashed_at TEXT NULL;
 -- (account_id, folder), then a range over the timestamp.
 CREATE INDEX IF NOT EXISTS idx_messages_trash
     ON messages (account_id, folder, trashed_at);
+"#,
+    // ---------------------------------------------------------------- 0013
+    r#"
+-- A secondary address on a domain this deployment serves. It owns no mailbox:
+-- mail to it is copied into every assignee's inbox, and every assignee may send
+-- as it. The address is the unique key, so "this alias already exists" is a
+-- constraint and not a race between two admins.
+CREATE TABLE IF NOT EXISTS sender_aliases (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    address    TEXT UNIQUE NOT NULL,
+    domain     TEXT NOT NULL,
+    created_by INTEGER NOT NULL REFERENCES accounts(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Who holds the alias. Primary key on the pair: assigning the same person
+-- twice is the same row, not a second copy of every message. Both sides cascade:
+-- deleting the alias or the account removes the assignment instead of leaving a
+-- grant that points nowhere.
+CREATE TABLE IF NOT EXISTS sender_alias_assignments (
+    alias_id    INTEGER NOT NULL REFERENCES sender_aliases(id) ON DELETE CASCADE,
+    account_id  INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    assigned_by INTEGER NOT NULL REFERENCES accounts(id),
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (alias_id, account_id)
+);
+
+-- "The aliases this account may send as" is the compose-box query.
+CREATE INDEX IF NOT EXISTS idx_alias_assignments_account
+    ON sender_alias_assignments (account_id);
+
+-- The address a copy was delivered for, when it is not the mailbox's own: an
+-- alias address, or the catch-all recipient. NULL is ordinary mail. The folder
+-- stays `inbox`; this column is what the webmail groups by (see the note above
+-- MIGRATIONS for why the folder CHECK is not extended).
+ALTER TABLE messages ADD COLUMN delivered_for TEXT NULL;
+
+-- "The inbox, grouped by delivered address" reads exactly this index shape.
+CREATE INDEX IF NOT EXISTS idx_messages_delivered_for
+    ON messages (account_id, delivered_for);
+"#,
+    // ---------------------------------------------------------------- 0014
+    r#"
+-- Who receives the catch-all mail of a domain. Several accounts may hold it: a
+-- shared sales address has to land in more than one mailbox.
+--
+-- `paused` is per (domain, account), so one member can stop their own copy
+-- without touching everybody else's. `UNIQUE(domain, account_id)` makes
+-- "assign this person" idempotent.
+CREATE TABLE IF NOT EXISTS catchall_assignments (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    domain      TEXT NOT NULL,
+    account_id  INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    assigned_by INTEGER NOT NULL REFERENCES accounts(id),
+    paused      INTEGER NOT NULL DEFAULT 0 CHECK (paused IN (0, 1)),
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (domain, account_id)
+);
+
+-- "The live assignees of this domain" is the inbound resolution query.
+CREATE INDEX IF NOT EXISTS idx_catchall_assignments_domain
+    ON catchall_assignments (domain, paused);
+
+-- "Which catch-alls does this account hold" serves the self-service pause and
+-- the member view of `GET /v1/catchall`.
+CREATE INDEX IF NOT EXISTS idx_catchall_assignments_account
+    ON catchall_assignments (account_id);
+
+-- Carry an existing single-target rule over to the new table, so an upgraded
+-- deployment keeps receiving the mail it configured. `assigned_by` is the
+-- target itself: the row predates per-admin attribution, and inventing an actor
+-- would be a lie in the audit trail.
+INSERT INTO catchall_assignments (domain, account_id, assigned_by, paused)
+SELECT domain, target_account_id, target_account_id, 0
+  FROM catchall_rules
+ WHERE target_account_id IS NOT NULL
+ON CONFLICT (domain, account_id) DO NOTHING;
 "#,
 ];
 

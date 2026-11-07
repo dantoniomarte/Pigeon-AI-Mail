@@ -46,7 +46,7 @@ Verify before wiring any client:
 # handshake
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | pigeon mcp
 
-# catalog — 27 tools
+# catalog — 33 tools
 printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
   | pigeon mcp | grep -o '"name"' | wc -l
 

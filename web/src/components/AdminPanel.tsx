@@ -2,6 +2,9 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   AlertTriangle,
+  AtSign,
+  BellOff,
+  BellRing,
   Building2,
   Check,
   Copy,
@@ -12,6 +15,7 @@ import {
   RefreshCw,
   ShieldAlert,
   Trash2,
+  UserMinus,
   UserPlus,
   Users,
   Waypoints,
@@ -20,17 +24,26 @@ import {
 
 import {
   ApiError,
+  assignAlias,
+  assignCatchall,
+  createAlias,
   createInvitation,
   createMember,
   createOrg,
+  deleteAlias,
   deleteCatchall,
   deleteInvitation,
+  fetchAliases,
   fetchCatchalls,
   fetchInvitations,
   fetchMyOrgs,
   fetchOrgMembers,
+  patchCatchallAssignment,
   patchMember,
   setCatchall,
+  unassignAlias,
+  unassignCatchall,
+  type AliasView,
   type CatchallAction,
   type CatchallRuleView,
   type InvitationView,
@@ -103,6 +116,21 @@ export default function AdminPanel({ apiKey, notify }: AdminPanelProps): JSX.Ele
   const [rules, setRules] = useState<CatchallRuleView[]>([]);
   const [rulesState, setRulesState] = useState<LoadState>('idle');
   const [rulesToken, setRulesToken] = useState(0);
+  /** Which mailbox the admin picked to add to a rule, keyed by domain. */
+  const [ruleAssignee, setRuleAssignee] = useState<Record<string, string>>({});
+
+  const [aliases, setAliases] = useState<AliasView[]>([]);
+  const [aliasesState, setAliasesState] = useState<LoadState>('idle');
+  const [aliasesToken, setAliasesToken] = useState(0);
+  const [newAlias, setNewAlias] = useState('');
+  const [creatingAlias, setCreatingAlias] = useState(false);
+  const [aliasError, setAliasError] = useState<string | null>(null);
+  const [pendingAlias, setPendingAlias] = useState<number | null>(null);
+  const [busyAlias, setBusyAlias] = useState<number | null>(null);
+  /** Which mailbox the admin picked to add to an alias, keyed by alias id. */
+  const [aliasAssignee, setAliasAssignee] = useState<Record<number, string>>({});
+  /** One in-flight assignee mutation at a time, keyed `domain:account` / `alias:account`. */
+  const [busyAssignee, setBusyAssignee] = useState<string | null>(null);
 
   /* Create organization. */
   const [newOrgName, setNewOrgName] = useState('');
@@ -246,6 +274,33 @@ export default function AdminPanel({ apiKey, notify }: AdminPanelProps): JSX.Ele
       cancelled = true;
     };
   }, [apiKey, canAdminister, rulesToken]);
+
+  useEffect(() => {
+    if (!canAdminister) {
+      setAliases([]);
+      setAliasesState('idle');
+      return;
+    }
+    let cancelled = false;
+    setAliasesState('loading');
+    void fetchAliases(apiKey)
+      .then((list) => {
+        if (cancelled) {
+          return;
+        }
+        setAliases(list);
+        setAliasesState('ready');
+      })
+      .catch((error: unknown) => {
+        if (cancelled) {
+          return;
+        }
+        setAliasesState(error instanceof ApiError && error.isForbidden ? 'forbidden' : 'error');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [aliasesToken, apiKey, canAdminister]);
 
   const formatDate = useCallback(
     (iso: string | undefined | null): string => {
@@ -505,12 +560,16 @@ export default function AdminPanel({ apiKey, notify }: AdminPanelProps): JSX.Ele
       }
       setSavingRule(true);
       setRuleError(null);
-      void setCatchall(
-        apiKey,
-        domain,
-        ruleAction,
-        ruleAction === 'route' ? targetAccountId : undefined,
-      )
+      // Two calls, on purpose: the rule is the domain decision, the mailbox is an
+      // assignment. Flipping the action later therefore never forgets who was
+      // receiving the mail.
+      void setCatchall(apiKey, domain, ruleAction)
+        .then(() => {
+          if (ruleAction !== 'route' || !Number.isFinite(targetAccountId)) {
+            return undefined;
+          }
+          return assignCatchall(apiKey, domain, targetAccountId).catch(() => undefined);
+        })
         .then(() => {
           setRuleDomain('');
           setRuleTarget('');
@@ -542,6 +601,161 @@ export default function AdminPanel({ apiKey, notify }: AdminPanelProps): JSX.Ele
         });
     },
     [apiKey, notify, pendingRule, t],
+  );
+
+  const addCatchallAssignee = useCallback(
+    (domain: string) => {
+      const raw = ruleAssignee[domain] ?? '';
+      const accountId = Number.parseInt(raw, 10);
+      if (!Number.isFinite(accountId)) {
+        return;
+      }
+      const key = `${domain}:${accountId}`;
+      setBusyAssignee(key);
+      void assignCatchall(apiKey, domain, accountId)
+        .then((rule) => {
+          setRules((current) => current.map((row) => (row.domain === rule.domain ? rule : row)));
+          setRuleAssignee((current) => ({ ...current, [domain]: '' }));
+          notify('success', t('admin.catchallAssigneeAdded'));
+        })
+        .catch(() => notify('error', t('common.error')))
+        .finally(() => setBusyAssignee(null));
+    },
+    [apiKey, notify, ruleAssignee, t],
+  );
+
+  const dropCatchallAssignee = useCallback(
+    (domain: string, accountId: number) => {
+      const key = `${domain}:${accountId}`;
+      setBusyAssignee(key);
+      void unassignCatchall(apiKey, domain, accountId)
+        .then(() => {
+          setRules((current) =>
+            current.map((row) =>
+              row.domain === domain
+                ? {
+                    ...row,
+                    assignments: (row.assignments ?? []).filter(
+                      (assignment) => assignment.account_id !== accountId,
+                    ),
+                  }
+                : row,
+            ),
+          );
+          notify('success', t('admin.catchallAssigneeRemoved'));
+        })
+        .catch(() => notify('error', t('common.error')))
+        .finally(() => setBusyAssignee(null));
+    },
+    [apiKey, notify, t],
+  );
+
+  const forceCatchall = useCallback(
+    (domain: string, accountId: number, paused: boolean) => {
+      const key = `${domain}:${accountId}`;
+      setBusyAssignee(key);
+      void patchCatchallAssignment(apiKey, domain, accountId, paused)
+        .then(() => {
+          setRules((current) =>
+            current.map((row) =>
+              row.domain === domain
+                ? {
+                    ...row,
+                    assignments: (row.assignments ?? []).map((assignment) =>
+                      assignment.account_id === accountId
+                        ? { ...assignment, paused }
+                        : assignment,
+                    ),
+                  }
+                : row,
+            ),
+          );
+          notify('success', t('admin.catchallForced'));
+        })
+        .catch(() => notify('error', t('common.error')))
+        .finally(() => setBusyAssignee(null));
+    },
+    [apiKey, notify, t],
+  );
+
+  /* ------------------------------------------------------------- aliases */
+
+  const submitAlias = useCallback(
+    (event: React.FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      const address = newAlias.trim();
+      if (address.length === 0 || creatingAlias) {
+        return;
+      }
+      setCreatingAlias(true);
+      setAliasError(null);
+      void createAlias(apiKey, address)
+        .then(() => {
+          setNewAlias('');
+          setAliasesToken((token) => token + 1);
+          notify('success', t('admin.aliasCreated'));
+        })
+        .catch(() => setAliasError(t('common.error')))
+        .finally(() => setCreatingAlias(false));
+    },
+    [apiKey, creatingAlias, newAlias, notify, t],
+  );
+
+  const removeAlias = useCallback(
+    (alias: AliasView) => {
+      if (pendingAlias !== alias.id) {
+        setPendingAlias(alias.id);
+        return;
+      }
+      setBusyAlias(alias.id);
+      void deleteAlias(apiKey, alias.id)
+        .then(() => {
+          setAliases((current) => current.filter((row) => row.id !== alias.id));
+          notify('success', t('admin.aliasDeleted'));
+        })
+        .catch(() => notify('error', t('common.error')))
+        .finally(() => {
+          setBusyAlias(null);
+          setPendingAlias(null);
+        });
+    },
+    [apiKey, notify, pendingAlias, t],
+  );
+
+  const addAliasAssignee = useCallback(
+    (alias: AliasView) => {
+      const raw = aliasAssignee[alias.id] ?? '';
+      const accountId = Number.parseInt(raw, 10);
+      if (!Number.isFinite(accountId)) {
+        return;
+      }
+      const key = `alias:${alias.id}:${accountId}`;
+      setBusyAssignee(key);
+      void assignAlias(apiKey, alias.id, accountId)
+        .then((updated) => {
+          setAliases((current) => current.map((row) => (row.id === updated.id ? updated : row)));
+          setAliasAssignee((current) => ({ ...current, [alias.id]: '' }));
+          notify('success', t('admin.aliasAssigned'));
+        })
+        .catch(() => notify('error', t('common.error')))
+        .finally(() => setBusyAssignee(null));
+    },
+    [aliasAssignee, apiKey, notify, t],
+  );
+
+  const dropAliasAssignee = useCallback(
+    (alias: AliasView, accountId: number) => {
+      const key = `alias:${alias.id}:${accountId}`;
+      setBusyAssignee(key);
+      void unassignAlias(apiKey, alias.id, accountId)
+        .then((updated) => {
+          setAliases((current) => current.map((row) => (row.id === updated.id ? updated : row)));
+          notify('success', t('admin.aliasUnassigned'));
+        })
+        .catch(() => notify('error', t('common.error')))
+        .finally(() => setBusyAssignee(null));
+    },
+    [apiKey, notify, t],
   );
 
   /* -------------------------------------------------------------- pieces */
@@ -1028,7 +1242,7 @@ export default function AdminPanel({ apiKey, notify }: AdminPanelProps): JSX.Ele
                     <tr>
                       <th scope="col">{t('admin.catchallDomain')}</th>
                       <th scope="col">{t('admin.catchallAction')}</th>
-                      <th scope="col">{t('admin.catchallTarget')}</th>
+                      <th scope="col">{t('admin.catchallAssignees')}</th>
                       <th scope="col" />
                     </tr>
                   </thead>
@@ -1048,9 +1262,108 @@ export default function AdminPanel({ apiKey, notify }: AdminPanelProps): JSX.Ele
                           </span>
                         </td>
                         <td className="admin-table__meta">
-                          {rule.target_account_id !== undefined
-                            ? (emailOf.get(rule.target_account_id) ?? '—')
-                            : '—'}
+                          {(rule.assignments ?? []).length === 0 ? (
+                            <span className="admin__hint">{t('admin.catchallNoAssignees')}</span>
+                          ) : (
+                            <ul className="tag-list">
+                              {(rule.assignments ?? []).map((assignment) => {
+                                const key = `${rule.domain}:${assignment.account_id}`;
+                                return (
+                                  <li
+                                    key={assignment.account_id}
+                                    className={`badge ${
+                                      assignment.paused ? 'badge--muted' : 'badge--enc'
+                                    }`}
+                                  >
+                                    {assignment.email ??
+                                      emailOf.get(assignment.account_id) ??
+                                      `#${assignment.account_id}`}
+                                    <button
+                                      type="button"
+                                      className="icon-btn icon-btn--tiny"
+                                      onClick={() =>
+                                        forceCatchall(
+                                          rule.domain,
+                                          assignment.account_id,
+                                          !assignment.paused,
+                                        )
+                                      }
+                                      disabled={busyAssignee === key}
+                                      aria-label={
+                                        assignment.paused
+                                          ? t('admin.catchallResume')
+                                          : t('admin.catchallPause')
+                                      }
+                                      title={
+                                        assignment.paused
+                                          ? t('admin.catchallResume')
+                                          : t('admin.catchallPause')
+                                      }
+                                    >
+                                      {assignment.paused ? (
+                                        <BellRing size={12} aria-hidden="true" />
+                                      ) : (
+                                        <BellOff size={12} aria-hidden="true" />
+                                      )}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="icon-btn icon-btn--tiny"
+                                      onClick={() =>
+                                        dropCatchallAssignee(rule.domain, assignment.account_id)
+                                      }
+                                      disabled={busyAssignee === key}
+                                      aria-label={t('admin.catchallUnassign')}
+                                      title={t('admin.catchallUnassign')}
+                                    >
+                                      <UserMinus size={12} aria-hidden="true" />
+                                    </button>
+                                  </li>
+                                );
+                              })}
+                            </ul>
+                          )}
+                          {rule.action === 'route' ? (
+                            <div className="row-inline">
+                              <select
+                                className="input input--small"
+                                aria-label={t('admin.catchallAssign')}
+                                value={ruleAssignee[rule.domain] ?? ''}
+                                onChange={(event) =>
+                                  setRuleAssignee((current) => ({
+                                    ...current,
+                                    [rule.domain]: event.target.value,
+                                  }))
+                                }
+                              >
+                                <option value="">—</option>
+                                {ruleTargets
+                                  .filter(
+                                    (member) =>
+                                      !(rule.assignments ?? []).some(
+                                        (assignment) => assignment.account_id === member.account_id,
+                                      ),
+                                  )
+                                  .map((member) => (
+                                    <option
+                                      key={member.account_id}
+                                      value={String(member.account_id)}
+                                    >
+                                      {member.email}
+                                    </option>
+                                  ))}
+                              </select>
+                              <button
+                                type="button"
+                                className="btn btn--small btn--ghost"
+                                onClick={() => addCatchallAssignee(rule.domain)}
+                                disabled={(ruleAssignee[rule.domain] ?? '').length === 0}
+                              >
+                                <UserPlus size={13} aria-hidden="true" />
+                                {t('admin.catchallAssign')}
+                              </button>
+                            </div>
+                          ) : null}
                         </td>
                         <td>
                           <div className="admin-table__actions">
@@ -1145,6 +1458,159 @@ export default function AdminPanel({ apiKey, notify }: AdminPanelProps): JSX.Ele
                   <Plus size={15} aria-hidden="true" />
                 )}
                 {t('admin.catchall')}
+              </button>
+            </form>
+          </section>
+        ) : null}
+
+        {canAdminister ? (
+          <section className="panel">
+            <div className="panel__head">
+              <h2>
+                <AtSign size={15} aria-hidden="true" />
+                {t('admin.aliasTitle')}
+              </h2>
+              <p>{t('admin.aliasBody')}</p>
+            </div>
+
+            {aliasesState === 'loading' || aliasesState === 'idle' ? loadingBlock : null}
+            {aliasesState === 'error' || aliasesState === 'forbidden'
+              ? errorBlock(() => setAliasesToken((token) => token + 1))
+              : null}
+
+            {aliasesState === 'ready' && aliases.length > 0 ? (
+              <div className="admin-table__wrap">
+                <table className="admin-table">
+                  <thead>
+                    <tr>
+                      <th scope="col">{t('admin.aliasAddress')}</th>
+                      <th scope="col">{t('admin.aliasAssignees')}</th>
+                      <th scope="col" />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {aliases.map((alias) => (
+                      <tr key={alias.id}>
+                        <td className="admin-table__email mono">{alias.address}</td>
+                        <td className="admin-table__meta">
+                          {alias.assignments.length === 0 ? (
+                            <span className="admin__hint">{t('admin.aliasNoAssignees')}</span>
+                          ) : (
+                            <ul className="tag-list">
+                              {alias.assignments.map((assignment) => {
+                                const key = `alias:${alias.id}:${assignment.account_id}`;
+                                return (
+                                  <li key={assignment.account_id} className="badge badge--enc">
+                                    {assignment.email ??
+                                      emailOf.get(assignment.account_id) ??
+                                      `#${assignment.account_id}`}
+                                    <button
+                                      type="button"
+                                      className="icon-btn icon-btn--tiny"
+                                      onClick={() => dropAliasAssignee(alias, assignment.account_id)}
+                                      disabled={busyAssignee === key}
+                                      aria-label={t('admin.aliasUnassign')}
+                                      title={t('admin.aliasUnassign')}
+                                    >
+                                      <UserMinus size={12} aria-hidden="true" />
+                                    </button>
+                                  </li>
+                                );
+                              })}
+                            </ul>
+                          )}
+                          <div className="row-inline">
+                            <select
+                              className="input input--small"
+                              aria-label={t('admin.aliasAssign')}
+                              value={aliasAssignee[alias.id] ?? ''}
+                              onChange={(event) =>
+                                setAliasAssignee((current) => ({
+                                  ...current,
+                                  [alias.id]: event.target.value,
+                                }))
+                              }
+                            >
+                              <option value="">—</option>
+                              {members
+                                .filter(
+                                  (member) =>
+                                    !alias.assignments.some(
+                                      (assignment) => assignment.account_id === member.account_id,
+                                    ),
+                                )
+                                .map((member) => (
+                                  <option key={member.account_id} value={String(member.account_id)}>
+                                    {member.email}
+                                  </option>
+                                ))}
+                            </select>
+                            <button
+                              type="button"
+                              className="btn btn--small btn--ghost"
+                              onClick={() => addAliasAssignee(alias)}
+                              disabled={(aliasAssignee[alias.id] ?? '').length === 0}
+                            >
+                              <UserPlus size={13} aria-hidden="true" />
+                              {t('admin.aliasAssign')}
+                            </button>
+                          </div>
+                        </td>
+                        <td>
+                          <div className="admin-table__actions">
+                            <button
+                              type="button"
+                              className={`btn btn--small ${
+                                pendingAlias === alias.id ? 'btn--danger' : 'btn--ghost'
+                              }`}
+                              onClick={() => removeAlias(alias)}
+                              disabled={busyAlias === alias.id}
+                            >
+                              {busyAlias === alias.id ? (
+                                <Loader2 size={14} className="spin" aria-hidden="true" />
+                              ) : (
+                                <Trash2 size={14} aria-hidden="true" />
+                              )}
+                              {pendingAlias === alias.id
+                                ? `${t('common.delete')}?`
+                                : t('common.delete')}
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
+
+            <form className="settings__form admin__ruleform" onSubmit={submitAlias}>
+              <label className="field field--plain">
+                <span className="field__label">{t('admin.aliasAddress')}</span>
+                <input
+                  className="input"
+                  type="email"
+                  value={newAlias}
+                  placeholder="sales@example.org"
+                  onChange={(event) => setNewAlias(event.target.value)}
+                />
+              </label>
+              {aliasError !== null ? (
+                <p className="field__error" role="alert">
+                  {aliasError}
+                </p>
+              ) : null}
+              <button
+                type="submit"
+                className="btn btn--primary"
+                disabled={creatingAlias || newAlias.trim().length === 0}
+              >
+                {creatingAlias ? (
+                  <Loader2 size={15} className="spin" aria-hidden="true" />
+                ) : (
+                  <Plus size={15} aria-hidden="true" />
+                )}
+                {t('admin.aliasCreate')}
               </button>
             </form>
           </section>

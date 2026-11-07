@@ -31,7 +31,7 @@ import { LANGUAGE_STORAGE_KEY, detectLanguage, isLanguageCode } from './i18n';
 import Compose from './components/Compose';
 import AdminPanel from './components/AdminPanel';
 import DraftsList from './components/DraftsList';
-import MailList, { type MailListItem } from './components/MailList';
+import MailList, { type DeliveredOption, type MailListItem } from './components/MailList';
 import MailView from './components/MailView';
 import Settings from './components/Settings';
 import Landing from './components/Landing';
@@ -157,6 +157,10 @@ export default function App(): JSX.Element {
   const [listState, setListState] = useState<LoadState>('idle');
   const [reloadToken, setReloadToken] = useState(0);
   const [counts, setCounts] = useState<FolderCounts | null>(null);
+  // The "Delivered to" pseudo-folder: `null` is the whole folder, an address
+  // narrows the inbox to the copies that arrived for that shared address.
+  const [deliveredFilter, setDeliveredFilter] = useState<string | null>(null);
+  const [deliveredOptions, setDeliveredOptions] = useState<DeliveredOption[]>([]);
   const activeFolder = view === 'inbox' || view === 'sent' || view === 'spam' || view === 'trash' ? view : null;
 
   const [detail, setDetail] = useState<MessageDetail | null>(null);
@@ -223,7 +227,9 @@ export default function App(): JSX.Element {
     let cancelled = false;
     setListState('loading');
     void Promise.all([
-      activeFolder !== null ? fetchFolder(apiKey, activeFolder) : fetchFolder(apiKey, 'inbox'),
+      activeFolder !== null
+        ? fetchFolder(apiKey, activeFolder, deliveredFilter)
+        : fetchFolder(apiKey, 'inbox', deliveredFilter),
       fetchSent(apiKey),
     ])
       .then(([inboxResult, sentResult]) => {
@@ -235,6 +241,7 @@ export default function App(): JSX.Element {
         setDemo(inboxResult.demo || sentResult.demo);
         setListState('ready');
         setCounts(inboxResult.counts ?? null);
+        setDeliveredOptions(inboxResult.deliveredForCounts ?? []);
       })
       .catch((error: unknown) => {
         if (cancelled) {
@@ -259,7 +266,7 @@ export default function App(): JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, [apiKey, activeFolder, reloadToken, sessionActive, notify, i18nInstance]);
+  }, [apiKey, activeFolder, deliveredFilter, reloadToken, sessionActive, notify, i18nInstance]);
 
   /* Drafts, fetched separately so their load state can be shown on its own. */
   useEffect(() => {
@@ -415,6 +422,7 @@ export default function App(): JSX.Element {
         preview: enrichment?.preview ?? null,
         unread: demo ? (enrichment?.unread ?? false) : !readIds.has(message.id),
         encrypted: true,
+        deliveredFor: message.delivered_for,
       };
     });
   }, [view, inbox, sent, demo, readIds, t]);
@@ -469,6 +477,9 @@ export default function App(): JSX.Element {
     setView(next);
     setSidebarOpen(false);
     setSelectedId(null);
+    // A "Delivered to" filter belongs to the inbox: leaving it must not hide the
+    // sent or trash folders behind somebody else's address.
+    setDeliveredFilter(null);
   }, []);
 
   /* The off-canvas sidebar closes on Escape, like any other overlay. */
@@ -669,6 +680,12 @@ export default function App(): JSX.Element {
               selectedId={selectedId}
               demo={demo}
               counts={counts}
+              deliveredOptions={view === 'inbox' ? deliveredOptions : undefined}
+              deliveredFilter={deliveredFilter}
+              onDeliveredFilter={(address) => {
+                setDeliveredFilter(address);
+                setReloadToken((token) => token + 1);
+              }}
               onMarkRead={handleMarkRead}
               onMove={handleMove}
               onDelete={handleDelete}

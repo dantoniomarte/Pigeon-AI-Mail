@@ -58,7 +58,7 @@ use pigeon_core::ApiKeyScope;
 pub use state::{ApiConfig, AppState};
 
 use crate::handlers::{
-    account, domains, drafts, health, messages, org, send, sessions, suppressions,
+    account, aliases, domains, drafts, health, messages, org, send, sessions, suppressions,
     templates as template_handlers, twofa, webhooks,
 };
 
@@ -96,7 +96,14 @@ pub fn router(state: AppState) -> Router {
             "/v1/drafts/{id}",
             patch(drafts::update_draft).delete(drafts::delete_draft),
         )
-        .route("/v1/drafts/{id}/send", post(drafts::send_draft));
+        .route("/v1/drafts/{id}/send", post(drafts::send_draft))
+        // Sender aliases: choosing a `from` is part of sending, so the self view
+        // lives here (`?mine=1` is what the compose box asks for).
+        .route("/v1/aliases", get(aliases::list_aliases))
+        // The self-service pause of the caller's own catch-all copy: a member's
+        // own switch, so it needs no organization-wide role.
+        .route("/v1/catchall/me/pause", post(org::pause_own_catchall))
+        .route("/v1/catchall/me/resume", post(org::resume_own_catchall));
 
     let read_group = Router::new()
         .route("/v1/emails", get(send::list_emails))
@@ -168,12 +175,28 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/invitations/accept", post(org::accept_invitation))
         // Catch-all routing for inbound mail: what happens to an unknown local
-        // part of a managed domain (`route` into a mailbox, or `discard`).
+        // part of a managed domain (`route` into every non-paused assignee, or
+        // `discard`), plus who holds a copy and whether they paused it.
         .route("/v1/catchall", get(org::list_catchalls))
         .route(
             "/v1/catchall/{domain}",
             put(org::put_catchall).delete(org::delete_catchall),
-        );
+        )
+        .route("/v1/catchall/{domain}/assign", post(org::assign_catchall))
+        .route(
+            "/v1/catchall/{domain}/assign/{account_id}",
+            delete(org::unassign_catchall),
+        )
+        .route(
+            "/v1/catchall/{domain}/assignments/{account_id}",
+            patch(org::patch_catchall_assignment),
+        )
+        // Sender aliases, the administration half: creating one, removing it and
+        // sharing it. Every handler re-proves the caller is an owner/admin.
+        .route("/v1/aliases", post(aliases::create_alias))
+        .route("/v1/aliases/{id}", delete(aliases::delete_alias))
+        .route("/v1/aliases/{id}/assign", post(aliases::assign_alias))
+        .route("/v1/aliases/{id}/unassign", post(aliases::unassign_alias));
 
     // The session realm: a live `pigeon_session` cookie and nothing else. API
     // keys cannot touch the second factor (see `auth::require_session`).

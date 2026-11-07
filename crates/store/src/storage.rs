@@ -105,6 +105,11 @@ pub struct MessageRow {
     pub folder: MessageFolder,
     /// When the message was read; `None` is unread.
     pub read_at: Option<String>,
+    /// The address this copy was delivered *for*, when it is not the mailbox's
+    /// own: a sender alias (`sales@example.com`) or the catch-all local part the
+    /// sender wrote. `None` is ordinary mail addressed to the account. The folder
+    /// stays `inbox`; this column is what the webmail groups by.
+    pub delivered_for: Option<String>,
 }
 
 /// A message waiting to be written, handed to [`Storage::insert_message`]
@@ -124,6 +129,9 @@ pub struct NewMessage {
     /// account**: replaying the same key returns the id of the row already
     /// stored instead of inserting a second message.
     pub idempotency_key: Option<String>,
+    /// Address this copy is delivered for, when it is not the account's own (an
+    /// alias or a catch-all recipient). `None` is ordinary mail.
+    pub delivered_for: Option<String>,
 }
 
 /// A queue row won by [`Storage::queue_claim`].
@@ -306,21 +314,64 @@ impl InvitationRow {
 }
 
 /// One catch-all rule for an inbound domain.
+///
+/// The rule is the **domain-level decision** only (`route` or `discard`). Who
+/// receives a routed copy lives in [`CatchallAssignmentRow`], separately, because
+/// several accounts may hold the same catch-all and each may pause its own copy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatchallRuleRow {
     pub id: i64,
     /// Lowercased domain the rule applies to.
     pub domain: String,
     pub action: CatchallAction,
-    /// Mailbox that receives the message for `action = route`; `None` for
-    /// `discard`.
-    pub target_account_id: Option<i64>,
+    pub created_at: String,
+}
+
+/// One account holding the catch-all of a domain, with its own pause switch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatchallAssignmentRow {
+    pub id: i64,
+    /// Lowercased domain the catch-all belongs to.
+    pub domain: String,
+    pub account_id: i64,
+    pub assigned_by: i64,
+    /// `true` suspended this member's copy; the domain keeps routing to the
+    /// others. Only the member may pause, and an admin may force a resume.
+    pub paused: bool,
+    pub created_at: String,
+}
+
+/// One sender alias: a secondary address on a served domain that owns no
+/// mailbox of its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SenderAliasRow {
+    pub id: i64,
+    /// Normalized address (`local` folded, domain lowercase).
+    pub address: String,
+    /// Lowercased domain half of [`Self::address`].
+    pub domain: String,
+    pub created_by: i64,
+    pub created_at: String,
+}
+
+/// One account that may send as an alias and receives a copy of its mail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AliasAssignmentRow {
+    pub alias_id: i64,
+    pub account_id: i64,
+    pub assigned_by: i64,
     pub created_at: String,
 }
 
 /// Persistence contract used by services (ADR 0002 point 2).
 pub trait Storage {
     /// Insert an account; duplicate email is [`StoreError::Conflict`].
+    ///
+    /// An address a **sender alias** already owns is
+    /// [`StoreError::AliasShadow`], checked in the same transaction as the insert:
+    /// the two unique indexes (`accounts.email_norm`, `sender_aliases.address`)
+    /// cannot span each other, so without this guard a member mailbox could take
+    /// an alias address and divert its mail.
     fn create_account(&self, account: &EmailAddress) -> Result<i64>;
 
     /// Load an account, or [`StoreError::NotFound`].
@@ -432,6 +483,27 @@ pub trait Storage {
 
     /// Number of messages of `account_id` in `folder`, for the sidebar badges.
     fn count_folder(&self, account_id: i64, folder: MessageFolder) -> Result<i64>;
+
+    /// One page of the inbox that was delivered **for** `delivered_for` (an alias
+    /// or a catch-all local part), newest first.
+    ///
+    /// This is the webmail's pseudo-folder listing. It is deliberately a filter on
+    /// `inbox` and not a folder of its own: the message stays where the delivery
+    /// put it, and revoking an alias never orphans mail in a synthetic folder.
+    fn list_delivered_for(
+        &self,
+        account_id: i64,
+        delivered_for: &str,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<MessageRow>>;
+
+    /// How many inbox messages were delivered for `delivered_for`.
+    fn count_delivered_for(&self, account_id: i64, delivered_for: &str) -> Result<i64>;
+
+    /// Every `delivered_for` marker the account holds, with its inbox count, so
+    /// the webmail can render one pseudo-folder per shared address.
+    fn delivered_for_counts(&self, account_id: i64) -> Result<Vec<(String, i64)>>;
 
     // ------------------------------------------------------- trash retention
 
@@ -742,7 +814,9 @@ pub trait Storage {
     /// personal workspace: the organization and the role are part of the insert,
     /// so there is no window in which the account exists without them. Duplicate
     /// email is [`StoreError::Conflict`], unknown organization
-    /// [`StoreError::NotFound`].
+    /// [`StoreError::NotFound`], and an address a sender alias already owns is
+    /// [`StoreError::AliasShadow`] — the same rule [`Storage::create_account`]
+    /// applies, so a member mailbox can never take a shared address.
     fn create_member_account(
         &self,
         email: &EmailAddress,
@@ -819,20 +893,15 @@ pub trait Storage {
 
     // --------------------------------------------------------- catch-all
 
-    /// Create or replace the catch-all rule for `domain` (upsert).
+    /// Create or replace the catch-all **rule** for `domain` (upsert).
     ///
-    /// The domain is the identity, so re-putting replaces the action and the
-    /// target: two rules for one domain could only contradict each other.
-    /// `action = route` requires a `target_account_id` that exists
-    /// ([`StoreError::NotFound`]); `action = discard` requires `None` — a discard
-    /// rule that also named a mailbox would invite the reader to believe mail is
-    /// being kept. The domain is lowercased here so lookups cannot miss on case.
-    fn set_catchall(
-        &self,
-        domain: &str,
-        action: CatchallAction,
-        target_account_id: Option<i64>,
-    ) -> Result<()>;
+    /// The domain is the identity, so re-putting replaces the action: two rules
+    /// for one domain could only contradict each other. The recipients are
+    /// separate rows ([`Storage::assign_catchall`]) and survive an action change:
+    /// flipping a domain from `route` to `discard` must not silently forget who
+    /// was receiving it. The domain is lowercased here so lookups cannot miss on
+    /// case.
+    fn set_catchall(&self, domain: &str, action: CatchallAction) -> Result<()>;
 
     /// The rule for `domain`, or `None` when the domain falls through to the
     /// ordinary `550`.
@@ -842,8 +911,100 @@ pub trait Storage {
     fn list_catchalls(&self) -> Result<Vec<CatchallRuleRow>>;
 
     /// Delete the rule for `domain`; [`StoreError::NotFound`] when there is none,
-    /// so a caller cannot believe it disabled a rule that was never there.
+    /// so a caller cannot believe it disabled a rule that was never there. The
+    /// domain's assignments go with it (`ON DELETE` is not applicable here, so
+    /// they are deleted in the same transaction): an assignment without a rule
+    /// would be a grant that can never fire.
     fn delete_catchall(&self, domain: &str) -> Result<()>;
+
+    /// Give `account_id` a copy of the catch-all mail of `domain`.
+    ///
+    /// [`StoreError::Conflict`] when the account already holds it (assigning
+    /// twice is not two copies), [`StoreError::NotFound`] when the **domain has no
+    /// rule** or the account does not exist. The rule check runs before the
+    /// insert in the same transaction, so a refused call leaves no row behind: an
+    /// assignment whose domain has no rule could never fire.
+    fn assign_catchall(&self, domain: &str, account_id: i64, assigned_by: i64) -> Result<()>;
+
+    /// Remove one account's catch-all assignment. Messages already delivered
+    /// stay where they are; only future delivery stops.
+    fn unassign_catchall(&self, domain: &str, account_id: i64) -> Result<()>;
+
+    /// Set the per-member pause switch. [`StoreError::NotFound`] when the account
+    /// does not hold that catch-all.
+    fn set_catchall_paused(&self, domain: &str, account_id: i64, paused: bool) -> Result<()>;
+
+    /// The account holding the catch-all of `domain`, or `None`.
+    fn get_catchall_assignment(
+        &self,
+        domain: &str,
+        account_id: i64,
+    ) -> Result<Option<CatchallAssignmentRow>>;
+
+    /// Every assignment of one domain, oldest first.
+    fn catchall_assignees(&self, domain: &str) -> Result<Vec<CatchallAssignmentRow>>;
+
+    /// Every assignment, oldest first (the admin listing).
+    fn list_catchall_assignments(&self) -> Result<Vec<CatchallAssignmentRow>>;
+
+    /// The catch-alls one account holds, for its own view and for the pause
+    /// self-service.
+    fn catchall_assignments_for_account(
+        &self,
+        account_id: i64,
+    ) -> Result<Vec<CatchallAssignmentRow>>;
+
+    // ----------------------------------------------------- sender aliases
+
+    /// Create a sender alias for an address on a **served** domain.
+    ///
+    /// Refusals, all [`StoreError::InvalidArgument`] except the collision:
+    ///
+    /// * the address already belongs to an account — an alias must never shadow
+    ///   a mailbox, or mail would be copied instead of delivered;
+    /// * the address is another alias ([`StoreError::Conflict`]);
+    /// * the domain is not served by this deployment (no account and no DKIM key
+    ///   on it), because an alias on a foreign domain could never receive mail.
+    fn create_alias(&self, address: &EmailAddress, created_by: i64) -> Result<i64>;
+
+    /// Delete an alias and every assignment to it; [`StoreError::NotFound`] when
+    /// there is none. Messages already delivered stay in their mailboxes.
+    fn delete_alias(&self, alias_id: i64) -> Result<()>;
+
+    /// Every alias, oldest first.
+    fn list_aliases(&self) -> Result<Vec<SenderAliasRow>>;
+
+    /// The alias with this address, if one exists (lowercase comparison).
+    fn get_alias_by_address(&self, address: &str) -> Result<Option<SenderAliasRow>>;
+
+    /// The alias with this id, if one exists.
+    fn get_alias(&self, alias_id: i64) -> Result<Option<SenderAliasRow>>;
+
+    /// Let `account_id` send as the alias and receive a copy of its mail.
+    /// [`StoreError::Conflict`] when already assigned, [`StoreError::NotFound`]
+    /// when the alias or the account does not exist.
+    fn assign_alias(&self, alias_id: i64, account_id: i64, assigned_by: i64) -> Result<()>;
+
+    /// Stop future delivery and sending for one account; delivered mail stays.
+    fn unassign_alias(&self, alias_id: i64, account_id: i64) -> Result<()>;
+
+    /// The aliases whose holder is `account_id` (the compose-box list).
+    fn aliases_for_account(&self, account_id: i64) -> Result<Vec<SenderAliasRow>>;
+
+    /// Every account holding the alias with this address.
+    fn accounts_for_alias(&self, address: &str) -> Result<Vec<i64>>;
+
+    /// The assignments of one alias, oldest first.
+    fn alias_assignments(&self, alias_id: i64) -> Result<Vec<AliasAssignmentRow>>;
+
+    /// True when the address belongs to an account **or** to an alias, which is
+    /// the collision rule of both surfaces.
+    fn is_address_taken(&self, address: &str) -> Result<bool>;
+
+    /// Domains this deployment serves: the domains of its accounts, plus the ones
+    /// it holds a DKIM identity for. An address on any other domain can neither
+    /// receive nor send here.
+    fn served_domains(&self) -> Result<Vec<String>>;
 }
 
 /// Claim statement, kept in one place so the tests can `EXPLAIN QUERY PLAN` the
@@ -1268,6 +1429,7 @@ struct RawMessage {
     created_at: String,
     folder: String,
     read_at: Option<String>,
+    delivered_for: Option<String>,
 }
 
 /// Decode the `messages.folder` column. An unknown value is a corrupted column,
@@ -1301,6 +1463,7 @@ fn decode_message(raw: RawMessage) -> Result<MessageRow> {
         created_at: raw.created_at,
         folder,
         read_at: raw.read_at,
+        delivered_for: raw.delivered_for,
     })
 }
 
@@ -1318,6 +1481,7 @@ fn decode_listed_message(raw: RawMessage) -> MessageRow {
         subject,
         status,
         created_at,
+        delivered_for,
         ..
     } = raw;
 
@@ -1335,6 +1499,7 @@ fn decode_listed_message(raw: RawMessage) -> MessageRow {
             created_at,
             folder,
             read_at,
+            delivered_for,
         },
         _ => {
             tracing::warn!(
@@ -1353,6 +1518,7 @@ fn decode_listed_message(raw: RawMessage) -> MessageRow {
                 created_at,
                 folder,
                 read_at,
+                delivered_for,
             }
         }
     }
@@ -1365,7 +1531,7 @@ fn decode_listed_message(raw: RawMessage) -> MessageRow {
 /// read in [`listed_rows`] fails every listing test at once.
 const LISTED_COLUMNS: &str = "\
 SELECT id, account_id, direction, from_addr, to_addrs, subject, \
-       status, created_at, folder, read_at \
+       status, created_at, folder, read_at, delivered_for \
   FROM messages";
 
 /// The folder listing, in one place so the test can `EXPLAIN QUERY PLAN` the
@@ -1406,6 +1572,7 @@ fn listed_rows(
                 created_at: row.get(7)?,
                 folder: row.get(8)?,
                 read_at: row.get(9)?,
+                delivered_for: row.get(10)?,
             })
         })?;
         mapped.collect::<rusqlite::Result<Vec<_>>>()?
@@ -1415,12 +1582,20 @@ fn listed_rows(
 
 impl Storage for SqliteStorage {
     fn create_account(&self, account: &EmailAddress) -> Result<i64> {
-        let conn = self.lock();
-        match conn.execute(
+        let mut conn = self.lock();
+        // One transaction: the alias check and the insert must not be separable,
+        // or an alias created in between would be shadowed by the account.
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        guard_alias_shadow(&tx, account)?;
+        match tx.execute(
             "INSERT INTO accounts (email, email_norm) VALUES (?1, ?2)",
             params![account.to_string(), account.normalized()],
         ) {
-            Ok(_) => Ok(conn.last_insert_rowid()),
+            Ok(_) => {
+                let id = tx.last_insert_rowid();
+                tx.commit()?;
+                Ok(id)
+            }
             Err(error) if is_constraint_violation(&error) => Err(StoreError::Conflict),
             Err(error) => Err(error.into()),
         }
@@ -1525,6 +1700,12 @@ impl Storage for SqliteStorage {
     fn insert_message(&self, message: NewMessage, reserved_id: i64) -> Result<i64> {
         validate_sealed_body(&message.sealed_body)?;
         let to_addrs = encode_addrs(&message.to_addrs)?;
+        // The delivery marker is an address or nothing: a hand-built string here
+        // would end up in the inbox grouping and in the webmail's filter list.
+        let delivered_for = match message.delivered_for.as_deref() {
+            Some(raw) => Some(EmailAddress::parse(raw)?.normalized()),
+            None => None,
+        };
         let conn = self.lock();
         // The id is written explicitly, not left to AUTOINCREMENT: the caller
         // sealed the body with `reserved_id` as AAD, so the row must carry that
@@ -1538,8 +1719,8 @@ impl Storage for SqliteStorage {
         let inserted = conn.execute(
             "INSERT INTO messages
                 (id, account_id, direction, from_addr, to_addrs, subject,
-                 sealed_body, idempotency_key)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 sealed_body, idempotency_key, delivered_for)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT (account_id, idempotency_key)
                  WHERE idempotency_key IS NOT NULL
              DO NOTHING",
@@ -1551,7 +1732,8 @@ impl Storage for SqliteStorage {
                 to_addrs,
                 message.subject,
                 message.sealed_body,
-                message.idempotency_key
+                message.idempotency_key,
+                delivered_for
             ],
         )?;
 
@@ -1581,7 +1763,7 @@ impl Storage for SqliteStorage {
         let raw = conn
             .query_row(
                 "SELECT id, account_id, direction, from_addr, to_addrs, subject,
-                        sealed_body, status, created_at, folder, read_at
+                        sealed_body, status, created_at, folder, read_at, delivered_for
                  FROM messages WHERE id = ?1",
                 [id],
                 |row| {
@@ -1597,6 +1779,7 @@ impl Storage for SqliteStorage {
                         created_at: row.get(8)?,
                         folder: row.get(9)?,
                         read_at: row.get(10)?,
+                        delivered_for: row.get(11)?,
                     })
                 },
             )
@@ -1697,6 +1880,50 @@ impl Storage for SqliteStorage {
             params![account_id, folder.as_str()],
             |row| row.get(0),
         )?)
+    }
+
+    fn list_delivered_for(
+        &self,
+        account_id: i64,
+        delivered_for: &str,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<MessageRow>> {
+        let limit = limit.clamp(1, MAX_PAGE_LIMIT);
+        let marker = EmailAddress::parse(delivered_for)?.normalized();
+        let conn = self.lock();
+        listed_rows(
+            &conn,
+            &format!(
+                "{LISTED_COLUMNS} WHERE account_id = ?1 AND folder = 'inbox' \
+                 AND delivered_for = ?2 ORDER BY id DESC LIMIT ?3 OFFSET ?4"
+            ),
+            params![account_id, marker, limit, offset],
+        )
+    }
+
+    fn count_delivered_for(&self, account_id: i64, delivered_for: &str) -> Result<i64> {
+        let marker = EmailAddress::parse(delivered_for)?.normalized();
+        let conn = self.lock();
+        Ok(conn.query_row(
+            "SELECT COUNT(*) FROM messages
+              WHERE account_id = ?1 AND folder = 'inbox' AND delivered_for = ?2",
+            params![account_id, marker],
+            |row| row.get(0),
+        )?)
+    }
+
+    fn delivered_for_counts(&self, account_id: i64) -> Result<Vec<(String, i64)>> {
+        let conn = self.lock();
+        let mut statement = conn.prepare(
+            "SELECT delivered_for, COUNT(*) FROM messages
+              WHERE account_id = ?1 AND folder = 'inbox' AND delivered_for IS NOT NULL
+              GROUP BY delivered_for ORDER BY delivered_for",
+        )?;
+        let rows = statement
+            .query_map([account_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     fn get_trash_retention(&self, account_id: i64) -> Result<i64> {
@@ -2522,6 +2749,10 @@ impl Storage for SqliteStorage {
         if !org_exists {
             return Err(StoreError::NotFound);
         }
+        // Same rule as `create_account`: a member mailbox must never take an
+        // address a sender alias already owns, or mail for the shared address
+        // would be diverted into that one mailbox.
+        guard_alias_shadow(&tx, email)?;
         match tx.execute(
             "INSERT INTO accounts (email, email_norm, org_id, role, display_name)
              VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -2752,49 +2983,14 @@ impl Storage for SqliteStorage {
 
     // ----------------------------------------------------------- catch-all
 
-    fn set_catchall(
-        &self,
-        domain: &str,
-        action: CatchallAction,
-        target_account_id: Option<i64>,
-    ) -> Result<()> {
+    fn set_catchall(&self, domain: &str, action: CatchallAction) -> Result<()> {
         let domain = normalize_domain(domain)?;
         let conn = self.lock();
-        let target = match (action, target_account_id) {
-            (CatchallAction::Route, Some(target)) => {
-                let exists: bool = conn.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM accounts WHERE id = ?1)",
-                    [target],
-                    |row| row.get(0),
-                )?;
-                if !exists {
-                    return Err(StoreError::NotFound);
-                }
-                Some(target)
-            }
-            (CatchallAction::Route, None) => {
-                return Err(StoreError::InvalidArgument(
-                    "action=route needs a target_account_id: there is no default mailbox to \
-                     deliver into"
-                        .to_string(),
-                ))
-            }
-            (CatchallAction::Discard, Some(_)) => {
-                return Err(StoreError::InvalidArgument(
-                    "action=discard must not name a target_account_id: a discarded message is \
-                     not stored anywhere"
-                        .to_string(),
-                ))
-            }
-            (CatchallAction::Discard, None) => None,
-        };
         conn.execute(
-            "INSERT INTO catchall_rules (domain, action, target_account_id)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT (domain) DO UPDATE SET
-                 action = excluded.action,
-                 target_account_id = excluded.target_account_id",
-            params![domain, action.as_str(), target],
+            "INSERT INTO catchall_rules (domain, action)
+             VALUES (?1, ?2)
+             ON CONFLICT (domain) DO UPDATE SET action = excluded.action",
+            params![domain, action.as_str()],
         )?;
         Ok(())
     }
@@ -2823,13 +3019,381 @@ impl Storage for SqliteStorage {
 
     fn delete_catchall(&self, domain: &str) -> Result<()> {
         let domain = domain.trim().to_ascii_lowercase();
+        let mut conn = self.lock();
+        // One transaction for both deletes: a rule that vanished while its
+        // assignments survived would leave grants that can never fire.
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let removed = tx.execute("DELETE FROM catchall_rules WHERE domain = ?1", [&domain])?;
+        if removed == 0 {
+            return Err(StoreError::NotFound);
+        }
+        tx.execute(
+            "DELETE FROM catchall_assignments WHERE domain = ?1",
+            [&domain],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn assign_catchall(&self, domain: &str, account_id: i64, assigned_by: i64) -> Result<()> {
+        let domain = normalize_domain(domain)?;
+        let mut conn = self.lock();
+        // The rule check and the insert are one transaction: an assignment whose
+        // domain has no rule can never fire, so it must not be left behind. The
+        // check runs *first* — a failure has to write nothing, not roll back a
+        // write the caller cannot see.
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let rule_exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM catchall_rules WHERE domain = ?1)",
+            [&domain],
+            |row| row.get(0),
+        )?;
+        if !rule_exists {
+            return Err(StoreError::NotFound);
+        }
+        require_account_exists(&tx, account_id)?;
+        require_account_exists(&tx, assigned_by)?;
+        let inserted = tx.execute(
+            "INSERT INTO catchall_assignments (domain, account_id, assigned_by)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT (domain, account_id) DO NOTHING",
+            params![domain, account_id, assigned_by],
+        )?;
+        if inserted == 0 {
+            return Err(StoreError::Conflict);
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn unassign_catchall(&self, domain: &str, account_id: i64) -> Result<()> {
+        let domain = domain.trim().to_ascii_lowercase();
         let conn = self.lock();
-        let removed = conn.execute("DELETE FROM catchall_rules WHERE domain = ?1", [&domain])?;
+        let removed = conn.execute(
+            "DELETE FROM catchall_assignments WHERE domain = ?1 AND account_id = ?2",
+            params![domain, account_id],
+        )?;
         if removed == 0 {
             return Err(StoreError::NotFound);
         }
         Ok(())
     }
+
+    fn set_catchall_paused(&self, domain: &str, account_id: i64, paused: bool) -> Result<()> {
+        let domain = domain.trim().to_ascii_lowercase();
+        let conn = self.lock();
+        let updated = conn.execute(
+            "UPDATE catchall_assignments SET paused = ?3
+              WHERE domain = ?1 AND account_id = ?2",
+            params![domain, account_id, i64::from(paused)],
+        )?;
+        if updated == 0 {
+            return Err(StoreError::NotFound);
+        }
+        Ok(())
+    }
+
+    fn get_catchall_assignment(
+        &self,
+        domain: &str,
+        account_id: i64,
+    ) -> Result<Option<CatchallAssignmentRow>> {
+        let domain = domain.trim().to_ascii_lowercase();
+        let conn = self.lock();
+        let raw = conn
+            .query_row(
+                &format!("{CATCHALL_ASSIGNMENT_SELECT} WHERE domain = ?1 AND account_id = ?2"),
+                params![domain, account_id],
+                map_raw_catchall_assignment,
+            )
+            .optional()?;
+        raw.map(decode_catchall_assignment).transpose()
+    }
+
+    fn catchall_assignees(&self, domain: &str) -> Result<Vec<CatchallAssignmentRow>> {
+        let domain = domain.trim().to_ascii_lowercase();
+        let conn = self.lock();
+        let mut statement = conn.prepare(&format!(
+            "{CATCHALL_ASSIGNMENT_SELECT} WHERE domain = ?1 ORDER BY id"
+        ))?;
+        let rows = statement
+            .query_map([domain], map_raw_catchall_assignment)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter().map(decode_catchall_assignment).collect()
+    }
+
+    fn list_catchall_assignments(&self) -> Result<Vec<CatchallAssignmentRow>> {
+        let conn = self.lock();
+        let mut statement = conn.prepare(&format!("{CATCHALL_ASSIGNMENT_SELECT} ORDER BY id"))?;
+        let rows = statement
+            .query_map([], map_raw_catchall_assignment)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter().map(decode_catchall_assignment).collect()
+    }
+
+    fn catchall_assignments_for_account(
+        &self,
+        account_id: i64,
+    ) -> Result<Vec<CatchallAssignmentRow>> {
+        let conn = self.lock();
+        let mut statement = conn.prepare(&format!(
+            "{CATCHALL_ASSIGNMENT_SELECT} WHERE account_id = ?1 ORDER BY id"
+        ))?;
+        let rows = statement
+            .query_map([account_id], map_raw_catchall_assignment)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter().map(decode_catchall_assignment).collect()
+    }
+
+    // ------------------------------------------------------- sender aliases
+
+    fn create_alias(&self, address: &EmailAddress, created_by: i64) -> Result<i64> {
+        let normalized = address.normalized();
+        let domain = address.domain().to_ascii_lowercase();
+        let conn = self.lock();
+        require_account_exists(&conn, created_by)?;
+
+        // An alias must never shadow a mailbox: mail to a real address is
+        // delivered to that account's own inbox, and an alias with the same
+        // spelling would silently turn one delivery into a copy for strangers.
+        let account_holds: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM accounts WHERE email_norm = ?1)",
+            [&normalized],
+            |row| row.get(0),
+        )?;
+        if account_holds {
+            return Err(StoreError::InvalidArgument(format!(
+                "{normalized} already belongs to an account: an alias is a free address, not a \
+                 second name for a mailbox"
+            )));
+        }
+
+        // An alias on a domain this deployment does not serve could never receive
+        // mail nor send it: the SMTP server only accepts local parts of its own
+        // domains, and DKIM has no key for a foreign one.
+        let served: bool = conn.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM accounts
+                  WHERE substr(email_norm, instr(email_norm, '@') + 1) = ?1
+                 UNION ALL
+                 SELECT 1 FROM dkim_keys WHERE domain = ?1
+             )",
+            [&domain],
+            |row| row.get(0),
+        )?;
+        if !served {
+            return Err(StoreError::InvalidArgument(format!(
+                "{domain} is not a domain this deployment serves: an alias there could neither \
+                 receive nor send mail"
+            )));
+        }
+
+        let inserted = conn.execute(
+            "INSERT INTO sender_aliases (address, domain, created_by) VALUES (?1, ?2, ?3)
+             ON CONFLICT (address) DO NOTHING",
+            params![normalized, domain, created_by],
+        )?;
+        if inserted == 0 {
+            return Err(StoreError::Conflict);
+        }
+        Ok(conn.last_insert_rowid())
+    }
+
+    fn delete_alias(&self, alias_id: i64) -> Result<()> {
+        let conn = self.lock();
+        // The assignments cascade (foreign key with ON DELETE CASCADE), and
+        // messages already delivered keep their `delivered_for` marker: history is
+        // not rewritten because a grant was revoked.
+        let removed = conn.execute("DELETE FROM sender_aliases WHERE id = ?1", [alias_id])?;
+        if removed == 0 {
+            return Err(StoreError::NotFound);
+        }
+        Ok(())
+    }
+
+    fn list_aliases(&self) -> Result<Vec<SenderAliasRow>> {
+        let conn = self.lock();
+        let mut statement = conn.prepare(&format!("{ALIAS_SELECT} ORDER BY id"))?;
+        let rows = statement
+            .query_map([], map_raw_alias)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter().map(decode_alias).collect()
+    }
+
+    fn get_alias_by_address(&self, address: &str) -> Result<Option<SenderAliasRow>> {
+        let normalized = EmailAddress::parse(address)?.normalized();
+        let conn = self.lock();
+        let raw = conn
+            .query_row(
+                &format!("{ALIAS_SELECT} WHERE address = ?1"),
+                [&normalized],
+                map_raw_alias,
+            )
+            .optional()?;
+        raw.map(decode_alias).transpose()
+    }
+
+    fn get_alias(&self, alias_id: i64) -> Result<Option<SenderAliasRow>> {
+        let conn = self.lock();
+        let raw = conn
+            .query_row(
+                &format!("{ALIAS_SELECT} WHERE id = ?1"),
+                [alias_id],
+                map_raw_alias,
+            )
+            .optional()?;
+        raw.map(decode_alias).transpose()
+    }
+
+    fn assign_alias(&self, alias_id: i64, account_id: i64, assigned_by: i64) -> Result<()> {
+        let conn = self.lock();
+        require_alias_exists(&conn, alias_id)?;
+        require_account_exists(&conn, account_id)?;
+        require_account_exists(&conn, assigned_by)?;
+        let inserted = conn.execute(
+            "INSERT INTO sender_alias_assignments (alias_id, account_id, assigned_by)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT (alias_id, account_id) DO NOTHING",
+            params![alias_id, account_id, assigned_by],
+        )?;
+        if inserted == 0 {
+            return Err(StoreError::Conflict);
+        }
+        Ok(())
+    }
+
+    fn unassign_alias(&self, alias_id: i64, account_id: i64) -> Result<()> {
+        let conn = self.lock();
+        let removed = conn.execute(
+            "DELETE FROM sender_alias_assignments WHERE alias_id = ?1 AND account_id = ?2",
+            params![alias_id, account_id],
+        )?;
+        if removed == 0 {
+            return Err(StoreError::NotFound);
+        }
+        Ok(())
+    }
+
+    fn aliases_for_account(&self, account_id: i64) -> Result<Vec<SenderAliasRow>> {
+        let conn = self.lock();
+        let mut statement = conn.prepare(&format!(
+            "{ALIAS_SELECT} WHERE id IN (
+                 SELECT alias_id FROM sender_alias_assignments WHERE account_id = ?1
+             ) ORDER BY id"
+        ))?;
+        let rows = statement
+            .query_map([account_id], map_raw_alias)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter().map(decode_alias).collect()
+    }
+
+    fn accounts_for_alias(&self, address: &str) -> Result<Vec<i64>> {
+        let normalized = EmailAddress::parse(address)?.normalized();
+        let conn = self.lock();
+        let mut statement = conn.prepare(
+            "SELECT a.account_id FROM sender_alias_assignments a
+               JOIN sender_aliases s ON s.id = a.alias_id
+              WHERE s.address = ?1
+              ORDER BY a.account_id",
+        )?;
+        let rows = statement
+            .query_map([normalized], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<i64>>>()?;
+        Ok(rows)
+    }
+
+    fn alias_assignments(&self, alias_id: i64) -> Result<Vec<AliasAssignmentRow>> {
+        let conn = self.lock();
+        let mut statement = conn.prepare(
+            "SELECT alias_id, account_id, assigned_by, created_at
+               FROM sender_alias_assignments WHERE alias_id = ?1 ORDER BY account_id",
+        )?;
+        let rows = statement
+            .query_map([alias_id], |row| {
+                Ok(AliasAssignmentRow {
+                    alias_id: row.get(0)?,
+                    account_id: row.get(1)?,
+                    assigned_by: row.get(2)?,
+                    created_at: row.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    fn is_address_taken(&self, address: &str) -> Result<bool> {
+        let normalized = EmailAddress::parse(address)?.normalized();
+        let conn = self.lock();
+        let taken: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM accounts WHERE email_norm = ?1)
+                 OR EXISTS(SELECT 1 FROM sender_aliases WHERE address = ?1)",
+            [&normalized],
+            |row| row.get(0),
+        )?;
+        Ok(taken)
+    }
+
+    fn served_domains(&self) -> Result<Vec<String>> {
+        let conn = self.lock();
+        let mut statement = conn.prepare(
+            "SELECT domain FROM (
+                 SELECT substr(email_norm, instr(email_norm, '@') + 1) AS domain FROM accounts
+                 UNION
+                 SELECT domain FROM dkim_keys
+             ) ORDER BY domain",
+        )?;
+        let rows = statement
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(rows)
+    }
+}
+
+/// Refuse an account address that a sender alias already owns.
+///
+/// The store-side half of [`Storage::is_address_taken`]: that predicate answers
+/// "is this address used at all", and this guard is the half a `UNIQUE` index
+/// cannot enforce — `accounts.email_norm` is unique, `sender_aliases.address` is
+/// unique, but nothing in SQLite spans both tables. It must run inside the same
+/// transaction as the insert, so an alias cannot appear between the check and the
+/// write.
+fn guard_alias_shadow(conn: &Connection, address: &EmailAddress) -> Result<()> {
+    let normalized = address.normalized();
+    let taken: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sender_aliases WHERE address = ?1)",
+        [&normalized],
+        |row| row.get(0),
+    )?;
+    if taken {
+        return Err(StoreError::AliasShadow(normalized));
+    }
+    Ok(())
+}
+
+/// Refuse a write whose account does not exist, as [`StoreError::NotFound`].
+fn require_account_exists(conn: &Connection, account_id: i64) -> Result<()> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM accounts WHERE id = ?1)",
+        [account_id],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        return Err(StoreError::NotFound);
+    }
+    Ok(())
+}
+
+/// Refuse a write whose alias does not exist, as [`StoreError::NotFound`].
+fn require_alias_exists(conn: &Connection, alias_id: i64) -> Result<()> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sender_aliases WHERE id = ?1)",
+        [alias_id],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        return Err(StoreError::NotFound);
+    }
+    Ok(())
 }
 
 /// Columns [`Storage::get_org`] and its listings select, in [`map_org`] order.
@@ -2844,8 +3408,18 @@ SELECT id, org_id, email, role, invited_by, created_at, expires_at, accepted_at,
   FROM invitations";
 
 /// Columns the catch-all queries select, in [`map_raw_catchall`] order.
-const CATCHALL_SELECT: &str =
-    "SELECT id, domain, action, target_account_id, created_at FROM catchall_rules";
+///
+/// `target_account_id` is deliberately absent: the pre-`0014` single target is
+/// migrated into `catchall_assignments` and nothing writes the column again.
+const CATCHALL_SELECT: &str = "SELECT id, domain, action, created_at FROM catchall_rules";
+
+/// Columns the catch-all assignment queries select, in
+/// [`map_raw_catchall_assignment`] order.
+const CATCHALL_ASSIGNMENT_SELECT: &str = "\
+SELECT id, domain, account_id, assigned_by, paused, created_at FROM catchall_assignments";
+
+/// Columns the sender-alias queries select, in [`map_raw_alias`] order.
+const ALIAS_SELECT: &str = "SELECT id, address, domain, created_by, created_at FROM sender_aliases";
 
 /// Refuse a change that would leave a real organization without an owner.
 ///
@@ -2945,7 +3519,6 @@ struct RawCatchall {
     id: i64,
     domain: String,
     action: String,
-    target_account_id: Option<i64>,
     created_at: String,
 }
 
@@ -2954,8 +3527,7 @@ fn map_raw_catchall(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawCatchall> {
         id: row.get(0)?,
         domain: row.get(1)?,
         action: row.get(2)?,
-        target_account_id: row.get(3)?,
-        created_at: row.get(4)?,
+        created_at: row.get(3)?,
     })
 }
 
@@ -2964,7 +3536,67 @@ fn decode_catchall(raw: RawCatchall) -> Result<CatchallRuleRow> {
         action: decode_catchall_action(&raw.domain, &raw.action)?,
         id: raw.id,
         domain: raw.domain,
-        target_account_id: raw.target_account_id,
+        created_at: raw.created_at,
+    })
+}
+
+struct RawCatchallAssignment {
+    id: i64,
+    domain: String,
+    account_id: i64,
+    assigned_by: i64,
+    paused: i64,
+    created_at: String,
+}
+
+fn map_raw_catchall_assignment(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawCatchallAssignment> {
+    Ok(RawCatchallAssignment {
+        id: row.get(0)?,
+        domain: row.get(1)?,
+        account_id: row.get(2)?,
+        assigned_by: row.get(3)?,
+        paused: row.get(4)?,
+        created_at: row.get(5)?,
+    })
+}
+
+fn decode_catchall_assignment(raw: RawCatchallAssignment) -> Result<CatchallAssignmentRow> {
+    Ok(CatchallAssignmentRow {
+        id: raw.id,
+        domain: raw.domain,
+        account_id: raw.account_id,
+        assigned_by: raw.assigned_by,
+        // Any non-zero value means paused; the column has a CHECK for 0/1, so this
+        // only guards against a hand-edited row.
+        paused: raw.paused != 0,
+        created_at: raw.created_at,
+    })
+}
+
+struct RawAlias {
+    id: i64,
+    address: String,
+    domain: String,
+    created_by: i64,
+    created_at: String,
+}
+
+fn map_raw_alias(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawAlias> {
+    Ok(RawAlias {
+        id: row.get(0)?,
+        address: row.get(1)?,
+        domain: row.get(2)?,
+        created_by: row.get(3)?,
+        created_at: row.get(4)?,
+    })
+}
+
+fn decode_alias(raw: RawAlias) -> Result<SenderAliasRow> {
+    Ok(SenderAliasRow {
+        id: raw.id,
+        address: raw.address,
+        domain: raw.domain,
+        created_by: raw.created_by,
         created_at: raw.created_at,
     })
 }

@@ -150,6 +150,9 @@ pub struct StoredMessage {
     pub sealed_body: Vec<u8>,
     pub created_at: String,
     pub wrapped_key: Option<Vec<u8>>,
+    /// Address this copy was delivered for, when it is not the account's own (a
+    /// sender alias or a catch-all local part). `None` on ordinary mail.
+    pub delivered_for: Option<String>,
 }
 
 /// One attachment row.
@@ -536,7 +539,7 @@ impl ApiDb {
         let message = conn
             .query_row(
                 "SELECT m.id, m.direction, m.from_addr, m.to_addrs, m.subject,
-                        m.sealed_body, m.created_at, a.wrapped_key
+                        m.sealed_body, m.created_at, a.wrapped_key, m.delivered_for
                    FROM messages m
                    LEFT JOIN api_messages a ON a.message_id = m.id
                   WHERE m.id = ?1 AND m.account_id = ?2",
@@ -1153,6 +1156,7 @@ fn map_stored_message(row: &Row<'_>) -> rusqlite::Result<StoredMessage> {
         sealed_body: row.get(5)?,
         created_at: iso_from_sqlite(&row.get::<_, String>(6)?),
         wrapped_key: row.get(7)?,
+        delivered_for: row.get(8)?,
     })
 }
 
@@ -1312,6 +1316,7 @@ mod tests {
                     subject: "hi".to_string(),
                     sealed_body: sealed,
                     idempotency_key: None,
+                    delivered_for: None,
                 },
                 reserved,
             )

@@ -98,5 +98,7 @@ async fn an_agent_reads_and_sets_the_trash_retention() {
             "{name} needs a description for agents"
         );
     }
-    assert_eq!(catalog.len(), 27, "the documented tool count");
+    // 27 tools before sender aliases and the multi-assignee catch-all, plus the
+    // six they added: four `alias_*` and `catchall_pause`/`catchall_resume`.
+    assert_eq!(catalog.len(), 33, "the documented tool count");
 }

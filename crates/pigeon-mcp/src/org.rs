@@ -148,6 +148,12 @@ pub fn org_create_member(args: &serde_json::Value, state: &McpState) -> Result<S
                 "{} already has an account: one address is one mailbox",
                 email.normalized()
             ),
+            // A shared address must never be taken by a mailbox, or the alias
+            // would stop delivering to every holder.
+            store::StoreError::AliasShadow(address) => format!(
+                "{address} is a sender alias: an account cannot own that address. Delete the \
+                 alias first, or invite another address"
+            ),
             other => aux::store_error("could not create the member account", other),
         })?;
     // The bootstrap token is an invitation row for the account just created:
@@ -178,6 +184,12 @@ pub fn org_create_member(args: &serde_json::Value, state: &McpState) -> Result<S
 // -------------------------------------------------------------- catch-all
 
 /// `catchall_set` — route or discard mail for unknown local parts of a domain.
+///
+/// The rule is the domain-level decision; `target_email` is an optional
+/// **assignment**, not part of the rule. Passing it assigns that mailbox (several
+/// mailboxes may hold the same catch-all, one call each); omitting it leaves the
+/// existing assignees untouched, so flipping `route`↔`discard` never forgets who
+/// was receiving the mail.
 pub fn catchall_set(args: &serde_json::Value, state: &McpState) -> Result<String, String> {
     let actor = aux::actor(state)?;
     aux::require_org_admin_of_own(state, &actor)?;
@@ -187,38 +199,33 @@ pub fn catchall_set(args: &serde_json::Value, state: &McpState) -> Result<String
     let raw_action = aux::required_str(args, "action")?;
     let action = CatchallAction::parse(raw_action)
         .ok_or_else(|| format!("`action` must be `route` or `discard`, got {raw_action:?}"))?;
-    let target_account_id = match (action, aux::optional_str(args, "target_email")) {
-        (CatchallAction::Route, Some(raw)) => {
+    let target_account_id = match aux::optional_str(args, "target_email") {
+        Some(raw) => {
             let email = aux::parse_email(raw, "target_email")?;
-            let normalized = email.normalized();
             if email.domain() != domain {
                 return Err(format!(
-                    "the catch-all target must be a mailbox of {domain}, but {normalized} is not"
+                    "a catch-all assignee must be a mailbox of {domain}, but {} is not",
+                    email.normalized()
                 ));
             }
             let account_id = state
                 .store
-                .get_account_by_email(&normalized)
+                .get_account_by_email(&email.normalized())
                 .map_err(|error| aux::store_error("could not look up the target mailbox", error))?
-                .ok_or_else(|| format!("no account has the address {normalized}"))?;
+                .ok_or_else(|| format!("no account has the address {}", email.normalized()))?;
             Some(account_id)
         }
-        (CatchallAction::Route, None) => {
-            return Err(
-                "action=route needs `target_email`: the mailbox that receives the mail".to_string(),
-            )
-        }
-        (CatchallAction::Discard, Some(_)) => {
-            return Err(
-                "action=discard must not name `target_email`: a discarded message is not stored"
-                    .to_string(),
-            )
-        }
-        (CatchallAction::Discard, None) => None,
+        None => None,
     };
+    if action == CatchallAction::Discard && target_account_id.is_some() {
+        return Err(
+            "action=discard must not name `target_email`: a discarded message is not stored"
+                .to_string(),
+        );
+    }
     state
         .store
-        .set_catchall(&domain, action, target_account_id)
+        .set_catchall(&domain, action)
         .map_err(|error| match error {
             store::StoreError::InvalidArgument(message) => format!("`domain`: {message}"),
             other => aux::store_error("could not write the catch-all rule", other),
@@ -228,12 +235,115 @@ pub fn catchall_set(args: &serde_json::Value, state: &McpState) -> Result<String
         "catchall.put",
         &format!("domain={domain} action={}", action.as_str()),
     );
+    if let Some(account_id) = target_account_id {
+        // Idempotent on purpose: an agent that repeats a `catchall_set` keeps the
+        // mailbox assigned instead of failing on its own earlier call.
+        match state
+            .store
+            .assign_catchall(&domain, account_id, actor.account_id)
+        {
+            Ok(()) => aux::audit(
+                state,
+                "catchall.assign",
+                &format!("domain={domain} account={account_id}"),
+            ),
+            Err(store::StoreError::Conflict) => {}
+            Err(other) => {
+                return Err(aux::store_error(
+                    "could not assign the catch-all mailbox",
+                    other,
+                ))
+            }
+        }
+    }
     let rule = state
         .store
         .get_catchall(&domain)
         .map_err(|error| aux::store_error("could not read the catch-all rule", error))?
         .ok_or_else(|| "the catch-all rule that was just written is gone".to_string())?;
     Ok(catchall_json(&rule, state).to_string())
+}
+
+/// `catchall_pause` — suspend the acting account's own copy of a catch-all.
+pub fn catchall_pause(args: &serde_json::Value, state: &McpState) -> Result<String, String> {
+    set_own_catchall_pause(args, state, true)
+}
+
+/// `catchall_resume` — resume the acting account's own copy of a catch-all.
+pub fn catchall_resume(args: &serde_json::Value, state: &McpState) -> Result<String, String> {
+    set_own_catchall_pause(args, state, false)
+}
+
+/// Shared body of the two self-service pause tools.
+///
+/// Only the actor's own row: pausing somebody else's copy is the HTTP admin
+/// surface (`PATCH /v1/catchall/{domain}/assignments/{account_id}`), and MCP is a
+/// second transport, not a second policy.
+fn set_own_catchall_pause(
+    args: &serde_json::Value,
+    state: &McpState,
+    paused: bool,
+) -> Result<String, String> {
+    let actor = aux::actor(state)?;
+    let requested =
+        aux::optional_str(args, "domain").map(|raw| raw.trim_end_matches('.').to_ascii_lowercase());
+    let assignments = state
+        .store
+        .catchall_assignments_for_account(actor.account_id)
+        .map_err(|error| aux::store_error("could not read the account's catch-alls", error))?;
+    let matching: Vec<&store::CatchallAssignmentRow> = match &requested {
+        Some(domain) => assignments
+            .iter()
+            .filter(|row| &row.domain == domain)
+            .collect(),
+        None => assignments.iter().collect(),
+    };
+    if matching.is_empty() {
+        return Err(match &requested {
+            Some(domain) => format!(
+                "{} does not hold the catch-all of {domain}, so there is nothing to change",
+                actor.email
+            ),
+            None => format!("{} does not hold any catch-all", actor.email),
+        });
+    }
+    if requested.is_none() && matching.len() > 1 {
+        return Err(format!(
+            "{} holds {} catch-alls ({}); name the one to change with `domain`",
+            actor.email,
+            matching.len(),
+            matching
+                .iter()
+                .map(|row| row.domain.clone())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    let row = matching[0];
+    state
+        .store
+        .set_catchall_paused(&row.domain, actor.account_id, paused)
+        .map_err(|error| aux::store_error("could not change the catch-all pause", error))?;
+    aux::audit(
+        state,
+        if paused {
+            "catchall.pause"
+        } else {
+            "catchall.resume"
+        },
+        &format!("domain={} account={}", row.domain, actor.account_id),
+    );
+    let assignment = state
+        .store
+        .get_catchall_assignment(&row.domain, actor.account_id)
+        .map_err(|error| aux::store_error("could not read the assignment", error))?
+        .ok_or_else(|| "the assignment that was just written is gone".to_string())?;
+    Ok(serde_json::json!({
+        "domain": assignment.domain,
+        "account_id": assignment.account_id,
+        "paused": assignment.paused,
+    })
+    .to_string())
 }
 
 /// `catchall_list` — every catch-all rule (admin+).
@@ -283,19 +393,30 @@ fn member_json(member: &OrgAccountRow) -> serde_json::Value {
 }
 
 fn catchall_json(rule: &store::CatchallRuleRow, state: &McpState) -> serde_json::Value {
-    // The rule stores an account id; the caller needs the mailbox it lands in.
-    let target_email = rule.target_account_id.and_then(|account_id| {
-        state
-            .store
-            .get_account(account_id)
-            .ok()
-            .map(|(_, email)| email.to_string())
-    });
+    // The rule is the domain decision; the recipients are assignments, and each
+    // carries its own pause switch.
+    let assignments = state
+        .store
+        .catchall_assignees(&rule.domain)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|row| {
+            let email = state
+                .store
+                .get_account(row.account_id)
+                .ok()
+                .map(|(_, email)| email.to_string());
+            serde_json::json!({
+                "account_id": row.account_id,
+                "email": email,
+                "paused": row.paused,
+            })
+        })
+        .collect::<Vec<_>>();
     serde_json::json!({
         "domain": rule.domain,
         "action": rule.action.as_str(),
-        "target_account_id": rule.target_account_id,
-        "target_email": target_email,
+        "assignments": assignments,
     })
 }
 

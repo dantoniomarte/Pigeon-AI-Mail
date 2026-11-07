@@ -14,8 +14,11 @@ use pigeon_core::{Direction, EmailAddress};
 use pigeon_crypto::MasterKey;
 use store::{NewMessage, SqliteStorage, Storage};
 
-/// The tool surface: 5 messaging + 22 administration tools.
-const TOOL_COUNT: usize = 27;
+/// The tool surface: 5 messaging + 28 administration tools.
+///
+/// `catchall_pause`/`catchall_resume` and the four `alias_*` tools joined the
+/// surface with sender aliases + the multi-assignee catch-all: 27 + 6 = 33.
+const TOOL_COUNT: usize = 33;
 
 /// The bootstrap account the tools act as.
 const ACTOR_EMAIL: &str = "admin@pigeon.local";
@@ -46,6 +49,7 @@ fn seed_database(db: &Path) {
                 subject: "Hello agent".to_string(),
                 sealed_body: sealed,
                 idempotency_key: None,
+                delivered_for: None,
             },
             message_id,
         )
@@ -164,7 +168,7 @@ fn mcp_initialize_and_protocol() {
     assert_eq!(
         tools.len(),
         TOOL_COUNT,
-        "5 messaging + 22 administration tools"
+        "5 messaging + 28 administration tools"
     );
     for name in [
         // messaging
@@ -182,6 +186,13 @@ fn mcp_initialize_and_protocol() {
         "catchall_set",
         "catchall_list",
         "catchall_delete",
+        "catchall_pause",
+        "catchall_resume",
+        // sender aliases
+        "alias_list",
+        "alias_create",
+        "alias_assign",
+        "alias_delete",
         // drafts
         "draft_save",
         "draft_list",
@@ -289,9 +300,50 @@ fn mcp_agent_manages_the_whole_deployment() {
         }),
     );
     assert_eq!(rule["action"], "route");
-    assert_eq!(rule["target_email"], "founder@example.com");
+    assert_eq!(rule["assignments"][0]["email"], "founder@example.com");
+    assert_eq!(rule["assignments"][0]["paused"], false);
     let rules = harness.call("catchall_list", serde_json::json!({}));
     assert_eq!(rules["count"], 1);
+
+    // 3b. A sender alias: a free address the team shares, held by one account.
+    let alias = harness.call(
+        "alias_create",
+        serde_json::json!({"address": "sales@example.com"}),
+    );
+    assert_eq!(alias["address"], "sales@example.com");
+    assert_eq!(alias["domain"], "example.com");
+    let alias_id = alias["id"].as_i64().expect("alias id");
+    let assigned = harness.call(
+        "alias_assign",
+        serde_json::json!({ "address": "sales@example.com", "account_email": "founder@example.com" }),
+    );
+    assert_eq!(assigned["assignments"][0]["email"], "founder@example.com");
+    let alias_listing = harness.call("alias_list", serde_json::json!({}));
+    assert_eq!(alias_listing["count"], 1);
+    assert!(alias_id > 0);
+
+    // 3c. The catch-all assignee can pause and resume *its own* copy. The agent's
+    // account holds the catch-all of its own domain, which is the row the
+    // self-service tools may touch.
+    let own_rule = harness.call(
+        "catchall_set",
+        serde_json::json!({
+            "domain": "pigeon.local",
+            "action": "route",
+            "target_email": "admin@pigeon.local"
+        }),
+    );
+    assert_eq!(own_rule["assignments"][0]["email"], "admin@pigeon.local");
+    let paused = harness.call(
+        "catchall_pause",
+        serde_json::json!({ "domain": "pigeon.local" }),
+    );
+    assert_eq!(paused["paused"], true);
+    let resumed = harness.call(
+        "catchall_resume",
+        serde_json::json!({ "domain": "pigeon.local" }),
+    );
+    assert_eq!(resumed["paused"], false);
 
     // 4. Save a draft, then send it.
     let draft = harness.call(

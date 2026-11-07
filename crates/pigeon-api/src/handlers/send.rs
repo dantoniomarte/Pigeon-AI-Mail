@@ -35,7 +35,9 @@ use crate::models::{
     EmailResponse, EmailStatus, EmailView, PageMeta, SendAccepted, SendRequest, TemplateRender,
     E2E_PLACEHOLDER, MAX_BATCH_ITEMS,
 };
-use crate::problem::{internal, not_found, validation, FieldError, Problem, ProblemType, Quota};
+use crate::problem::{
+    from_not_allowed, internal, not_found, validation, FieldError, Problem, ProblemType, Quota,
+};
 use crate::state::AppState;
 use crate::{aad, ids, mime, templates, time};
 
@@ -269,6 +271,39 @@ pub async fn cancel_email(
     }
 }
 
+/// Refuse a `from` the caller may not use.
+///
+/// Allowed: the account's own address, or any sender alias assigned to it
+/// (several aliases per account are normal). Everything else is
+/// `403 from-not-allowed` — a distinct type, because "issue another key" (a scope
+/// problem) and "ask an admin for that alias" are different fixes.
+///
+/// Comparison is on the normalized form (`local` folded, domain lowercase) so
+/// `Sales@Example.com` cannot dodge the check by case.
+pub(crate) fn ensure_from_allowed(
+    state: &AppState,
+    account_id: i64,
+    from: &EmailAddress,
+) -> Result<(), Problem> {
+    let normalized = from.normalized();
+    let (_, own) = state.store.get_account(account_id).map_err(Problem::from)?;
+    if own.normalized() == normalized {
+        return Ok(());
+    }
+    let aliases = state
+        .store
+        .aliases_for_account(account_id)
+        .map_err(Problem::from)?;
+    if aliases.iter().any(|alias| alias.address == normalized) {
+        return Ok(());
+    }
+    Err(from_not_allowed(format!(
+        "{normalized} is neither {nor_own} nor an alias assigned to this account: ask an \
+         administrator to assign it, or send as your own address",
+        nor_own = own.normalized()
+    )))
+}
+
 /// Validate, seal, store and queue one email. Shared by the single send, the
 /// batch endpoint and template test-sends.
 pub(crate) fn accept(
@@ -288,6 +323,11 @@ pub(crate) fn accept(
 
     let template = render_template(state, context.account_id, &request)?;
     let send = request.validate(template.as_ref()).map_err(validation)?;
+
+    // Identity before work: a caller may only send as its own account or as an
+    // alias an administrator assigned to it. The check runs before the id
+    // reservation so a refused send burns nothing.
+    ensure_from_allowed(state, context.account_id, &send.from.address)?;
 
     if let Some(key) = send.idempotency_key.as_deref() {
         if let Some(existing) = state
@@ -334,6 +374,9 @@ pub(crate) fn accept(
                 subject: send.subject.clone(),
                 sealed_body,
                 idempotency_key: send.idempotency_key.clone(),
+                // Mail this deployment *sends* is never a delivery for somebody
+                // else's address: the marker belongs to inbound copies.
+                delivered_for: None,
             },
             message_id,
         )

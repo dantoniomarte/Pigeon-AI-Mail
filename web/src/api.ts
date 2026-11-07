@@ -48,6 +48,8 @@ export interface InboxMessage {
   from_addr: string;
   subject?: string;
   created_at?: string;
+  /** Set when this copy arrived for a shared address (alias or catch-all), not the account itself. */
+  delivered_for?: string;
 }
 
 export interface MessageDetail {
@@ -206,6 +208,18 @@ export interface ReadResult<T> {
   demo: boolean;
   /** Per-folder counts, present on folder listings (PR #20). */
   counts?: FolderCounts;
+  /** Inbox counts per shared address, present on folder listings. */
+  deliveredForCounts?: DeliveredForCount[];
+}
+
+/**
+ * One `delivered_for` marker with its inbox count: the webmail's pseudo-folder.
+ *
+ * The message stays in `inbox`; this is what a "Delivered to" filter selects.
+ */
+export interface DeliveredForCount {
+  address: string;
+  count: number;
 }
 
 export class ApiError extends Error {
@@ -251,6 +265,7 @@ interface MessagePage {
   items: InboxMessage[];
   page: { total: number; has_more: boolean; next_offset: number | null };
   counts?: FolderCounts;
+  delivered_for_counts?: DeliveredForCount[];
 }
 
 interface EmailPage {
@@ -520,10 +535,25 @@ const DEMO_SENT: SentMessage[] = [
 export async function fetchFolder(
   key: string | null,
   folder: MailFolder,
+  deliveredFor?: string | null,
 ): Promise<ReadResult<InboxMessage[]>> {
+  // `delivered_for` narrows the inbox to the copies that arrived for one shared
+  // address (an alias or a catch-all local part); the message never leaves `inbox`.
+  const marker =
+    deliveredFor !== undefined && deliveredFor !== null && deliveredFor.length > 0
+      ? `&delivered_for=${encodeURIComponent(deliveredFor)}`
+      : '';
   try {
-    const page = await request<MessagePage>(key, `/v1/messages?folder=${folder}&limit=100`);
-    return { data: page.items, demo: false, counts: page.counts };
+    const page = await request<MessagePage>(
+      key,
+      `/v1/messages?folder=${folder}&limit=100${marker}`,
+    );
+    return {
+      data: page.items,
+      demo: false,
+      counts: page.counts,
+      deliveredForCounts: page.delivered_for_counts,
+    };
   } catch (error) {
     if (isNetworkError(error) && folder === 'inbox') {
       return offline(
@@ -897,11 +927,45 @@ export interface InvitationCreated {
 /** What happens to unknown local parts of a managed domain. */
 export type CatchallAction = 'route' | 'discard';
 
+/** One account holding a catch-all, with its own pause switch. */
+export interface CatchallAssignment {
+  account_id: number;
+  email?: string;
+  /** True suspends only this member's copy. */
+  paused: boolean;
+  created_at?: string;
+}
+
+/**
+ * The domain-level catch-all decision plus who receives a routed copy.
+ *
+ * The rule is the decision; the recipients are assignments, several per domain.
+ */
 export interface CatchallRuleView {
   domain: string;
   action: CatchallAction;
-  /** Mailbox that receives the mail (`route` rules only). */
-  target_account_id?: number;
+  assignments?: CatchallAssignment[];
+  created_at: string;
+}
+
+/** One account that may send as an alias and receives a copy of its mail. */
+export interface AliasAssignment {
+  account_id: number;
+  email?: string;
+  created_at?: string;
+}
+
+/**
+ * A sender alias: a secondary address on a served domain that owns no mailbox.
+ *
+ * Mail to it is copied into every assignee's inbox, and every assignee may send
+ * as it.
+ */
+export interface AliasView {
+  id: number;
+  address: string;
+  domain: string;
+  assignments: AliasAssignment[];
   created_at: string;
 }
 
@@ -995,32 +1059,141 @@ export async function acceptInvitation(key: string | null, token: string): Promi
 /**
  * Set what happens to unknown local parts of `domain`.
  *
- * `route` needs the mailbox that receives the mail; `discard` must not name one.
+ * Only the domain-level decision travels here: the recipients are assignments
+ * (`assignCatchall`), so flipping the action never forgets who was receiving.
  */
 export async function setCatchall(
   key: string | null,
   domain: string,
   action: CatchallAction,
-  targetAccountId?: number,
 ): Promise<CatchallRuleView> {
   return request<CatchallRuleView>(key, `/v1/catchall/${encodeURIComponent(domain)}`, {
     method: 'PUT',
-    body: JSON.stringify({
-      action,
-      ...(action === 'route' && targetAccountId !== undefined
-        ? { target_account_id: targetAccountId }
-        : {}),
-    }),
+    body: JSON.stringify({ action }),
   });
 }
 
-export async function fetchCatchalls(key: string | null): Promise<CatchallRuleView[]> {
-  return request<CatchallRuleView[]>(key, '/v1/catchall');
+/** `mine` narrows the listing to the catch-alls the caller holds. */
+export async function fetchCatchalls(
+  key: string | null,
+  mine = false,
+): Promise<CatchallRuleView[]> {
+  return request<CatchallRuleView[]>(key, mine ? '/v1/catchall?mine=1' : '/v1/catchall');
 }
 
-/** Remove a rule, restoring the `550` for unknown local parts. */
+/** Remove a rule and its assignees, restoring the `550` for unknown local parts. */
 export async function deleteCatchall(key: string | null, domain: string): Promise<void> {
   await request<void>(key, `/v1/catchall/${encodeURIComponent(domain)}`, { method: 'DELETE' });
+}
+
+/** Give one mailbox a copy of the domain's catch-all mail (owner/admin). */
+export async function assignCatchall(
+  key: string | null,
+  domain: string,
+  accountId: number,
+): Promise<CatchallRuleView> {
+  return request<CatchallRuleView>(key, `/v1/catchall/${encodeURIComponent(domain)}/assign`, {
+    method: 'POST',
+    body: JSON.stringify({ account_id: accountId }),
+  });
+}
+
+/** Stop one mailbox receiving that copy (owner/admin). */
+export async function unassignCatchall(
+  key: string | null,
+  domain: string,
+  accountId: number,
+): Promise<void> {
+  await request<void>(
+    key,
+    `/v1/catchall/${encodeURIComponent(domain)}/assign/${accountId}`,
+    { method: 'DELETE' },
+  );
+}
+
+/** The admin force: pause or resume somebody else's copy (owner/admin). */
+export async function patchCatchallAssignment(
+  key: string | null,
+  domain: string,
+  accountId: number,
+  paused: boolean,
+): Promise<CatchallAssignment> {
+  return request<CatchallAssignment>(
+    key,
+    `/v1/catchall/${encodeURIComponent(domain)}/assignments/${accountId}`,
+    { method: 'PATCH', body: JSON.stringify({ paused }) },
+  );
+}
+
+/** Pause the caller's own copy. `domain` is required when they hold several. */
+export async function pauseMyCatchall(
+  key: string | null,
+  domain?: string,
+): Promise<CatchallAssignment> {
+  return request<CatchallAssignment>(key, '/v1/catchall/me/pause', {
+    method: 'POST',
+    body: JSON.stringify(domain !== undefined ? { domain } : {}),
+  });
+}
+
+/** Resume the caller's own copy. */
+export async function resumeMyCatchall(
+  key: string | null,
+  domain?: string,
+): Promise<CatchallAssignment> {
+  return request<CatchallAssignment>(key, '/v1/catchall/me/resume', {
+    method: 'POST',
+    body: JSON.stringify(domain !== undefined ? { domain } : {}),
+  });
+}
+
+// ------------------------------------------------------------- Sender aliases
+
+/**
+ * The aliases the caller may send as.
+ *
+ * `mine` asks for the caller's own list only, which is what the compose From menu
+ * offers; without it an owner/admin receives every alias of the deployment.
+ */
+export async function fetchAliases(key: string | null, mine = false): Promise<AliasView[]> {
+  return request<AliasView[]>(key, mine ? '/v1/aliases?mine=1' : '/v1/aliases');
+}
+
+/** Claim a free address on a served domain (owner/admin). */
+export async function createAlias(key: string | null, address: string): Promise<AliasView> {
+  return request<AliasView>(key, '/v1/aliases', {
+    method: 'POST',
+    body: JSON.stringify({ address }),
+  });
+}
+
+/** Delete an alias and every assignment to it (owner/admin). */
+export async function deleteAlias(key: string | null, id: number): Promise<void> {
+  await request<void>(key, `/v1/aliases/${id}`, { method: 'DELETE' });
+}
+
+/** Share the alias with one account (owner/admin). */
+export async function assignAlias(
+  key: string | null,
+  id: number,
+  accountId: number,
+): Promise<AliasView> {
+  return request<AliasView>(key, `/v1/aliases/${id}/assign`, {
+    method: 'POST',
+    body: JSON.stringify({ account_id: accountId }),
+  });
+}
+
+/** Stop one account sending as the alias and receiving its mail (owner/admin). */
+export async function unassignAlias(
+  key: string | null,
+  id: number,
+  accountId: number,
+): Promise<AliasView> {
+  return request<AliasView>(key, `/v1/aliases/${id}/unassign`, {
+    method: 'POST',
+    body: JSON.stringify({ account_id: accountId }),
+  });
 }
 
 // ------------------------------------------------------------- Sessions & 2FA (PR #21)

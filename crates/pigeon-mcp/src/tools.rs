@@ -8,15 +8,17 @@
 //!
 //! 1. **messaging** — send, read, list, templates, webhooks;
 //! 2. **organizations** — create one, list members, invite, create a member;
-//! 3. **catch-all** — route or discard mail for unknown local parts;
-//! 4. **drafts** — save, list, send;
-//! 5. **folders** — move a message, mark it read;
-//! 6. **domains** — add one, get its DNS records;
-//! 7. **suppressions** — list, add, remove the addresses never to mail again;
-//! 8. **API keys** — create, list (metadata only), revoke;
-//! 9. **account settings** — read and set the trash retention window.
+//! 3. **catch-all** — route or discard mail for unknown local parts, with several
+//!    assignees and a per-member pause;
+//! 4. **sender aliases** — a secondary address a team shares to send and receive;
+//! 5. **drafts** — save, list, send;
+//! 6. **folders** — move a message, mark it read;
+//! 7. **domains** — add one, get its DNS records;
+//! 8. **suppressions** — list, add, remove the addresses never to mail again;
+//! 9. **API keys** — create, list (metadata only), revoke;
+//! 10. **account settings** — read and set the trash retention window.
 
-use crate::{admin, aux, domains, mail, org, McpState};
+use crate::{admin, aliases, aux, domains, mail, org, McpState};
 use store::Storage;
 
 /// A tool definition (name, description, JSON Schema for input).
@@ -163,21 +165,81 @@ fn tools() -> Vec<Tool> {
         // ------------------------------------------------------ catch-all
         Tool {
             name: "catchall_set",
-            description: "Set the catch-all for a domain: route unknown local parts into a mailbox of that domain, or discard them.",
+            description: "Set the catch-all decision for a domain (route unknown local parts into every assignee, or discard them) and optionally assign a mailbox that receives a copy. Several mailboxes may hold the same catch-all: call it once per mailbox.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "required": ["domain", "action"],
                 "properties": {
                     "domain": { "type": "string", "description": "Domain the rule applies to, e.g. example.com" },
                     "action": { "type": "string", "enum": ["route", "discard"] },
-                    "target_email": { "type": "string", "description": "Mailbox that receives the mail (required for route, forbidden for discard)" }
+                    "target_email": { "type": "string", "description": "Optional mailbox of that domain to assign a copy to; forbidden for discard. Omitting it keeps the existing assignees" }
                 }
             }),
         },
         Tool {
             name: "catchall_list",
-            description: "List every catch-all rule with its action and target mailbox.",
+            description: "List every catch-all rule with its action and its assignees (each with its own paused flag).",
             input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+        },
+        Tool {
+            name: "catchall_pause",
+            description: "Pause the agent's own copy of a catch-all: the domain keeps routing to everybody else. Omit domain when the account holds exactly one.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "domain": { "type": "string", "description": "Which catch-all to pause (required when the account holds more than one)" }
+                }
+            }),
+        },
+        Tool {
+            name: "catchall_resume",
+            description: "Resume the agent's own copy of a catch-all it paused.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "domain": { "type": "string", "description": "Which catch-all to resume (required when the account holds more than one)" }
+                }
+            }),
+        },
+        // ------------------------------------------------- sender aliases
+        Tool {
+            name: "alias_list",
+            description: "List the sender aliases of the deployment with the accounts that hold each one.",
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+        },
+        Tool {
+            name: "alias_create",
+            description: "Claim a free address on a served domain as a sender alias. It must not belong to an account nor to another alias.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "required": ["address"],
+                "properties": {
+                    "address": { "type": "string", "description": "Alias address, e.g. sales@example.com" }
+                }
+            }),
+        },
+        Tool {
+            name: "alias_assign",
+            description: "Let one account send as an alias and receive a copy of its mail; the alias may have several holders.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "required": ["address", "account_email"],
+                "properties": {
+                    "address": { "type": "string", "description": "Alias address (sales@example.com)" },
+                    "account_email": { "type": "string", "description": "Mailbox that receives the copy and may send as the alias" }
+                }
+            }),
+        },
+        Tool {
+            name: "alias_delete",
+            description: "Delete a sender alias and every assignment to it; mail already delivered stays in its mailbox.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "required": ["address"],
+                "properties": {
+                    "address": { "type": "string", "description": "Alias address to delete" }
+                }
+            }),
         },
         Tool {
             name: "catchall_delete",
@@ -383,6 +445,13 @@ pub async fn dispatch(
         "catchall_set" => org::catchall_set(args, state),
         "catchall_list" => org::catchall_list(args, state),
         "catchall_delete" => org::catchall_delete(args, state),
+        "catchall_pause" => org::catchall_pause(args, state),
+        "catchall_resume" => org::catchall_resume(args, state),
+        // sender aliases
+        "alias_list" => aliases::alias_list(args, state),
+        "alias_create" => aliases::alias_create(args, state),
+        "alias_assign" => aliases::alias_assign(args, state),
+        "alias_delete" => aliases::alias_delete(args, state),
         // drafts
         "draft_save" => mail::draft_save(args, state),
         "draft_list" => mail::draft_list(args, state),
@@ -408,7 +477,15 @@ pub async fn dispatch(
     }
 }
 
-async fn send_email(args: &serde_json::Value, _state: &McpState) -> Result<String, String> {
+async fn send_email(args: &serde_json::Value, state: &McpState) -> Result<String, String> {
+    // Identity first: the agent may send as its own account or as an alias an
+    // administrator assigned to it, and nothing else.
+    let actor = aux::actor(state)?;
+    let from = match aux::optional_str(args, "from") {
+        Some(raw) => aux::parse_email(raw, "from")?,
+        None => actor.email.clone(),
+    };
+    aux::ensure_from_allowed(state, &actor, &from)?;
     let to: Vec<String> = args
         .get("to")
         .and_then(|v| v.as_array())

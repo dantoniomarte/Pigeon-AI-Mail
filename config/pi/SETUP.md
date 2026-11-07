@@ -45,7 +45,7 @@ sudo usermod -aG pigeon "$USER"   # then log out and back in
 # 1. the binary answers the handshake
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | pigeon mcp
 
-# 2. the tool catalog is complete (expect 27 tools)
+# 2. the tool catalog is complete (expect 33 tools)
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
   | pigeon mcp | grep -o '"name"' | wc -l
 

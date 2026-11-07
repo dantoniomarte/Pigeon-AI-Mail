@@ -21,6 +21,7 @@ import {
 
 import {
   createDraft,
+  fetchAliases,
   fetchApiKeys,
   fetchTemplates,
   formatSize,
@@ -30,7 +31,7 @@ import {
   textToHtml,
   updateDraft,
 } from '../api';
-import type { DraftPayload, SendPayload, Template } from '../api';
+import type { AliasView, DraftPayload, SendPayload, Template } from '../api';
 import type { ComposeSeed } from '../App';
 import type { ToastKind } from './Toast';
 
@@ -206,6 +207,7 @@ export default function Compose({
 }: ComposeProps): JSX.Element {
   const { t, i18n } = useTranslation();
   const fromId = useId();
+  const fromOptionsId = useId();
   const toId = useId();
   const ccId = useId();
   const subjectId = useId();
@@ -214,6 +216,10 @@ export default function Compose({
   const scheduleId = useId();
 
   const [from, setFrom] = useState(seed.from);
+  // The sender menu: the account's own address plus every alias it was assigned.
+  // Typing stays possible (a draft may be composed before the alias exists), so
+  // this is a datalist suggestion, not a closed select.
+  const [aliases, setAliases] = useState<AliasView[]>([]);
   const [to, setTo] = useState(seed.to);
   const [cc, setCc] = useState(seed.cc ?? '');
   const [showCc, setShowCc] = useState((seed.cc ?? '').trim().length > 0);
@@ -238,6 +244,22 @@ export default function Compose({
   // Saving twice updates the same row instead of piling up copies, and sending
   // goes through `/v1/drafts/{id}/send` so the draft is consumed server-side.
   const [draftId, setDraftId] = useState<string | null>(seed.draftId ?? null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetchAliases(apiKey, true)
+      .then((list) => {
+        if (!cancelled) {
+          setAliases(list);
+        }
+      })
+      .catch(() => {
+        // A missing alias list only costs the dropdown: the field stays usable.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [apiKey]);
   const [templates, setTemplates] = useState<Template[]>([]);
 
   const toRef = useRef<HTMLInputElement>(null);
@@ -639,10 +661,16 @@ export default function Compose({
                 className="compose__input"
                 type="email"
                 autoComplete="email"
+                list={fromOptionsId}
                 placeholder={t('compose.fromPlaceholder')}
                 value={from}
                 onChange={(event) => setFrom(event.target.value)}
               />
+              <datalist id={fromOptionsId}>
+                {aliases.map((alias) => (
+                  <option key={alias.id} value={alias.address} />
+                ))}
+              </datalist>
             </div>
 
             <div className="compose__row">

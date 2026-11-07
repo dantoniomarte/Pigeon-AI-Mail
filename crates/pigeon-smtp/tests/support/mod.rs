@@ -98,6 +98,7 @@ impl TestEnv {
                     subject: subject.to_string(),
                     sealed_body,
                     idempotency_key: None,
+                    delivered_for: None,
                 },
                 message_id,
             )

@@ -23,10 +23,13 @@ use store::{MessageRow, Storage};
 
 use crate::auth::ApiKeyContext;
 use crate::db::StoredMessage;
-use crate::handlers::{blocking, bool_param, enum_param, int_param, Params, ProblemJson};
+use crate::handlers::{
+    blocking, bool_param, enum_param, int_param, opt_param, Params, ProblemJson,
+};
 use crate::models::{
-    AuthVerdict, DecryptedMessageView, EmptyTrashResult, FolderCounts, MessageAttachmentView,
-    MessagePage, MessagePatch, MessageSummary, PurgeTrashResult, SealedMessageView,
+    AuthVerdict, DecryptedMessageView, DeliveredForCount, EmptyTrashResult, FolderCounts,
+    MessageAttachmentView, MessagePage, MessagePatch, MessageSummary, PurgeTrashResult,
+    SealedMessageView,
 };
 use crate::problem::{forbidden, internal, not_found, validation, FieldError, Problem};
 use crate::state::AppState;
@@ -55,21 +58,56 @@ pub async fn list_messages(
         };
         let limit = int_param(&params, "limit", 100, 1, 500)?;
         let offset = int_param(&params, "offset", 0, 0, i64::MAX)?;
-        let rows = state
-            .store
-            .list_folder(context.account_id, folder, limit, offset)
-            .map_err(Problem::from)?;
-        let total = state
-            .store
-            .count_folder(context.account_id, folder)
-            .map_err(Problem::from)?;
+        // The pseudo-folder filter: `?delivered_for=sales@example.com` answers the
+        // inbox items that arrived for that shared address. The message stays in
+        // `inbox`; only the listing narrows.
+        let delivered_for = opt_param(&params, "delivered_for").map(str::to_string);
+        if let Some(raw) = &delivered_for {
+            pigeon_core::EmailAddress::parse(raw).map_err(|error| {
+                validation(vec![FieldError::with_code(
+                    "delivered_for",
+                    "invalid",
+                    format!("delivered_for must be an address: {error}"),
+                )])
+            })?;
+        }
+        let (rows, total) = match &delivered_for {
+            Some(marker) => (
+                state
+                    .store
+                    .list_delivered_for(context.account_id, marker, limit, offset)
+                    .map_err(Problem::from)?,
+                state
+                    .store
+                    .count_delivered_for(context.account_id, marker)
+                    .map_err(Problem::from)?,
+            ),
+            None => (
+                state
+                    .store
+                    .list_folder(context.account_id, folder, limit, offset)
+                    .map_err(Problem::from)?,
+                state
+                    .store
+                    .count_folder(context.account_id, folder)
+                    .map_err(Problem::from)?,
+            ),
+        };
         let counts = folder_counts(&state, context.account_id)?;
+        let delivered_counts = state
+            .store
+            .delivered_for_counts(context.account_id)
+            .map_err(Problem::from)?;
         let page = crate::models::PageMeta::new(total, offset, rows.len() as i64);
         let items = rows.iter().map(summary).collect();
         Ok(MessagePage {
             items,
             page,
             counts,
+            delivered_for_counts: delivered_counts
+                .into_iter()
+                .map(|(address, count)| DeliveredForCount { address, count })
+                .collect(),
         })
     })
     .await;
@@ -285,6 +323,7 @@ fn summary(row: &MessageRow) -> MessageSummary {
         created_at: Some(row.created_at.clone()),
         folder: row.folder.as_str().to_string(),
         read: row.read_at.is_some(),
+        delivered_for: row.delivered_for.clone(),
     }
 }
 
@@ -348,6 +387,7 @@ pub async fn get_message(
                 to: Some(stored.to_addrs),
                 subject: Some(stored.subject),
                 created_at: stored.created_at,
+                delivered_for: stored.delivered_for,
                 sealed_body: base64::engine::general_purpose::STANDARD
                     .encode(&stored.sealed_body),
                 auth: AuthVerdict::default(),
@@ -362,6 +402,7 @@ pub async fn get_message(
             to: Some(stored.to_addrs),
             subject: Some(stored.subject),
             created_at: stored.created_at,
+            delivered_for: stored.delivered_for,
             body_text,
             body_html,
             attachments: Some(attachments),
@@ -581,6 +622,7 @@ mod tests {
             sealed_body: vec![0x01; 41],
             created_at: crate::time::iso_now(),
             wrapped_key: None,
+            delivered_for: None,
         };
         assert!(stored.wrapped_key.is_none());
         assert_eq!(stored.direction, "in");

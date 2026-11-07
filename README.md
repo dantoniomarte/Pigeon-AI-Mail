@@ -96,13 +96,14 @@ roles, one account per organization, catch-all targets inside the routed domain)
 and writes the same audit log (`mcp:agent`). Scopes are the HTTP scopes; MCP adds
 no privilege the API does not have.
 
-### The 27 tools
+### The 33 tools
 
 | Group | Tools | What an agent does with them |
 |---|---|---|
 | **Messaging** | `send_email`, `list_messages`, `get_message`, `create_template`, `manage_webhooks` | send mail, page the inbox, read one message, reuse a template, register webhooks |
 | **Organizations** | `org_create`, `org_members`, `org_invite`, `org_create_member` | stand up a team, list its mailboxes and roles, invite an existing account, create a member with a one-time bootstrap token |
-| **Catch-all** | `catchall_set`, `catchall_list`, `catchall_delete` | route unknown local parts of a domain into a mailbox, or discard them |
+| **Catch-all** | `catchall_set`, `catchall_list`, `catchall_delete`, `catchall_pause`, `catchall_resume` | route unknown local parts of a domain into every assigned mailbox (or discard them), and pause/resume the agent's own copy |
+| **Sender aliases** | `alias_list`, `alias_create`, `alias_assign`, `alias_delete` | claim a shared address on a served domain, share it with mailboxes, remove it |
 | **Drafts** | `draft_save`, `draft_list`, `draft_send` | keep composing across turns (`draft_id` upserts), list drafts, send one |
 | **Folders** | `move_message`, `mark_read` | move a message to `inbox`/`sent`/`spam`/`trash`, mark it read or unread |
 | **Domains** | `domain_add`, `domain_dns` | manage a sending domain and get the exact `A`/`MX`/`SPF`/`DKIM`/`DMARC` records to publish |
@@ -123,7 +124,13 @@ tools/call  org_create_member  {"org_id": 1, "email": "founder@example.com",
 tools/call  catchall_set       {"domain": "example.com", "action": "route",
                                 "target_email": "founder@example.com"}
          →  {"domain": "example.com", "action": "route",
-             "target_email": "founder@example.com"}
+             "assignments": [{"account_id": 2, "email": "founder@example.com", "paused": false}]}
+
+tools/call  alias_create       {"address": "sales@example.com"}
+         →  {"id": 1, "address": "sales@example.com", "domain": "example.com", "assignments": []}
+
+tools/call  alias_assign       {"address": "sales@example.com", "account_email": "founder@example.com"}
+         →  {"id": 1, "address": "sales@example.com", "assignments": [{"account_id": 2, …}]}
 
 tools/call  domain_add         {"name": "example.com"}
          →  {"domain_id": "dom_…", "records": [
@@ -167,7 +174,7 @@ Full guide: [docs/AGENTS.md](docs/AGENTS.md).
 | **Hermes** | [`config/hermes/mcp.yaml`](config/hermes/mcp.yaml) | copy to the Hermes config dir as `mcp.yaml` |
 | **Any MCP client** | [`config/generic/mcp-stdio.json`](config/generic/mcp-stdio.json) | stdio descriptor: `pigeon mcp` + `PIGEON_DB_PATH`, `PIGEON_MASTER_KEY_FILE` |
 | **Docker (remote host)** | [`config/docker/mcp-docker.json`](config/docker/mcp-docker.json) | stdio through `docker exec -i <container> pigeon mcp` — no key leaves the host |
-| **Remote over HTTPS** | [`config/remote/`](config/remote/) | `PIGEON_URL` + `PIGEON_API_KEY` (`pk_…`); REST equivalents of all 27 tools in [`api-examples.md`](config/remote/api-examples.md) |
+| **Remote over HTTPS** | [`config/remote/`](config/remote/) | `PIGEON_URL` + `PIGEON_API_KEY` (`pk_…`); REST equivalents of all 33 tools in [`api-examples.md`](config/remote/api-examples.md) |
 
 ```bash
 # copy a platform config and print its placement steps

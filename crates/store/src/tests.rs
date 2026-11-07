@@ -78,6 +78,7 @@ fn new_message(account_id: i64, reserved_id: i64, idempotency_key: Option<&str>)
         subject: "hello".to_string(),
         sealed_body: sealed_body(account_id, reserved_id, b"Subject: hi\r\n\r\nbody"),
         idempotency_key: idempotency_key.map(str::to_string),
+        delivered_for: None,
     }
 }
 
@@ -96,6 +97,11 @@ fn seed_message(storage: &SqliteStorage, account_id: i64) -> i64 {
 
 fn count(storage: &SqliteStorage, sql: &str) -> i64 {
     let conn = storage.raw_conn();
+    conn.query_row(sql, [], |row| row.get(0)).expect(sql)
+}
+
+/// The same counter over a connection the test opened itself (upgrade tests).
+fn count_raw(conn: &rusqlite::Connection, sql: &str) -> i64 {
     conn.query_row(sql, [], |row| row.get(0)).expect(sql)
 }
 
@@ -488,6 +494,7 @@ fn sealed_body_roundtrip_binds_to_account_and_message_id() {
                 subject: "hello".to_string(),
                 sealed_body: sealed.clone(),
                 idempotency_key: None,
+                delivered_for: None,
             },
             message_id,
         )
@@ -3129,7 +3136,7 @@ fn invitations_never_grant_ownership_and_never_move_a_foreign_account() {
 #[test]
 fn catchall_rules_upsert_by_domain() {
     let fixture = fixture();
-    let target = new_account(&fixture.storage);
+    new_account(&fixture.storage);
 
     assert!(fixture
         .storage
@@ -3138,7 +3145,7 @@ fn catchall_rules_upsert_by_domain() {
         .is_none());
     fixture
         .storage
-        .set_catchall("Example.COM", CatchallAction::Route, Some(target))
+        .set_catchall("Example.COM", CatchallAction::Route)
         .expect("route rule");
     let rule = fixture
         .storage
@@ -3146,12 +3153,11 @@ fn catchall_rules_upsert_by_domain() {
         .expect("lookup")
         .expect("the rule is found by lowercase domain");
     assert_eq!(rule.action, CatchallAction::Route);
-    assert_eq!(rule.target_account_id, Some(target));
 
     // Upsert: the domain is the identity.
     fixture
         .storage
-        .set_catchall("example.com", CatchallAction::Discard, None)
+        .set_catchall("example.com", CatchallAction::Discard)
         .expect("replace with discard");
     assert_eq!(fixture.storage.list_catchalls().expect("list").len(), 1);
     let rule = fixture
@@ -3160,31 +3166,11 @@ fn catchall_rules_upsert_by_domain() {
         .expect("lookup")
         .expect("still one rule");
     assert_eq!(rule.action, CatchallAction::Discard);
-    assert_eq!(rule.target_account_id, None);
 
-    // A route rule needs a real target; a discard rule must not name one.
     assert!(matches!(
         fixture
             .storage
-            .set_catchall("route.example", CatchallAction::Route, None),
-        Err(StoreError::InvalidArgument(_))
-    ));
-    assert!(matches!(
-        fixture
-            .storage
-            .set_catchall("route.example", CatchallAction::Route, Some(target + 100)),
-        Err(StoreError::NotFound)
-    ));
-    assert!(matches!(
-        fixture
-            .storage
-            .set_catchall("discard.example", CatchallAction::Discard, Some(target)),
-        Err(StoreError::InvalidArgument(_))
-    ));
-    assert!(matches!(
-        fixture
-            .storage
-            .set_catchall("not a domain", CatchallAction::Discard, None),
+            .set_catchall("not a domain", CatchallAction::Discard),
         Err(StoreError::InvalidArgument(_))
     ));
 
@@ -3196,6 +3182,540 @@ fn catchall_rules_upsert_by_domain() {
         fixture.storage.delete_catchall("example.com"),
         Err(StoreError::NotFound)
     ));
+}
+
+#[test]
+fn catchall_assignments_are_multi_assignee_and_pausable() {
+    let fixture = fixture();
+    let first = new_account(&fixture.storage);
+    let second = fixture
+        .storage
+        .create_account(&addr("second@example.com"))
+        .expect("second account");
+    fixture
+        .storage
+        .set_catchall("example.com", CatchallAction::Route)
+        .expect("rule");
+
+    fixture
+        .storage
+        .assign_catchall("Example.COM", first, first)
+        .expect("first assignee");
+    fixture
+        .storage
+        .assign_catchall("example.com", second, first)
+        .expect("second assignee");
+    // Assigning the same person twice is a conflict, not a second copy.
+    assert!(matches!(
+        fixture
+            .storage
+            .assign_catchall("example.com", second, first),
+        Err(StoreError::Conflict)
+    ));
+    // An unknown account cannot hold a catch-all.
+    assert!(matches!(
+        fixture
+            .storage
+            .assign_catchall("example.com", second + 100, first),
+        Err(StoreError::NotFound)
+    ));
+
+    let assignees = fixture
+        .storage
+        .catchall_assignees("example.com")
+        .expect("assignees");
+    assert_eq!(assignees.len(), 2, "both accounts hold the catch-all");
+    assert!(assignees.iter().all(|row| !row.paused));
+    assert_eq!(
+        fixture
+            .storage
+            .catchall_assignments_for_account(second)
+            .expect("own assignments")
+            .len(),
+        1
+    );
+
+    // One member pausing their copy leaves the other one receiving.
+    fixture
+        .storage
+        .set_catchall_paused("example.com", second, true)
+        .expect("pause");
+    let assignees = fixture
+        .storage
+        .catchall_assignees("example.com")
+        .expect("assignees");
+    assert_eq!(
+        assignees
+            .iter()
+            .filter(|row| !row.paused)
+            .map(|row| row.account_id)
+            .collect::<Vec<_>>(),
+        vec![first],
+        "a paused member must not appear among the live recipients"
+    );
+    assert!(
+        fixture
+            .storage
+            .get_catchall_assignment("example.com", second)
+            .expect("lookup")
+            .expect("assigned")
+            .paused,
+        "the paused flag is what the inbound resolver reads"
+    );
+
+    // An admin force-resume is the same column, and pausing somebody who is not
+    // assigned is a 404 rather than an invented row.
+    fixture
+        .storage
+        .set_catchall_paused("example.com", second, false)
+        .expect("resume");
+    assert!(matches!(
+        fixture
+            .storage
+            .set_catchall_paused("example.com", 9_999, true),
+        Err(StoreError::NotFound)
+    ));
+
+    // Removing one assignment stops their delivery only.
+    fixture
+        .storage
+        .unassign_catchall("example.com", first)
+        .expect("unassign");
+    assert_eq!(
+        fixture
+            .storage
+            .catchall_assignees("example.com")
+            .expect("assignees")
+            .len(),
+        1
+    );
+    assert!(matches!(
+        fixture.storage.unassign_catchall("example.com", first),
+        Err(StoreError::NotFound)
+    ));
+
+    // Deleting the rule takes its assignments with it: a grant that can never
+    // fire would be a lie in the admin listing.
+    fixture
+        .storage
+        .delete_catchall("example.com")
+        .expect("delete rule");
+    assert!(fixture
+        .storage
+        .list_catchall_assignments()
+        .expect("list")
+        .is_empty());
+}
+
+#[test]
+fn sender_aliases_can_have_several_holders_and_never_shadow_a_mailbox() {
+    let fixture = fixture();
+    let sales = fixture
+        .storage
+        .create_account(&addr("sales@example.com"))
+        .expect("sales account");
+    let second = fixture
+        .storage
+        .create_account(&addr("second@example.com"))
+        .expect("second account");
+
+    let alias = fixture
+        .storage
+        .create_alias(&addr("sales@example.com"), sales)
+        .expect("alias");
+    let stored = fixture
+        .storage
+        .get_alias(alias)
+        .expect("lookup")
+        .expect("alias exists");
+    assert_eq!(stored.address, "sales@example.com");
+    assert_eq!(stored.domain, "example.com");
+    assert_eq!(stored.created_by, sales);
+    assert_eq!(fixture.storage.list_aliases().expect("list").len(), 1);
+    assert_eq!(
+        fixture
+            .storage
+            .get_alias_by_address("Sales@Example.COM")
+            .expect("lookup")
+            .expect("found by lowercase address")
+            .id,
+        alias
+    );
+
+    // Collisions: an existing alias, and an address that belongs to an account.
+    assert!(matches!(
+        fixture
+            .storage
+            .create_alias(&addr("sales@example.com"), sales),
+        Err(StoreError::Conflict)
+    ));
+    assert!(matches!(
+        fixture
+            .storage
+            .create_alias(&addr("sales@example.com"), sales),
+        Err(StoreError::InvalidArgument(_))
+    ));
+    // An alias on a domain this deployment does not serve could never work.
+    assert!(matches!(
+        fixture
+            .storage
+            .create_alias(&addr("sales@elsewhere.example"), sales),
+        Err(StoreError::InvalidArgument(_))
+    ));
+    assert!(fixture
+        .storage
+        .is_address_taken("sales@example.com")
+        .expect("taken"));
+    assert!(fixture
+        .storage
+        .is_address_taken("sales@example.com")
+        .expect("taken"));
+    assert!(!fixture
+        .storage
+        .is_address_taken("nobody@example.com")
+        .expect("free"));
+
+    // Several holders, each receiving a copy; assigning twice is a conflict.
+    fixture
+        .storage
+        .assign_alias(alias, sales, sales)
+        .expect("assign sales");
+    fixture
+        .storage
+        .assign_alias(alias, second, sales)
+        .expect("assign second");
+    assert!(matches!(
+        fixture.storage.assign_alias(alias, second, sales),
+        Err(StoreError::Conflict)
+    ));
+    assert_eq!(
+        fixture
+            .storage
+            .accounts_for_alias("sales@example.com")
+            .expect("holders"),
+        vec![sales, second]
+    );
+    assert_eq!(
+        fixture
+            .storage
+            .aliases_for_account(second)
+            .expect("own aliases")
+            .iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>(),
+        vec![alias]
+    );
+    assert_eq!(
+        fixture
+            .storage
+            .alias_assignments(alias)
+            .expect("assignments")
+            .len(),
+        2
+    );
+
+    // A user may hold several aliases.
+    let marketing = fixture
+        .storage
+        .create_alias(&addr("marketing@example.com"), sales)
+        .expect("second alias");
+    fixture
+        .storage
+        .assign_alias(marketing, sales, sales)
+        .expect("assign marketing");
+    assert_eq!(
+        fixture
+            .storage
+            .aliases_for_account(sales)
+            .expect("own aliases")
+            .len(),
+        2
+    );
+
+    // Revoking one assignment stops future delivery only.
+    fixture
+        .storage
+        .unassign_alias(alias, second)
+        .expect("unassign");
+    assert_eq!(
+        fixture
+            .storage
+            .accounts_for_alias("sales@example.com")
+            .expect("holders"),
+        vec![sales]
+    );
+    assert!(matches!(
+        fixture.storage.unassign_alias(alias, second),
+        Err(StoreError::NotFound)
+    ));
+
+    fixture.storage.delete_alias(alias).expect("delete");
+    assert!(fixture
+        .storage
+        .alias_assignments(alias)
+        .expect("assignments")
+        .is_empty());
+    assert!(matches!(
+        fixture.storage.delete_alias(alias),
+        Err(StoreError::NotFound)
+    ));
+}
+
+#[test]
+fn an_account_can_never_take_a_sender_alias_address() {
+    let fixture = fixture();
+    let owner = new_account(&fixture.storage);
+    fixture
+        .storage
+        .create_alias(&addr("sales@example.com"), owner)
+        .expect("alias");
+    let accounts_before = count(&fixture.storage, "SELECT COUNT(*) FROM accounts");
+
+    // Both creation paths refuse it: a mailbox on a shared address would divert
+    // that alias's mail into one inbox and stop delivering to every holder.
+    assert!(matches!(
+        fixture
+            .storage
+            .create_account(&addr("Sales@Example.com")),
+        Err(StoreError::AliasShadow(address)) if address == "sales@example.com"
+    ));
+    let org_id = fixture.storage.create_org("Acme").expect("org");
+    assert!(matches!(
+        fixture.storage.create_member_account(
+            &addr("sales@example.com"),
+            "Sales",
+            org_id,
+            OrgRole::Member
+        ),
+        Err(StoreError::AliasShadow(_))
+    ));
+    assert_eq!(
+        count(&fixture.storage, "SELECT COUNT(*) FROM accounts"),
+        accounts_before,
+        "a refused creation must not leave a half-made account"
+    );
+    assert!(
+        fixture
+            .storage
+            .get_account_by_email("sales@example.com")
+            .expect("lookup")
+            .is_none(),
+        "the alias address still belongs to no mailbox"
+    );
+    // The alias is untouched: its holder list is exactly what it was.
+    assert!(fixture
+        .storage
+        .accounts_for_alias("sales@example.com")
+        .expect("holders")
+        .is_empty());
+    assert!(fixture
+        .storage
+        .is_address_taken("sales@example.com")
+        .expect("taken"));
+
+    // The reverse direction still holds too: an existing mailbox cannot become an
+    // alias (the pair of guards is what makes the collision impossible).
+    assert!(matches!(
+        fixture
+            .storage
+            .create_alias(&addr("owner@example.com"), owner),
+        Err(StoreError::InvalidArgument(_))
+    ));
+}
+
+#[test]
+fn a_catchall_assignment_requires_an_existing_rule_and_persists_nothing_otherwise() {
+    let fixture = fixture();
+    let account = new_account(&fixture.storage);
+
+    // No rule for the domain yet: the assignee could never receive anything, so
+    // the call fails and — crucially — writes nothing.
+    assert!(matches!(
+        fixture
+            .storage
+            .assign_catchall("example.com", account, account),
+        Err(StoreError::NotFound)
+    ));
+    assert_eq!(
+        count(
+            &fixture.storage,
+            "SELECT COUNT(*) FROM catchall_assignments"
+        ),
+        0,
+        "a refused assignment must not leave a row behind"
+    );
+    assert!(fixture
+        .storage
+        .catchall_assignees("example.com")
+        .expect("assignees")
+        .is_empty());
+    assert!(fixture
+        .storage
+        .list_catchall_assignments()
+        .expect("list")
+        .is_empty());
+
+    // With the rule in place the same call succeeds, which proves the check is
+    // the rule and not some other rejection.
+    fixture
+        .storage
+        .set_catchall("example.com", CatchallAction::Route)
+        .expect("rule");
+    fixture
+        .storage
+        .assign_catchall("example.com", account, account)
+        .expect("assign");
+    assert_eq!(
+        count(
+            &fixture.storage,
+            "SELECT COUNT(*) FROM catchall_assignments"
+        ),
+        1
+    );
+}
+
+#[test]
+fn migration_0014_backfills_a_legacy_single_target_catchall() {
+    // A database created by an earlier build: migrations `0001`-`0013` applied,
+    // with a `catchall_rules` row that still carries `target_account_id`. The
+    // upgrade has to move that target into `catchall_assignments`, or an
+    // upgraded deployment would silently stop receiving its catch-all mail.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("legacy.db");
+    let conn = rusqlite::Connection::open(&path).expect("open legacy db");
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS _migrations (
+            id   INTEGER PRIMARY KEY,
+            name TEXT UNIQUE NOT NULL
+        )",
+    )
+    .expect("_migrations");
+    // `MIGRATIONS[13]` is `0014`; everything before it is the pre-upgrade shape.
+    for (index, sql) in MIGRATIONS.iter().enumerate().take(13) {
+        conn.execute_batch(sql).expect("apply pre-0014 migration");
+        conn.execute(
+            "INSERT INTO _migrations (id, name) VALUES (?1, ?2)",
+            params![(index + 1) as i64, format!("m{:04}", index + 1)],
+        )
+        .expect("record pre-0014 migration");
+    }
+    // Two mailboxes of the domain and the legacy single-target rule.
+    conn.execute_batch(
+        "INSERT INTO accounts (email, email_norm) VALUES ('ops@example.com', 'ops@example.com');
+         INSERT INTO accounts (email, email_norm) VALUES ('lead@example.com', 'lead@example.com');",
+    )
+    .expect("legacy accounts");
+    let ops_id: i64 = conn
+        .query_row(
+            "SELECT id FROM accounts WHERE email = 'ops@example.com'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("ops id");
+    conn.execute(
+        "INSERT INTO catchall_rules (domain, action, target_account_id)
+         VALUES ('example.com', 'route', ?1)",
+        [ops_id],
+    )
+    .expect("legacy rule");
+
+    // The upgrade itself: exactly the `0014` statement batch, recorded the way the
+    // runner records it.
+    conn.execute_batch(MIGRATIONS[13]).expect("apply 0014");
+    conn.execute(
+        "INSERT INTO _migrations (id, name) VALUES (14, 'm0014')",
+        [],
+    )
+    .expect("record 0014");
+
+    let backfilled: Vec<(String, i64, i64)> = {
+        let mut statement = conn
+            .prepare(
+                "SELECT domain, account_id, paused FROM catchall_assignments ORDER BY account_id",
+            )
+            .expect("prepare");
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .expect("query")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("rows")
+    };
+    assert_eq!(
+        backfilled,
+        vec![("example.com".to_string(), ops_id, 0)],
+        "the legacy target becomes one unpaused assignment"
+    );
+    assert_eq!(
+        count_raw(&conn, "SELECT COUNT(*) FROM catchall_assignments"),
+        1,
+        "a single-target rule backfills exactly one row"
+    );
+
+    // And the store opens the upgraded file without replaying anything, with the
+    // backfilled assignment visible through the normal API.
+    let storage = SqliteStorage::open(&path).expect("open upgraded db");
+    let assignees = storage
+        .catchall_assignees("example.com")
+        .expect("assignees");
+    assert_eq!(assignees.len(), 1);
+    assert_eq!(assignees[0].account_id, ops_id);
+    assert!(!assignees[0].paused);
+    assert_eq!(storage.list_catchalls().expect("rules").len(), 1);
+}
+
+#[test]
+fn the_alias_and_catchall_migrations_are_additive() {
+    let fixture = fixture();
+    for table in [
+        "sender_aliases",
+        "sender_alias_assignments",
+        "catchall_assignments",
+    ] {
+        assert_eq!(
+            count(&fixture.storage, &format!("SELECT COUNT(*) FROM {table}")),
+            0,
+            "{table} must exist and be empty on a fresh database"
+        );
+    }
+    // An ordinary message carries no delivery marker: the column is NULL, and
+    // that is what keeps the webmail grouping honest.
+    let account_id = new_account(&fixture.storage);
+    let message_id = fixture.storage.reserve_message_id().expect("reserve");
+    fixture
+        .storage
+        .insert_message(new_message(account_id, message_id, None), message_id)
+        .expect("insert");
+    assert_eq!(
+        fixture
+            .storage
+            .get_message(message_id)
+            .expect("row")
+            .delivered_for,
+        None
+    );
+    // The marker is normalized on write, so the grouping key cannot fork on case.
+    let marked_id = fixture.storage.reserve_message_id().expect("reserve");
+    let mut marked = new_message(account_id, marked_id, None);
+    marked.delivered_for = Some("Sales@Example.COM".to_string());
+    fixture
+        .storage
+        .insert_message(marked, marked_id)
+        .expect("insert marked");
+    assert_eq!(
+        fixture
+            .storage
+            .get_message(marked_id)
+            .expect("row")
+            .delivered_for
+            .as_deref(),
+        Some("sales@example.com")
+    );
+    assert!(MIGRATIONS
+        .iter()
+        .any(|m| m.contains("CREATE TABLE IF NOT EXISTS sender_aliases")));
+    assert!(MIGRATIONS
+        .iter()
+        .any(|m| m.contains("CREATE TABLE IF NOT EXISTS catchall_assignments")));
 }
 
 #[test]

@@ -251,6 +251,36 @@ events and queue rows follow), so a trash item older than the window is gone.
   Widen the window *before* it expires if the mail matters; a restore afterwards
   is a backup restore.
 
+## Sender aliases and catch-all routing
+
+Both are **data, not configuration**: no environment variable, no restart. Create
+them through the API (`POST /v1/aliases`, `PUT /v1/catchall/{domain}`), the
+webmail admin panel, or the MCP tools — the inbound server reads the same tables
+on the next delivery.
+
+- **Aliases** (`sales@example.com`) own no mailbox. Mail to one is copied into
+  every assigned account's inbox, and every assignee may send as it. The domain
+  has to be **served** by this deployment (an account on it, or a DKIM key for
+  it), and the address may collide with neither an account nor another alias.
+  Deliveries are filed in the inbox with a `delivered_for` marker, which is what
+  the webmail groups into one pseudo-folder per shared address — the folder
+  column stays `inbox`, so nothing has to be migrated when an alias is deleted.
+- **Catch-all** is per domain, and it may have several assignees, each with its
+  own `paused` switch. Migration `0014` moves a single-target rule created by an
+  earlier build into the new assignment table, so an upgrade keeps receiving the
+  mail it configured; the old `target_account_id` column stays in the schema but
+  is no longer written.
+- **Pausing is per member.** A member pauses their own copy
+  (`POST /v1/catchall/me/pause`); an owner/admin can force a resume
+  (`PATCH /v1/catchall/{domain}/assignments/{account_id}`) and both are audited.
+  A route rule whose assignees are all paused accepts the message and stores
+  nothing, exactly like `discard`: a configured catch-all never bounces because a
+  member went on holiday.
+- **The disk bill moves.** Every assignee of an alias or a catch-all gets its own
+  sealed copy, so one message to a five-person alias costs five times the storage
+  (and five times the trash-retention cleanup). Keep shared addresses to the
+  mailboxes that genuinely need them.
+
 ## Master key rules
 
 The key is the only thing that makes stored mail readable (ADR 0003). There is

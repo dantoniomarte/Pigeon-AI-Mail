@@ -16,7 +16,7 @@ Two auth realms:
 |---|---|
 | `send` | `POST /v1/emails`, `POST /v1/emails/batch`, cancel via `DELETE /v1/emails/{id}`, mailbox writes (folder/read `PATCH`, `DELETE`, empty-trash and purge-trash on `/v1/messages`), the account settings `PATCH` (trash retention), template create/update/delete, `POST /v1/templates/{id}/test-send`, draft save/update/delete/send. |
 | `read` | Inbox and discovery GETs: emails (`/v1/emails*`, including sandbox raw MIME), messages, attachments, templates, drafts, account settings. Metadata and sealed blobs only. |
-| `full` | The admin GETs — domains, webhooks, suppressions, keys — plus every write to those, plus **decrypted bodies** (`?sealed=false`). Account administration, including organizations, members, invitations and catch-all routing. |
+| `full` | The admin GETs — domains, webhooks, suppressions, keys — plus every write to those, plus **decrypted bodies** (`?sealed=false`). Account administration, including organizations, members, invitations, sender aliases and catch-all routing. |
 
 The spec carries this per-operation in `x-scopes` on each path, so `read` on `/v1/domains` is a `403`, not a silent widening.
 
@@ -109,7 +109,7 @@ Lifecycle: `queued → scheduled → sending → sent | deferred {next_attempt_a
 
 ## Receive (inbound)
 
-### `GET /v1/messages?folder=inbox|sent|spam|trash&limit≤500&offset` — metadata page (never bodies). `folder` defaults to `inbox`; an unknown value is `422 validation`. Items carry `folder` and `read`, and the page carries `counts: {inbox, sent, spam, trash}` for the sidebar badges — one request renders the whole mailbox.
+### `GET /v1/messages?folder=inbox|sent|spam|trash&limit≤500&offset&delivered_for` — metadata page (never bodies). `folder` defaults to `inbox`; an unknown value is `422 validation`. Items carry `folder`, `read` and — for mail that arrived for a shared address — `delivered_for`, and the page carries `counts: {inbox, sent, spam, trash}` for the sidebar badges plus `delivered_for_counts: [{address, count}]` — one request renders the whole mailbox, shared addresses included. When `delivered_for` is present, the listing is pinned to the inbox and the `folder` parameter is ignored.
 
 ```json
 { "items": [ { "id": "msg_00000001", "from_addr": "carol@example.org", "subject": "...",
@@ -292,20 +292,51 @@ Tokens are 32 OS-random bytes as unpadded base64url; only their Argon2id hash is
 
 Honest limits of this surface: accepting an invitation links an existing account rather than creating a mailbox (account creation is `POST /v1/orgs/{id}/members`, which returns the bootstrap token), there is no invitation email, and the cross-organization operator panel is a separate (next) surface — these endpoints are tenant-scoped.
 
-## Catch-all routing
+## Sender aliases
 
-What the **inbound** SMTP server does with mail addressed to a local part no account holds. A rule is per **domain**, and with no rule the server keeps answering `550` (never an open relay).
+A **sender alias** is a second address on a domain this deployment already serves (`sales@example.com`). It owns **no mailbox**: mail to it is copied into the inbox of **every** account assigned to it, and every assignee may **send as** it.
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /v1/catchall` | Every rule (owner/admin). |
-| `PUT /v1/catchall/{domain}` {action, target_account_id?} | Upsert. `route` requires a `target_account_id` **of that same domain**; `discard` forbids one. |
-| `DELETE /v1/catchall/{domain}` | Remove the rule; unknown recipients go back to `550`. |
+| `GET /v1/aliases` | Aliases visible to the caller: an owner/admin sees every alias with its assignees, a member sees only their own. `?mine=1` always narrows to the caller's own list (what the compose From menu offers). Scope `send`. |
+| `POST /v1/aliases` {address} | Claim a free address → `201`. Owner/admin only. |
+| `DELETE /v1/aliases/{id}` | Delete the alias and every assignment to it. Owner/admin only. |
+| `POST /v1/aliases/{id}/assign` {account_id} | Let one account send as the alias and receive a copy of its mail. Owner/admin only. |
+| `POST /v1/aliases/{id}/unassign` {account_id} | Stop that account's sending and delivery. Owner/admin only. |
 
-- **`route`** — the message is delivered into the target mailbox, sealed with **that account's** AAD, and its `email.received` event carries `via=catchall` so the owner can tell why it arrived.
+Rules:
+
+- The address must parse, its domain must be **served** (an account on it, or a DKIM identity for it), and it must collide with neither an account address nor another alias: an alias that shadowed a mailbox would turn one delivery into copies for strangers. A collision is `409`, a bad/foreign address is `422`.
+- Many-to-many: one account may hold several aliases, and one alias may be held by several accounts. Assigning the same pair twice is `409`.
+- The collision is enforced in **both** directions: an existing account cannot become an alias (`422`), and an account can never be created on an alias address — `POST /v1/orgs/{id}/members` (and the installer) answer `409 conflict` instead, so a mailbox can never divert a shared address's mail.
+- Mail to an alias is stored **in the inbox** of each assignee with `delivered_for = <alias>` (the message stays a normal inbox row; `?delivered_for=` filters it, and `GET /v1/messages` returns `delivered_for_counts` so a client can render one pseudo-folder per shared address). Its `email.received` event carries `via=alias delivered_for=<alias>`.
+- Revoking an assignment stops future delivery and sending; mail already delivered keeps its marker and stays put.
+- Sending: `POST /v1/emails`'s `from` must be the caller's own address **or** an alias assigned to it. Anything else is `403` problem type `from-not-allowed` — a distinct type because "issue another key" and "ask for that alias" are different fixes. Comparison is on the normalized address, so case cannot dodge the check.
+- Every mutation is audited (`alias.create`, `alias.delete`, `alias.assign`, `alias.unassign`).
+
+## Catch-all routing
+
+What the **inbound** SMTP server does with mail addressed to a local part no account holds. A rule is per **domain**, it may have **several assignees**, each with its own pause switch, and with no rule the server keeps answering `550` (never an open relay).
+
+Inbound resolution order: **exact account** → **sender alias** (copy to every holder) → **catch-all route** (copy to every non-paused assignee) → **discard** → `550`.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /v1/catchall` | Rules with their assignees: an owner/admin sees all, a member sees the domains where they hold the catch-all (own row only). `?mine=1` narrows any role to the caller's own assignments. Scope `full`. |
+| `PUT /v1/catchall/{domain}` {action} | The domain-level decision: `route` or `discard`. Re-putting replaces the action and **keeps** the assignees. |
+| `DELETE /v1/catchall/{domain}` | Remove the rule and its assignments; unknown recipients go back to `550`. |
+| `POST /v1/catchall/{domain}/assign` {account_id} | Give one mailbox of that domain a copy. Owner/admin only; assigning twice is `409`. |
+| `DELETE /v1/catchall/{domain}/assign/{account_id}` | Stop one copy. Owner/admin only. |
+| `PATCH /v1/catchall/{domain}/assignments/{account_id}` {paused} | The admin force: pause **or resume** somebody else's copy. Owner/admin only, audited as `catchall.force`. |
+| `POST /v1/catchall/me/pause` {domain?} | Any member pauses their **own** copy (session or API key). `409` when they hold none; `domain` is required when they hold several. |
+| `POST /v1/catchall/me/resume` {domain?} | Any member resumes their own copy. |
+
+- **`route`** — the message is copied into **every non-paused assignee**, each sealed with **that account's** AAD, each marked `delivered_for = <the address the sender wrote>`, and each `email.received` event carries `via=catchall delivered_for=<address>`. A route rule whose assignees have all paused accepts the message and stores nothing (like `discard`): a configured catch-all must not turn a member's pause into a delivery failure for the sender.
 - **`discard`** — the message is **accepted** (`250`) and dropped. That is the anti-enumeration answer: a `550` would tell the sender the address is fictional. The drop is logged.
+- A `route` rule with zero assignees also accepts and drops unknown-address mail (the same anti-enumeration behavior as an all-paused rule): the domain is configured to take catch-all mail, so the sender must not learn that nobody is listening yet.
+- The `paused` flag is per `(domain, account)`: one member's holiday switch never silences the shared inbox, and the admin force exists so somebody who paused and never came back cannot silence it either.
 
-Domain matching is case-insensitive and the rule is keyed by domain alone, so a second `PUT` for the same domain replaces the first.
+Domain matching is case-insensitive and the rule is keyed by domain alone, so a second `PUT` for the same domain replaces the first without forgetting who was receiving the mail.
 
 ## Suppressions
 
@@ -329,7 +360,9 @@ Same operations over the Model Context Protocol — same key, same scopes, same 
     "env": { "PIGEON_URL": "https://mail.example.com", "PIGEON_API_KEY": "pk_..." } } } }
 ```
 
-Tools: `send_email`, `list_messages`, `get_message`, `create_template`, `manage_webhooks`, the organization/catch-all/draft/folder/domain/suppression/API-key groups (27 tools in total), plus `account_settings` and `set_trash_retention` so an agent can read and change the trash retention (`days: 0` keeps trashed mail forever) without going through the HTTP API.
+Tools (33 in total): `send_email`, `list_messages`, `get_message`, `create_template`, `manage_webhooks`; the organization group (`org_create`, `org_members`, `org_invite`, `org_create_member`); catch-all (`catchall_set`, `catchall_list`, `catchall_delete`, `catchall_pause`, `catchall_resume`); sender aliases (`alias_list`, `alias_create`, `alias_assign`, `alias_delete`); drafts, folders, domains, suppressions and API keys; plus `account_settings` and `set_trash_retention` so an agent can read and change the trash retention (`days: 0` keeps trashed mail forever) without going through the HTTP API.
+
+The MCP actor is the deployment's bootstrap account, so `send_email`'s `from` follows the same rule as the HTTP send (`from-not-allowed` for anything that is neither that account nor one of its aliases), and `catchall_pause`/`catchall_resume` only ever touch the actor's own row.
 
 ## Quickstart (curl)
 
@@ -343,3 +376,10 @@ curl -X POST https://mail.example.com/v1/emails \
 ```
 
 Python: `requests.post(f"{url}/v1/emails", headers={"Authorization": f"Bearer {key}"}, json=payload)` — 202 → poll or webhook.
+
+> **`from` is checked.** The address must be the calling account's own address or a
+> sender alias assigned to it (`GET /v1/aliases?mine=1` lists yours); anything else
+> is `403` problem type `from-not-allowed`. To send on behalf of a group address,
+> an owner/admin creates the alias (`POST /v1/aliases`) and assigns the sender to it
+> — that is the supported "send as" path, and it also makes inbound mail to that
+> address land in the assignees' inboxes.

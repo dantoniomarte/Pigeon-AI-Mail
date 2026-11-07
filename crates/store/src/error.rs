@@ -20,6 +20,16 @@ pub enum StoreError {
     /// The write collides with an existing row (e.g. duplicate account email).
     #[error("conflict: a row with the same unique key already exists")]
     Conflict,
+    /// The address already belongs to a **sender alias**, so it cannot become an
+    /// account address.
+    ///
+    /// Distinct from [`StoreError::Conflict`] because the fix is different: a
+    /// duplicate account is "pick another address", this one is "delete the alias
+    /// first". Both are a `409` for a client. An account created on top of an alias
+    /// would silently divert mail addressed to a shared address into one person's
+    /// mailbox, which is the collision this variant exists to prevent.
+    #[error("{0} is a sender alias: an account cannot own that address")]
+    AliasShadow(String),
     /// Stored data no longer decodes (unknown enum value, bad JSON, invalid
     /// address). The row exists but cannot be trusted, so callers get evidence
     /// instead of a silent default.

@@ -28,21 +28,29 @@
 //! # Storage
 //!
 //! A complete message is sealed per owning account before it reaches
-//! `store` (ADR 0003). A recipient is resolved in two steps:
+//! `store` (ADR 0003). A recipient is resolved in four steps:
 //!
 //! 1. **Exact match** — `ApiDb::account_id_by_email`, the ordinary mailbox.
-//! 2. **Catch-all** — when no account holds the address, the recipient's *domain*
-//!    is looked up in [`CatchallSource`] (`store`'s `catchall_rules`). A `route`
-//!    rule delivers the message into the rule's target mailbox, sealed with **that
-//!    account's** AAD, so the body is only openable by the mailbox that received
-//!    it. A `discard` rule accepts the message and drops it, which is the
-//!    anti-enumeration answer: the sender learns nothing about which addresses
-//!    exist.
+//! 2. **Sender alias** — an address in `store`'s `sender_aliases` that owns no
+//!    mailbox: a copy goes to **every** account assigned to it, each sealed with
+//!    **that account's** AAD and marked with `delivered_for = <alias>` so the
+//!    webmail can group it.
+//! 3. **Catch-all** — when no account and no alias holds the address, the
+//!    recipient's *domain* is looked up in [`CatchallSource`] (`store`'s
+//!    `catchall_rules`). A `route` rule copies the message to every **non-paused**
+//!    assignee of that domain ([`store::CatchallAssignmentRow`]); a `discard` rule
+//!    accepts the message and drops it, which is the anti-enumeration answer: the
+//!    sender learns nothing about which addresses exist.
+//! 4. **Nothing matches** — the answer stays `550`: a server that silently
+//!    accepted every unknown address would be an open relay for spam and a bounce
+//!    amplifier.
 //!
-//! With no rule at all the answer stays `550`: a server that silently accepted
-//! every unknown address would be an open relay for spam and a bounce amplifier.
+//! A `route` rule whose assignees have all paused their copy accepts the message
+//! and stores nothing, exactly like `discard`: the rule says "this domain takes
+//! catch-all mail", so bouncing it because everybody is on holiday would turn a
+//! configuration choice into a delivery failure.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -52,7 +60,7 @@ use pigeon_api::time::{now_unix, rfc5322_date};
 use pigeon_core::types::CatchallAction;
 use pigeon_core::{Direction, EmailAddress};
 use pigeon_crypto::MasterKey;
-use store::{CatchallRuleRow, NewMessage, SqliteStorage, Storage};
+use store::{CatchallAssignmentRow, CatchallRuleRow, NewMessage, SqliteStorage, Storage};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -455,6 +463,13 @@ pub trait CatchallSource: Send + Sync + std::fmt::Debug {
     /// The rule for `domain`, or `None` when the domain has none — which keeps the
     /// ordinary `550`.
     fn rule_for(&self, domain: &str) -> Result<Option<CatchallRuleRow>>;
+
+    /// Every account holding the catch-all of `domain`, paused or not.
+    ///
+    /// Paused rows are returned instead of filtered out so the caller can log
+    /// *why* nobody received a routed copy; [`ingest_message`] is the one place
+    /// that decides what a paused row means.
+    fn assignees_for(&self, domain: &str) -> Result<Vec<CatchallAssignmentRow>>;
 }
 
 /// The production [`CatchallSource`]: `store`'s `catchall_rules` row for the
@@ -475,6 +490,12 @@ impl CatchallSource for StoreCatchall {
         // `store` lowercases the domain before matching, so a mixed-case `RCPT TO`
         // still finds the rule.
         self.store.get_catchall(domain).map_err(SmtpError::from)
+    }
+
+    fn assignees_for(&self, domain: &str) -> Result<Vec<CatchallAssignmentRow>> {
+        self.store
+            .catchall_assignees(domain)
+            .map_err(SmtpError::from)
     }
 }
 
@@ -695,6 +716,47 @@ impl InboundSmtpServer {
     }
 }
 
+/// How one recipient resolved, for the event detail a mailbox owner reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeliveryVia {
+    /// The address belongs to the account itself.
+    Direct,
+    /// The address is a sender alias the account holds.
+    Alias,
+    /// The domain routes unknown local parts to the account.
+    Catchall,
+}
+
+/// One outgoing copy: who receives it, and why.
+#[derive(Debug)]
+struct Delivery {
+    recipients: Vec<EmailAddress>,
+    via: DeliveryVia,
+}
+
+impl Delivery {
+    fn direct() -> Self {
+        Self {
+            recipients: Vec::new(),
+            via: DeliveryVia::Direct,
+        }
+    }
+
+    fn via_alias() -> Self {
+        Self {
+            recipients: Vec::new(),
+            via: DeliveryVia::Alias,
+        }
+    }
+
+    fn via_catchall() -> Self {
+        Self {
+            recipients: Vec::new(),
+            via: DeliveryVia::Catchall,
+        }
+    }
+}
+
 /// Store one message. Runs on the blocking pool: every call is `rusqlite`.
 fn ingest_message(
     store: &SqliteStorage,
@@ -707,25 +769,52 @@ fn ingest_message(
 ) -> Result<Reply> {
     let parsed = parse_message(&raw);
 
-    // Recipient → account, in two steps: an exact mailbox wins, and only an
-    // address no account holds is offered to the domain's catch-all rule.
+    // Recipient → (account, delivery marker), resolved in the documented order:
+    // exact mailbox, then sender alias, then the domain's catch-all rule.
     //
-    // Recipients with neither are not local: they are logged and dropped rather
-    // than bounced (v0.1 has no outbound bounce generator); if nobody was stored
-    // and nobody was deliberately discarded, the whole message is refused with
-    // 550, exactly as before catch-all rules existed.
-    let mut per_account: BTreeMap<i64, Vec<EmailAddress>> = BTreeMap::new();
+    // The key carries the marker so one resolved message can produce several
+    // copies for the same account (its own mail plus an alias copy), while two
+    // recipients that resolve to the same account *and* the same marker share one
+    // sealed body. Recipients nobody resolves are not local: they are logged and
+    // dropped rather than bounced (v0.1 has no outbound bounce generator); if
+    // nobody was stored and nobody was deliberately discarded, the whole message
+    // is refused with 550.
+    let mut per_account: BTreeMap<(i64, Option<String>), Delivery> = BTreeMap::new();
     // One lookup per domain, not per recipient: a message addressed to ten made-up
-    // local parts of one domain costs one query.
+    // local parts of one domain costs one rule lookup and one assignee lookup.
     let mut rules: BTreeMap<String, Option<CatchallRuleRow>> = BTreeMap::new();
-    let mut routed_via_catchall: BTreeSet<i64> = BTreeSet::new();
+    let mut assignees: BTreeMap<String, Vec<CatchallAssignmentRow>> = BTreeMap::new();
+    // One lookup per alias address, for the same reason.
+    let mut alias_holders: BTreeMap<String, Vec<i64>> = BTreeMap::new();
     let mut discarded = 0usize;
     for recipient in &envelope.recipients {
         if let Some(account_id) = db.account_id_by_email(&recipient.normalized())? {
             per_account
-                .entry(account_id)
-                .or_default()
+                .entry((account_id, None))
+                .or_insert_with(Delivery::direct)
+                .recipients
                 .push(recipient.clone());
+            continue;
+        }
+        let normalized = recipient.normalized();
+        if !alias_holders.contains_key(&normalized) {
+            let holders = store.accounts_for_alias(&normalized)?;
+            alias_holders.insert(normalized.clone(), holders);
+        }
+        let holders = alias_holders
+            .get(&normalized)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        if !holders.is_empty() {
+            // An alias is a shared address: every holder gets its own sealed copy,
+            // marked with the address it arrived for.
+            for account_id in holders {
+                per_account
+                    .entry((*account_id, Some(normalized.clone())))
+                    .or_insert_with(Delivery::via_alias)
+                    .recipients
+                    .push(recipient.clone());
+            }
             continue;
         }
         let domain = recipient.domain().to_string();
@@ -734,19 +823,40 @@ fn ingest_message(
             rules.insert(domain.clone(), rule);
         }
         match rules.get(&domain).and_then(Option::as_ref) {
-            Some(rule) if rule.action == CatchallAction::Route => match rule.target_account_id {
-                Some(target) => {
-                    routed_via_catchall.insert(target);
+            Some(rule) if rule.action == CatchallAction::Route => {
+                if !assignees.contains_key(&domain) {
+                    let rows = catchall.assignees_for(&domain)?;
+                    assignees.insert(domain.clone(), rows);
+                }
+                let live: Vec<i64> = assignees
+                    .get(&domain)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default()
+                    .iter()
+                    .filter(|row| !row.paused)
+                    .map(|row| row.account_id)
+                    .collect();
+                if live.is_empty() {
+                    // A route rule with every assignee paused accepts and drops,
+                    // exactly like `discard`: the domain is configured to take
+                    // catch-all mail, so refusing it would turn a member's holiday
+                    // switch into a delivery failure for the sender.
+                    discarded += 1;
+                    tracing::info!(
+                        recipient = %recipient,
+                        domain = %domain,
+                        "catch-all route has no unpaused assignee; accepting and dropping"
+                    );
+                    continue;
+                }
+                for account_id in live {
                     per_account
-                        .entry(target)
-                        .or_default()
+                        .entry((account_id, Some(normalized.clone())))
+                        .or_insert_with(Delivery::via_catchall)
+                        .recipients
                         .push(recipient.clone());
                 }
-                None => tracing::warn!(
-                    domain = %domain,
-                    "catch-all rule routes without a target account; treating it as no rule"
-                ),
-            },
+            }
             Some(_) => {
                 // Anti-enumeration in action: accepted, then dropped.
                 discarded += 1;
@@ -781,7 +891,8 @@ fn ingest_message(
     document.extend_from_slice(&raw);
 
     let mut stored_ids = Vec::new();
-    for (account_id, recipients) in per_account {
+    for ((account_id, delivered_for), delivery) in per_account {
+        let recipients = delivery.recipients;
         let message_id = store.reserve_message_id()?;
         let message_aad = format!("account:{account_id}:message:{message_id}");
         let content_key = pigeon_crypto::generate_content_key();
@@ -801,6 +912,7 @@ fn ingest_message(
                 subject: subject.clone(),
                 sealed_body,
                 idempotency_key: None,
+                delivered_for: delivered_for.clone(),
             },
             message_id,
         )?;
@@ -822,18 +934,22 @@ fn ingest_message(
         })?;
 
         // Recorded on the row so a mailbox owner can tell "this arrived because I
-        // own the address" from "this arrived because the domain routes unknown
-        // addresses here".
-        let via = if routed_via_catchall.contains(&account_id) {
-            " via=catchall"
-        } else {
-            ""
+        // own the address" from "this arrived for a shared alias" and from "the
+        // domain routes unknown addresses here".
+        let via = match delivery.via {
+            DeliveryVia::Direct => String::new(),
+            DeliveryVia::Alias => " via=alias".to_string(),
+            DeliveryVia::Catchall => " via=catchall".to_string(),
+        };
+        let delivered = match &delivered_for {
+            Some(address) => format!(" delivered_for={address}"),
+            None => String::new(),
         };
         store.record_event(
             message_id,
             "email.received",
             &format!(
-                "from={from} helo={} peer={} auth=spf:none,dkim:none,dmarc:none{via}",
+                "from={from} helo={} peer={} auth=spf:none,dkim:none,dmarc:none{via}{delivered}",
                 envelope.helo, envelope.peer
             ),
         )?;

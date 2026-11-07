@@ -13,7 +13,7 @@ env:     PIGEON_DB_PATH=/var/lib/pigeon/pigeon.db
 ```
 
 `pigeon mcp` speaks JSON-RPC 2.0 over stdio, opens the same SQLite database and
-master key the server does, and exposes the 27 tools listed in
+master key the server does, and exposes the 33 tools listed in
 [../docs/AGENTS.md](../docs/AGENTS.md). No API key to paste, no extra service.
 
 ## Pick your platform

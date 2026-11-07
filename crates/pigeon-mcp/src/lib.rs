@@ -10,9 +10,10 @@
 //!
 //! # Surface
 //!
-//! 27 tools, grouped: messaging (send, read, list, templates, webhooks),
-//! organizations, catch-all routing, drafts, folders, domains, suppressions,
-//! API keys and the account settings (trash retention). The administration tools
+//! 33 tools, grouped: messaging (send, read, list, templates, webhooks),
+//! organizations, catch-all routing (multi-assignee, with a per-member pause),
+//! sender aliases, drafts, folders, domains, suppressions, API keys and the
+//! account settings (trash retention). The administration tools
 //! reuse the API's own auxiliary SQL layer ([`aux`]) against the same database
 //! file, so an agent manages exactly the state the HTTP API manages — never a
 //! private copy of it.
@@ -22,6 +23,7 @@
 #![forbid(unsafe_code)]
 
 pub mod admin;
+pub mod aliases;
 pub mod aux;
 pub mod domains;
 pub mod mail;

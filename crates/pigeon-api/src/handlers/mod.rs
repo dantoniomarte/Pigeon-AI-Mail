@@ -12,6 +12,7 @@
 //!   than a bare `400`.
 
 pub mod account;
+pub mod aliases;
 pub mod domains;
 pub mod drafts;
 pub mod health;

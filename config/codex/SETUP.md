@@ -41,7 +41,7 @@ PIGEON_MASTER_KEY_FILE=/etc/pigeon/master.key \
   | grep -o '"name"' | wc -l      # expect 27
 ```
 
-Inside Codex: `/mcp` lists `pigeon-mail` and its 27 tools.
+Inside Codex: `/mcp` lists `pigeon-mail` and its 33 tools.
 
 ## Troubleshooting
 

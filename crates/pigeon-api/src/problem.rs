@@ -42,6 +42,8 @@ pub enum ProblemType {
     MfaRequired,
     /// The change would leave an organization with no owner.
     LastOwner,
+    /// The `from` address is neither the caller's own nor an alias assigned to it.
+    FromNotAllowed,
 }
 
 impl ProblemType {
@@ -61,6 +63,7 @@ impl ProblemType {
             ProblemType::Unavailable => "unavailable",
             ProblemType::MfaRequired => "mfa-required",
             ProblemType::LastOwner => "last-owner",
+            ProblemType::FromNotAllowed => "from-not-allowed",
         }
     }
 
@@ -80,6 +83,7 @@ impl ProblemType {
             ProblemType::Unavailable => "Service unavailable",
             ProblemType::MfaRequired => "Two-factor authentication required",
             ProblemType::LastOwner => "The last owner cannot be removed",
+            ProblemType::FromNotAllowed => "Sender address not allowed",
         }
     }
 }
@@ -257,6 +261,15 @@ pub fn forbidden(detail: impl Into<String>) -> Problem {
     Problem::new(StatusCode::FORBIDDEN, ProblemType::Forbidden, detail)
 }
 
+/// `403 from-not-allowed` for a `from` the caller may not send as.
+///
+/// Distinct from [`forbidden`] on purpose: a client has to tell "this key lacks a
+/// scope" (fix by issuing another key) from "this identity is not yours" (fix by
+/// asking an admin for the alias).
+pub fn from_not_allowed(detail: impl Into<String>) -> Problem {
+    Problem::new(StatusCode::FORBIDDEN, ProblemType::FromNotAllowed, detail)
+}
+
 /// `404` for a resource that is not visible to this account.
 pub fn not_found(detail: impl Into<String>) -> Problem {
     Problem::new(StatusCode::NOT_FOUND, ProblemType::NotFound, detail)
@@ -293,6 +306,16 @@ impl From<store::StoreError> for Problem {
                 ProblemType::Conflict,
                 "a resource with the same unique key already exists",
             ),
+            // A `409` too, but with the actionable half: a duplicate account means
+            // "pick another address", a shadowed alias means "delete the alias
+            // first".
+            store::StoreError::AliasShadow(address) => Problem::new(
+                StatusCode::CONFLICT,
+                ProblemType::Conflict,
+                format!(
+                    "{address} is a sender alias: an account cannot own that address. Delete the                      alias first, or use another address"
+                ),
+            ),
             other => internal(other),
         }
     }
@@ -319,6 +342,7 @@ mod tests {
         assert_eq!(ProblemType::PayloadTooLarge.as_str(), "payload-too-large");
         assert_eq!(ProblemType::MfaRequired.as_str(), "mfa-required");
         assert_eq!(ProblemType::LastOwner.as_str(), "last-owner");
+        assert_eq!(ProblemType::FromNotAllowed.as_str(), "from-not-allowed");
         for type_ in [
             ProblemType::RateLimited,
             ProblemType::QuotaExceeded,
@@ -333,6 +357,7 @@ mod tests {
             ProblemType::Unavailable,
             ProblemType::MfaRequired,
             ProblemType::LastOwner,
+            ProblemType::FromNotAllowed,
         ] {
             assert!(!type_.title().is_empty());
         }

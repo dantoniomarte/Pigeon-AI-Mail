@@ -39,7 +39,12 @@ import {
 } from '../api';
 import type { LoadState } from '../App';
 import { LanguageSelect, MotionSwitch } from './TopBar';
-import { DomainsPanel, SuppressionsPanel, TemplatesPanel } from './ManagementPanels';
+import {
+  DomainsPanel,
+  SendAsPanel,
+  SuppressionsPanel,
+  TemplatesPanel,
+} from './ManagementPanels';
 import { SecurityPanel } from './SecurityPanel';
 import type { ToastKind } from './Toast';
 
@@ -692,6 +697,8 @@ export default function Settings({
             </div>
             {keysBody}
           </section>
+
+          <SendAsPanel apiKey={apiKey} notify={notify} />
 
           <section className="panel">
             <div className="panel__head">

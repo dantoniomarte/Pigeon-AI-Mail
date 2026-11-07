@@ -314,6 +314,7 @@ async fn a_message_without_a_wrapped_key_is_failed_permanently() {
                 sealed_body: pigeon_crypto::seal_content(&key, b"body", aad.as_bytes())
                     .expect("seal"),
                 idempotency_key: None,
+                delivered_for: None,
             },
             message_id,
         )
