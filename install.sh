@@ -307,6 +307,10 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Early flag validation (before any side effects).
+[[ -z "$WEBMAIL_LOCAL_DIR" || -d "$WEBMAIL_LOCAL_DIR" ]] \
+    || die "--webmail-dir not found: $WEBMAIL_LOCAL_DIR"
+
 # ---------------------------------------------------------------------------
 # Preconditions
 # ---------------------------------------------------------------------------
