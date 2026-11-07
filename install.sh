@@ -56,6 +56,7 @@ DOMAIN=""
 API_PORT="8000"
 DATA_DIR="/var/lib/pigeon"
 LOCAL_BIN=""
+PUBLIC_IP=""
 WEBMAIL_LOCAL_DIR=""
 WANT_WEBMAIL=1
 START_SERVICE=1
@@ -217,6 +218,8 @@ Server options:
   --port <port>       API/MCP HTTP port (default: 8000)
   --data-dir <path>   Database directory (default: /var/lib/pigeon)
   --bin <path>        Install this local `pigeon` binary instead of downloading
+  --public-ip <ip>    The host's public IP (written as PIGEON_PUBLIC_IP so the
+                      domain DNS-guidance endpoint can derive A records)
   --no-webmail        Do not install the optional webmail bundle
   --webmail-dir <p>   Install the webmail from this local directory
                       (private repos, air-gapped hosts)
@@ -264,6 +267,11 @@ while [[ $# -gt 0 ]]; do
         --bin)
             [[ $# -ge 2 ]] || die "--bin needs a value"
             LOCAL_BIN="$2"
+            shift 2
+            ;;
+        --public-ip)
+            [[ $# -ge 2 ]] || die "--public-ip needs a value"
+            PUBLIC_IP="$2"
             shift 2
             ;;
         --webmail-dir)
@@ -554,6 +562,7 @@ PIGEON_DB_PATH=${DATA_DIR}/pigeon.db
 PIGEON_SMTP_IN_ADDR=:25
 PIGEON_SMTP_HOSTNAME=mail.${DOMAIN}
 PIGEON_SMTP_OUT_STARTTLS=required
+${PUBLIC_IP:+PIGEON_PUBLIC_IP=$PUBLIC_IP}
 PIGEON_WEBMAIL=${WEBMAIL_VALUE}
 PIGEON_LOG=info,json
 EOF
