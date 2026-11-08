@@ -69,16 +69,31 @@ fn sealed_body(account_id: i64, message_id: i64, plaintext: &[u8]) -> Vec<u8> {
     .expect("seal test body")
 }
 
+/// A received message: the shape most fixtures want, since the folder follows
+/// the direction (`in` → `inbox`). Outbound fixtures use
+/// [`new_outbound_message`] instead.
 fn new_message(account_id: i64, reserved_id: i64, idempotency_key: Option<&str>) -> NewMessage {
     NewMessage {
         account_id,
-        direction: Direction::Out,
+        direction: Direction::In,
         from_addr: addr("owner@example.com"),
         to_addrs: vec![addr("peer@example.net")],
         subject: "hello".to_string(),
         sealed_body: sealed_body(account_id, reserved_id, b"Subject: hi\r\n\r\nbody"),
         idempotency_key: idempotency_key.map(str::to_string),
         delivered_for: None,
+    }
+}
+
+/// A message this account sent, which the store must file in `sent`.
+fn new_outbound_message(
+    account_id: i64,
+    reserved_id: i64,
+    idempotency_key: Option<&str>,
+) -> NewMessage {
+    NewMessage {
+        direction: Direction::Out,
+        ..new_message(account_id, reserved_id, idempotency_key)
     }
 }
 
@@ -844,7 +859,7 @@ fn list_folder_uses_the_folder_index() {
 }
 
 #[test]
-fn new_messages_start_in_the_inbox_unread() {
+fn received_messages_start_in_the_inbox_unread() {
     let fixture = fixture();
     let account_id = new_account(&fixture.storage);
     let message_id = seed_message(&fixture.storage, account_id);
@@ -853,7 +868,7 @@ fn new_messages_start_in_the_inbox_unread() {
     assert_eq!(
         row.folder,
         MessageFolder::Inbox,
-        "the column default applies"
+        "received mail belongs in the inbox"
     );
     assert_eq!(row.read_at, None, "a fresh message is unread");
 
@@ -861,6 +876,59 @@ fn new_messages_start_in_the_inbox_unread() {
     let listed = fixture.storage.list_messages(account_id, 10, 0).unwrap();
     assert_eq!(listed[0].folder, MessageFolder::Inbox);
     assert_eq!(listed[0].read_at, None);
+}
+
+/// The folder is derived from the direction at insert time, so an outbound copy
+/// is in `sent` from the moment it is stored — not in the inbox waiting for
+/// somebody to move it.
+#[test]
+fn outbound_messages_are_stored_in_the_sent_folder() {
+    let fixture = fixture();
+    let account_id = new_account(&fixture.storage);
+    let reserved = fixture.storage.reserve_message_id().expect("reserve id");
+    let sent = fixture
+        .storage
+        .insert_message(new_outbound_message(account_id, reserved, None), reserved)
+        .expect("insert outbound");
+
+    assert_eq!(
+        fixture.storage.get_message(sent).unwrap().folder,
+        MessageFolder::Sent,
+        "an outbound message is a sent copy"
+    );
+
+    let sent_rows = fixture
+        .storage
+        .list_folder(account_id, MessageFolder::Sent, 10, 0)
+        .unwrap();
+    assert_eq!(
+        sent_rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![sent],
+        "the sent listing must contain it"
+    );
+
+    assert!(
+        fixture
+            .storage
+            .list_folder(account_id, MessageFolder::Inbox, 10, 0)
+            .unwrap()
+            .is_empty(),
+        "it must not be filed in the inbox"
+    );
+    assert_eq!(
+        fixture
+            .storage
+            .count_folder(account_id, MessageFolder::Inbox)
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        fixture
+            .storage
+            .count_folder(account_id, MessageFolder::Sent)
+            .unwrap(),
+        1
+    );
 }
 
 #[test]
@@ -3716,6 +3784,102 @@ fn the_alias_and_catchall_migrations_are_additive() {
     assert!(MIGRATIONS
         .iter()
         .any(|m| m.contains("CREATE TABLE IF NOT EXISTS catchall_assignments")));
+}
+
+/// Every outbound message written before the fix sits in the inbox; the `0018`
+/// backfill is what repairs an already-deployed database.
+#[test]
+fn migration_0018_backfills_outbound_messages_into_the_sent_folder() {
+    // A database created by an earlier build: migrations `0001`-`0017` applied and
+    // rows already stored with the folder column's default.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("legacy.db");
+    let conn = rusqlite::Connection::open(&path).expect("open legacy db");
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS _migrations (
+            id   INTEGER PRIMARY KEY,
+            name TEXT UNIQUE NOT NULL
+        )",
+    )
+    .expect("_migrations");
+    // `MIGRATIONS[17]` is `0018`; everything before it is the pre-upgrade shape.
+    for (index, sql) in MIGRATIONS.iter().enumerate().take(17) {
+        conn.execute_batch(sql).expect("apply pre-0018 migration");
+        conn.execute(
+            "INSERT INTO _migrations (id, name) VALUES (?1, ?2)",
+            params![(index + 1) as i64, format!("m{:04}", index + 1)],
+        )
+        .expect("record pre-0018 migration");
+    }
+    conn.execute_batch(
+        "INSERT INTO accounts (id, email, email_norm)
+              VALUES (1, 'owner@example.com', 'owner@example.com');
+         -- What the pre-fix write path produced: an outbound copy in the inbox.
+         INSERT INTO messages
+             (id, account_id, direction, from_addr, to_addrs, subject, sealed_body, folder)
+              VALUES (1, 1, 'out', 'owner@example.com', '[\"peer@example.net\"]', 'a', x'00', 'inbox');
+         -- Received mail must not move, alias/catch-all copies included.
+         INSERT INTO messages
+             (id, account_id, direction, from_addr, to_addrs, subject, sealed_body, folder,
+              delivered_for)
+              VALUES (2, 1, 'in', 'peer@example.net', '[\"owner@example.com\"]', 'b', x'00', 'inbox',
+                      'sales@example.com');
+         -- A sent copy the user already filed elsewhere keeps that decision.
+         INSERT INTO messages
+             (id, account_id, direction, from_addr, to_addrs, subject, sealed_body, folder)
+              VALUES (3, 1, 'out', 'owner@example.com', '[\"peer@example.net\"]', 'c', x'00', 'trash');",
+    )
+    .expect("legacy messages");
+
+    // The upgrade itself: exactly the `0018` statement batch, recorded the way the
+    // runner records it.
+    conn.execute_batch(MIGRATIONS[17]).expect("apply 0018");
+    conn.execute(
+        "INSERT INTO _migrations (id, name) VALUES (18, 'm0018')",
+        [],
+    )
+    .expect("record 0018");
+
+    let folders: Vec<(i64, String)> = {
+        let mut statement = conn
+            .prepare("SELECT id, folder FROM messages ORDER BY id")
+            .expect("prepare");
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("query")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("rows")
+    };
+    assert_eq!(
+        folders,
+        vec![
+            (1, "sent".to_string()),
+            (2, "inbox".to_string()),
+            (3, "trash".to_string()),
+        ],
+        "outbound copies move to sent; inbound and user-filed rows stay put"
+    );
+
+    // The upgraded file opens through the normal store and lists accordingly.
+    let storage = SqliteStorage::open(&path).expect("open upgraded db");
+    assert_eq!(
+        storage
+            .list_folder(1, MessageFolder::Sent, 10, 0)
+            .expect("sent")
+            .iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+    assert_eq!(
+        storage
+            .list_folder(1, MessageFolder::Inbox, 10, 0)
+            .expect("inbox")
+            .iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>(),
+        vec![2]
+    );
 }
 
 #[test]

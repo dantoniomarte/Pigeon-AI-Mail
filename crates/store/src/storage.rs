@@ -114,6 +114,9 @@ pub struct MessageRow {
 
 /// A message waiting to be written, handed to [`Storage::insert_message`]
 /// together with the id reserved for it.
+///
+/// The mailbox folder is not a field here: it follows [`Self::direction`], so
+/// an outbound message is stored in `sent` and an inbound one in `inbox`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewMessage {
     pub account_id: i64,
@@ -1855,6 +1858,18 @@ impl Storage for SqliteStorage {
             Some(raw) => Some(EmailAddress::parse(raw)?.normalized()),
             None => None,
         };
+        // The folder follows the direction, and it is decided *here* rather than
+        // by each caller: mail the account sent belongs in `sent`, mail that
+        // arrived belongs in `inbox`. Leaving it to the column default is what
+        // used to file every outbound copy in the inbox.
+        //
+        // `delivered_for` does not move a message out of the inbox: an alias or
+        // catch-all copy is still received mail (direction `in`), and the marker
+        // is a grouping key inside the inbox, not a folder.
+        let folder = match message.direction {
+            Direction::Out => MessageFolder::Sent,
+            Direction::In => MessageFolder::Inbox,
+        };
         let conn = self.lock();
         // The id is written explicitly, not left to AUTOINCREMENT: the caller
         // sealed the body with `reserved_id` as AAD, so the row must carry that
@@ -1868,8 +1883,8 @@ impl Storage for SqliteStorage {
         let inserted = conn.execute(
             "INSERT INTO messages
                 (id, account_id, direction, from_addr, to_addrs, subject,
-                 sealed_body, idempotency_key, delivered_for)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 sealed_body, idempotency_key, delivered_for, folder)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT (account_id, idempotency_key)
                  WHERE idempotency_key IS NOT NULL
              DO NOTHING",
@@ -1882,7 +1897,8 @@ impl Storage for SqliteStorage {
                 message.subject,
                 message.sealed_body,
                 message.idempotency_key,
-                delivered_for
+                delivered_for,
+                folder.as_str()
             ],
         )?;
 

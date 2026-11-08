@@ -354,7 +354,10 @@ paths:
           - spam
           - trash
           default: inbox
-        description: Folder to list. Omitted means inbox.
+        description: >-
+          Folder to list. Omitted means inbox. The folder follows the message
+          direction: mail this account sent is stored in `sent`, received mail
+          (alias and catch-all copies included) in `inbox`.
       - name: limit
         in: query
         schema:

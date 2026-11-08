@@ -1223,34 +1223,53 @@ async fn mailbox_folders_read_state_and_trash_purge() {
     let app = TestApp::new();
     let read_key = app.key_with(&[ApiKeyScope::Read], false);
 
-    // Accept a message through the send surface; the row lands in `inbox` (the
-    // column default), which is what the listing below must show.
+    // Accept a message through the send surface; the row is outbound, so the
+    // insert files it in `sent` — not in the inbox it used to land in.
     let email_id = app.send(&app.full_key, valid_send()).await;
 
     let inbox = app
         .get("/v1/messages?folder=inbox", Some(&app.full_key))
         .await;
     assert_eq!(inbox.status, StatusCode::OK, "{:?}", inbox.body);
-    let items = inbox.body["items"].as_array().expect("items");
-    assert_eq!(items.len(), 1, "{:?}", inbox.body);
+    assert!(
+        inbox.body["items"].as_array().expect("items").is_empty(),
+        "a sent copy must not show up in the inbox: {:?}",
+        inbox.body
+    );
+    assert_eq!(inbox.body["counts"]["inbox"], 0);
+
+    let sent = app
+        .get("/v1/messages?folder=sent", Some(&app.full_key))
+        .await;
+    assert_eq!(sent.status, StatusCode::OK, "{:?}", sent.body);
+    let items = sent.body["items"].as_array().expect("items");
+    assert_eq!(items.len(), 1, "{:?}", sent.body);
     let message_id = items[0]["id"].as_str().expect("id").to_string();
     assert!(
         message_id.starts_with("msg_"),
         "the mailbox surface speaks msg_ ids, got {message_id}"
     );
     assert_eq!(items[0]["from_addr"], "owner@example.com");
-    assert_eq!(items[0]["folder"], "inbox");
+    assert_eq!(items[0]["folder"], "sent");
     assert_eq!(items[0]["read"], false, "a new message is unread");
-    assert_eq!(inbox.body["page"]["total"], 1);
-    assert_eq!(inbox.body["counts"]["inbox"], 1, "{:?}", inbox.body);
-    assert_eq!(inbox.body["counts"]["sent"], 0);
-    assert_eq!(inbox.body["counts"]["spam"], 0);
-    assert_eq!(inbox.body["counts"]["trash"], 0);
+    assert_eq!(sent.body["page"]["total"], 1);
+    assert_eq!(sent.body["counts"]["sent"], 1, "{:?}", sent.body);
+    assert_eq!(sent.body["counts"]["inbox"], 0);
+    assert_eq!(sent.body["counts"]["spam"], 0);
+    assert_eq!(sent.body["counts"]["trash"], 0);
 
-    // No `folder` at all means inbox.
+    // No `folder` at all means inbox, which this message is not part of.
     let defaulted = app.get("/v1/messages", Some(&app.full_key)).await;
     assert_eq!(defaulted.status, StatusCode::OK);
-    assert_eq!(defaulted.body["items"][0]["id"], message_id.as_str());
+    assert!(
+        defaulted.body["items"]
+            .as_array()
+            .expect("items")
+            .is_empty(),
+        "the default listing is the inbox: {:?}",
+        defaulted.body
+    );
+    assert_eq!(defaulted.body["counts"]["sent"], 1);
 
     // Moving and deleting is a write: a read-only key is refused.
     let refused = app
@@ -1273,13 +1292,14 @@ async fn mailbox_folders_read_state_and_trash_purge() {
     assert_eq!(patched.status, StatusCode::OK, "{:?}", patched.body);
     assert_eq!(patched.body["id"], message_id.as_str());
     assert_eq!(patched.body["read"], true);
-    assert_eq!(patched.body["folder"], "inbox");
-    let inbox = app
-        .get("/v1/messages?folder=inbox", Some(&app.full_key))
+    assert_eq!(patched.body["folder"], "sent");
+    let sent = app
+        .get("/v1/messages?folder=sent", Some(&app.full_key))
         .await;
-    assert_eq!(inbox.body["items"][0]["read"], true);
+    assert_eq!(sent.body["items"][0]["read"], true);
 
-    // Move to spam: the inbox empties, the spam folder lists it, counts follow.
+    // Move to spam: the sent folder empties, the spam folder lists it, counts
+    // follow.
     let moved = app
         .patch(
             &format!("/v1/messages/{message_id}"),
@@ -1296,11 +1316,11 @@ async fn mailbox_folders_read_state_and_trash_purge() {
     assert_eq!(spam.status, StatusCode::OK);
     assert_eq!(spam.body["items"][0]["id"], message_id.as_str());
     assert_eq!(spam.body["counts"]["spam"], 1);
-    assert_eq!(spam.body["counts"]["inbox"], 0, "{:?}", spam.body);
-    let inbox = app
-        .get("/v1/messages?folder=inbox", Some(&app.full_key))
+    assert_eq!(spam.body["counts"]["sent"], 0, "{:?}", spam.body);
+    let sent = app
+        .get("/v1/messages?folder=sent", Some(&app.full_key))
         .await;
-    assert_eq!(inbox.body["items"].as_array().expect("items").len(), 0);
+    assert_eq!(sent.body["items"].as_array().expect("items").len(), 0);
 
     // Bad folder values and empty patches are validation problems, unknown ids
     // are 404s — never a silent no-op.
@@ -1360,7 +1380,7 @@ async fn mailbox_folders_read_state_and_trash_purge() {
     let second = app.send(&app.full_key, valid_send()).await;
     assert_ne!(first, second);
     let trashed = app
-        .get("/v1/messages?folder=inbox", Some(&app.full_key))
+        .get("/v1/messages?folder=sent", Some(&app.full_key))
         .await;
     let trashed_ids: Vec<String> = trashed.body["items"]
         .as_array()
@@ -1408,6 +1428,49 @@ async fn mailbox_folders_read_state_and_trash_purge() {
         .post("/v1/messages/empty-trash", Some(&read_key), json!({}))
         .await;
     refused.assert_problem(StatusCode::FORBIDDEN, "forbidden");
+}
+
+#[tokio::test]
+async fn a_sent_email_is_filed_in_the_sent_folder_not_the_inbox() {
+    let app = TestApp::new();
+    let email_id = app.send(&app.full_key, valid_send()).await;
+
+    let sent = app
+        .get("/v1/messages?folder=sent", Some(&app.full_key))
+        .await;
+    assert_eq!(sent.status, StatusCode::OK, "{:?}", sent.body);
+    let items = sent.body["items"].as_array().expect("items");
+    assert_eq!(items.len(), 1, "the sent copy is listed: {:?}", sent.body);
+    assert!(
+        items[0]["id"].as_str().expect("id").starts_with("msg_"),
+        "the mailbox surface speaks msg_ ids: {:?}",
+        items[0]
+    );
+    assert_eq!(items[0]["folder"], "sent");
+    assert_eq!(items[0]["subject"], "Invoice #2041 paid");
+    assert_eq!(sent.body["counts"]["sent"], 1, "{:?}", sent.body);
+
+    // The same message must not be in the inbox, not even as a duplicate copy.
+    let inbox = app
+        .get("/v1/messages?folder=inbox", Some(&app.full_key))
+        .await;
+    assert_eq!(inbox.status, StatusCode::OK, "{:?}", inbox.body);
+    assert!(
+        inbox.body["items"].as_array().expect("items").is_empty(),
+        "outbound mail must not be stored as inbox mail: {:?}",
+        inbox.body
+    );
+    assert_eq!(inbox.body["counts"]["inbox"], 0);
+    assert_eq!(inbox.body["counts"]["sent"], 1, "{:?}", inbox.body);
+
+    // The move into `sent` is a folder change only: the send-side lifecycle row
+    // still resolves, so the copy is the same email the caller queued.
+    assert!(app
+        .state
+        .db
+        .email_by_public_id(app.account_id, &email_id)
+        .expect("lookup")
+        .is_some());
 }
 
 #[tokio::test]

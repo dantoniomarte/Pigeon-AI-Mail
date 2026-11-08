@@ -42,9 +42,9 @@ const FOLDER_VALUES: [&str; 4] = ["inbox", "sent", "spam", "trash"];
 
 /// `GET /v1/messages` — metadata page of one folder, plus per-folder counts.
 ///
-/// Listing is folder-scoped, not direction-scoped: the send pipeline stores what
-/// it accepts in `inbox` too, so a client sees every message it can move or
-/// delete from the same route.
+/// Listing is folder-scoped: the send pipeline files accepted mail in `sent`
+/// and received/alias/catch-all mail in `inbox`, so each folder lists exactly
+/// the messages a client can move or delete from it.
 pub async fn list_messages(
     State(state): State<AppState>,
     Extension(context): Extension<ApiKeyContext>,

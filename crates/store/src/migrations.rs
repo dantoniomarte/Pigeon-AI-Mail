@@ -167,6 +167,15 @@ use crate::error::Result;
 /// domain**, and a retry must not re-deliver to a domain that already accepted the
 /// message. The column is the per-job record that makes "only retry what failed"
 /// possible (see [`crate::Storage::queue_mark_domains_delivered`]).
+///
+/// `0018` backfills the folder of already-stored outbound mail: every build up to
+/// `0017` let the `messages.folder` column default apply, so an account's own
+/// sent copies were filed in the inbox. The insert now derives the folder from
+/// `direction`, and this statement repairs the rows written before that fix —
+/// otherwise every existing deployment keeps a sent folder that stays empty while
+/// its outbox piles up in the inbox. Only `out`/`inbox` rows move: `delivered_for`
+/// copies are `in`, and a message the user already moved elsewhere is their
+/// decision to keep.
 pub const MIGRATIONS: &[&str] = &[
     // ---------------------------------------------------------------- 0001
     r#"
@@ -641,6 +650,23 @@ CREATE TABLE IF NOT EXISTS pgp_peer_keys (
 -- row. A domain is recorded once it reaches a **terminal** verdict (accepted,
 -- bounced or locally refused); only a deferral leaves it outstanding.
 ALTER TABLE queue ADD COLUMN delivered_domains TEXT NULL;
+"#,
+    // ---------------------------------------------------------------- 0018
+    r#"
+-- Outbound mail was stored in the inbox: the insert never named a folder, so the
+-- column default ('inbox') applied to every row, sent copies included. The write
+-- path now derives the folder from `direction`; this backfill repairs the rows
+-- that predate it so an upgraded deployment's sent folder is not empty while its
+-- outbox sits in the inbox.
+--
+-- Narrow on purpose. `direction = 'out'` is the only thing that can be "sent",
+-- and `folder = 'inbox'` keeps a user's own move intact (a sent copy they filed
+-- in spam or trash stays where they put it). Inbound rows are untouched: alias
+-- and catch-all copies are received mail and belong in the inbox.
+UPDATE messages
+   SET folder = 'sent'
+ WHERE direction = 'out'
+   AND folder = 'inbox';
 "#,
 ];
 
