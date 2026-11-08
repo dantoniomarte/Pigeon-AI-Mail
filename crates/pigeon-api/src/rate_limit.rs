@@ -20,6 +20,15 @@ use crate::time::now_unix;
 pub const SUSTAINED_RPS: u32 = 10;
 /// Burst allowance on top of the sustained rate.
 pub const BURST: u32 = 50;
+
+/// Sustained requests per second for the **unauthenticated** WKD endpoints.
+///
+/// Tighter than the keyed API limit because there is no credential to throttle:
+/// the bucket is per source address, and a key directory is a cheap read that a
+/// stranger should not be able to use to enumerate an instance at speed.
+pub const WKD_RATE_RPS: u32 = 5;
+/// Burst capacity of a WKD bucket (a full client sync is a handful of lookups).
+pub const WKD_RATE_BURST: u32 = 20;
 /// Buckets idle for longer than this are dropped when the map is pruned.
 const IDLE_EVICTION: Duration = Duration::from_secs(600);
 /// Above this many buckets, the next check prunes idle entries.
@@ -106,6 +115,32 @@ impl RateLimiter {
     }
 }
 
+impl RateLimiter {
+    /// Limiter tuned for the unauthenticated WKD surface.
+    pub fn for_wkd() -> Self {
+        Self::new(WKD_RATE_RPS, WKD_RATE_BURST)
+    }
+}
+
+/// Bucket key for an unauthenticated caller identified only by address.
+///
+/// IPv4 keeps its exact value (no collisions at all); IPv6 keeps 63 bits of its
+/// address, which is enough for an abuse guard. The port is deliberately ignored:
+/// a client must not be able to refresh its budget by opening a new connection.
+pub fn client_bucket(ip: std::net::IpAddr) -> i64 {
+    match ip {
+        std::net::IpAddr::V4(v4) => i64::from(u32::from(v4)),
+        std::net::IpAddr::V6(v6) => {
+            let octets = v6.octets();
+            let mut folded: u64 = 0;
+            for (index, byte) in octets.iter().enumerate() {
+                folded ^= u64::from(*byte) << ((index % 8) * 8);
+            }
+            (folded & 0x7fff_ffff_ffff_ffff) as i64
+        }
+    }
+}
+
 impl Default for RateLimiter {
     fn default() -> Self {
         Self::with_defaults()
@@ -115,6 +150,37 @@ impl Default for RateLimiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wkd_buckets_are_per_address_and_ignore_the_port() {
+        use std::net::{IpAddr, SocketAddr};
+
+        let first = SocketAddr::from(([203, 0, 113, 7], 4242));
+        let same_host_other_port = SocketAddr::from(([203, 0, 113, 7], 9999));
+        let other = SocketAddr::from(([203, 0, 113, 8], 4242));
+        assert_eq!(
+            client_bucket(first.ip()),
+            client_bucket(same_host_other_port.ip()),
+            "a new source port must not refresh the budget"
+        );
+        assert_ne!(client_bucket(first.ip()), client_bucket(other.ip()));
+        assert_ne!(client_bucket(IpAddr::from([0, 0, 0, 0])), -1);
+
+        let limiter = RateLimiter::for_wkd();
+        assert_eq!(WKD_RATE_RPS, 5);
+        // The first burst passes, the next request is refused with a retry hint.
+        for _ in 0..WKD_RATE_BURST {
+            assert!(limiter.check(client_bucket(first.ip())).is_ok());
+        }
+        let retry = limiter
+            .check(client_bucket(first.ip()))
+            .expect_err("the bucket is empty");
+        assert!(retry >= 1, "the retry hint is at least a second");
+        assert!(
+            limiter.check(client_bucket(other.ip())).is_ok(),
+            "another address has its own bucket"
+        );
+    }
 
     #[test]
     fn a_full_burst_passes_then_the_bucket_is_empty() {

@@ -10,7 +10,7 @@ Proton's model (from their official documentation, proton.me):
 >
 > "Subject lines in Proton Mail messages are not end-to-end encrypted to remain compliant with standards" (in OpenPGP the subject is part of the header, not the encrypted payload).
 
-Pigeon implements the same three layers:
+Pigeon implements the same three layers. All three are **implemented**; where something is partial or a deliberate v1 limit, this page says so in plain words.
 
 ## Layer 1 — Zero-access storage (always on, no config)
 
@@ -23,6 +23,8 @@ Every message that lands in a Pigeon mailbox (body + attachments) is encrypted *
 
 This layer is **not configurable off**. A mail server that stores plaintext is a different product.
 
+Code: `crates/pigeon-crypto/src/seal.rs` (envelope + wrapping, domain-separated AEAD), `crates/store` (sealed bodies and the AAD binding that stops blob transplant).
+
 ## Layer 2 — In transit (default TLS)
 
 | Path | Default |
@@ -32,26 +34,107 @@ This layer is **not configurable off**. A mail server that stores plaintext is a
 | Outbound SMTP | **STARTTLS required**; per-domain `strict` mode (certificate pinning) available; plaintext only via explicit per-domain override |
 | Pigeon↔Pigeon | STARTTLS **and** payload E2E (layer 3) — transport is only belt, not suspenders |
 
-## Layer 3 — End-to-end (automatic when the other side has a key)
+**Outbound delivery is routed per recipient domain.** MX records belong to the *recipient's* domain, so a message with recipients on several domains is delivered with one SMTP transaction per domain, each carrying only that domain's recipients and the same `MAIL FROM`. A relay (`PIGEON_SMTP_OUT_ADDR`) replaces MX routing entirely and receives every recipient in one transaction.
 
-- **Pigeon → Pigeon**: automatic E2E. Each instance publishes a signing+encryption public key at `https://<domain>/.well-known/pigeon-pgp` (HTTP key directory). The sending Pigeon discovers, verifies (TOFU + key-pin after first contact), and seals the payload (OpenPGP, rfc4880) before queueing. The sending server, the network, and the receiving server's storage layer cannot read the body — only the recipient's account can.
-- **Pigeon → any domain publishing WKD/OpenPGP keys**: automatic OpenPGP sealing on outbound (same mechanism Proton uses to reach other providers' PGP users). Key discovery failures never block delivery — the message is sent TLS-only and the API response/webhook marks `e2e: tls_only`. An explicit per-domain plaintext override reports `e2e: plaintext_override` and is always logged.
-- **External → Pigeon**: TLS-protected in transit, sealed at rest on arrival (layer 1). If the external sender uses PGP with your published WKD key, it is E2E end to end.
+**A retry never duplicates a delivery.** One message with recipients on two domains can be accepted by one and deferred by the other. The queue row records every recipient domain that reached a *terminal* verdict (accepted, bounced, or refused locally), and the next attempt delivers only to the domains still outstanding. Once nothing is outstanding the job is settled. Without that per-domain record the retry would re-send the whole recipient list and put a second copy in the inbox that already had the message — the failure mode a transactional mail server must never have. A job whose domains were all delivered by an earlier attempt (the process died between the delivery and the queue update) settles without opening a connection at all.
+
+## Layer 3 — End-to-end (automatic, on by default)
+
+Every account has its own OpenPGP identity (RFC 4880/9580), generated on first need:
+
+- primary Ed25519 certification key,
+- Ed25519 **signing** subkey (proof of authorship; not used by the payload seal),
+- Curve25519 **transport-encryption** subkey — the key mail is sealed to.
+- No expiry: an expired subkey would silently turn every future send into `tls_only`. Rotation is an explicit operation (new subkey, re-published), never a timer.
+
+The transferable secret key is sealed under the master key in the same two-layer envelope as a DKIM key (AAD `pgp:{account_id}`), so the database alone never holds a usable private key.
+
+### Publication (this instance serves its users' keys)
+
+| Endpoint | Serves |
+|---|---|
+| `GET /.well-known/pigeon-pgp?email=<address>` | The armored certificate. The **Pigeon-to-Pigeon contract**. |
+| `GET /.well-known/openpgpkey/<domain>/hu/<hash>` | The same certificate in binary, keyed by `z-base-32(SHA-1(lowercased local part))` — the advanced WKD path (draft-koch-openpgp-webkey-service). |
+
+Both answer **only for accounts of this instance**. A sender alias publishes nothing: it has several owners, so "the key for `sales@example.com`" has no single answer, and inventing one would hand the mail to one arbitrary person. A wrong hash and a foreign domain both answer `404`, and an address on a domain this instance does not serve is indistinguishable from a nonexistent address on one it does — the directory is not an enumeration oracle.
+
+Both endpoints are unauthenticated and therefore **rate limited per source address** (5 req/s sustained, bounded burst, `429` with `Retry-After`). A key directory is meant to be read; it is not meant to be scraped at whatever rate a stranger picks.
+
+Keys are created **lazily** (first publication request or first sealed send) rather than at account creation: key generation does not belong in every account-creation path (keygen, invitations, organization members), and no backfill migration is needed. Consequence: an address that never sent and was never asked for may answer `404` once, then `200`.
+
+### Discovery (outbound)
+
+Before a message is queued, the send pipeline tries, for every recipient that is **not** a local account:
+
+1. `https://<recipient-domain>/.well-known/pigeon-pgp?email=<address>`
+2. `https://openpgpkey.<recipient-domain>/.well-known/openpgpkey/<domain>/hu/<hash>`
+3. `https://<recipient-domain>/.well-known/openpgpkey/<domain>/hu/<hash>`
+
+Only HTTPS is fetched, with real certificate verification (`webpki-roots`). A discovered certificate must carry a user id **equal** to the address it was fetched for and a usable encryption subkey; anything else is treated as "no key".
+
+**Trust on first use, never silent rotation.** The first key seen for an address is pinned. If the endpoint later serves a different key, the mismatch is logged and recorded (`mismatch:<fingerprint>`) and the **pinned** key keeps being used — an attacker who takes over a foreign key directory must not become the recipient key for mail already in flight. While the pin exists, an unreachable endpoint still results in sealed mail.
+
+**Discovery failures never block delivery.** Any failure — DNS, TLS, timeout, HTML instead of a key, unusable certificate — leaves the address without a key and the message is sent `tls_only`, exactly as before layer 3 existed.
+
+Every fetch is bounded by a **10-second wall-clock deadline for the whole request** (resolve, connect, handshake, read), not a per-read timeout: a peer that answers one byte every few hundred milliseconds would otherwise keep a lookup alive indefinitely, and discovery runs inside the send request. A hostile or broken directory can make a send slower by seconds; it can never make it hang.
+
+A published certificate is accepted only when its user id is **equal** to the address it was fetched for (case-insensitively, display name stripped) and it carries a usable encryption subkey. A certificate for `evil-carol@example.org` merely *contains* `carol@example.org`, so containment would hand the message to a stranger.
+
+### Key rotation and the pin (recovery from a lockout)
+
+Trust on first use is rigid by design, and rigidity has a cost that an operator has to know about:
+
+- **What a lockout looks like.** A peer rotates its OpenPGP key. This server still has the old fingerprint pinned, so outbound mail to that address keeps being sealed to the **old** key, the API keeps reporting `e2e: sealed`, and the recipient cannot open the message — their client says the message is not addressed to any of their keys. Delivery itself succeeds, which is why nothing bounces and nothing else complains.
+- **How to confirm it.** Two signals point at exactly this: a `WARN` log line from discovery (`the published key changed: keeping the pinned key and NOT rotating`) naming both fingerprints, and the stored pin itself — `pin_status` reads `mismatch:<fingerprint served>` while `fingerprint` (the one in use) is the old value. If the recipient reports they rotated their key, the fingerprints will not match.
+- **How to fix it.** `pigeon unpin-peer-key <address>` deletes the pin row (audit action `pgp.unpin`, written even when there was nothing to delete). The next lookup runs trust-on-first-use again and pins whatever the directory serves then.
+- **The tradeoff, stated plainly.** Clearing a pin is a **trust reset, not a rotation**: it throws away the evidence that the key changed and accepts the next one on first contact — the same risk the very first contact carried. Run it only after verifying the new fingerprint with the recipient over a channel that is not that key directory (a phone call, a signed message, a fingerprint pasted into your ticketing system). An attacker who controls a foreign key directory *and* convinces you to unpin is back in business; the pin is what stops them without that second step.
+
+### Sealing
+
+- If **every** recipient is external and has a discovered key → the MIME **body part** (RFC 3156: headers and body of the body part) is OpenPGP-sealed to all recipient keys **plus the sending account's own key**, and the message becomes `multipart/encrypted; protocol="application/pgp-encrypted"`.
+- Including the sender's own key is what keeps the `sent` copy readable for the account that sent it. Without it, turning E2E on would make your own sent mail unreadable.
+- The sending account therefore creates/looks up its own key at send time; that is the first-use path for accounts that never published.
+- If **any** recipient has no key → `tls_only` for the **whole** message and the API says so. v1 is all-or-nothing: there is no per-recipient copy, and claiming `sealed` on a partially sealed message would be a lie.
+- If **every** recipient is a local account of this instance → `tls_only`. The message never leaves the deployment, layer 1 already protects it at rest, and sealing it would only make it unreadable in the webmail (the operator holds both keys anyway). **Sealing applies to messages leaving the instance.**
+- A seal that fails (broken key, unexpected crypto error) downgrades to `tls_only` and the send proceeds. Encryption never blocks delivery.
+
+### Reported honestly
+
+| `e2e` | Meaning |
+|---|---|
+| `sealed` | OpenPGP to every recipient's published key (plus the sender's own). |
+| `tls_only` | Transport TLS only: no key discovered, or the message stays inside this instance. |
+| `plaintext_override` | An operator explicitly exempted a recipient domain (`PIGEON_E2E_PLAINTEXT_DOMAINS`); always logged. |
+
+The value is stored on the email row and returned by `POST /v1/emails`, `GET /v1/emails/{id}`, the listings and the webhooks — one value, never re-derived, so the report cannot drift from what was sent.
+
+Inbound mail from a foreign sender is recorded as `tls_only`: the server received TLS-or-clear bytes and sealed them at rest (layer 1). If the sender used our published WKD key, the payload *is* encrypted, but the server cannot distinguish that from any other ciphertext body, so it does not claim it.
+
+### Storage of sealed mail
+
+An incoming sealed message is stored as it arrived: the PGP/MIME envelope inside layer 1. Only the recipient's account key opens the payload — the server does not decrypt it, which is what makes the guarantee real. Reading such a message requires a PGP-capable client and the account's exported key; automatic in-webmail decryption is a later feature, and the operator is in the trust path either way (they hold the account key envelope and the master key).
 
 ## Honest limits (same as Proton's)
 
 1. **Subject lines and headers are not payload-encrypted** in the general case (SMTP/PGP interop: the subject is part of the header). Header privacy is limited to what TLS/transport provides. This is exactly Proton's documented subject-line caveat.
 2. **Inbound SMTP from arbitrary senders** reaches the server in transport-cleartext-or-TLS; the server must parse it before sealing. Pigeon cannot retroactively E2E-encrypt what a non-encrypting sender produced — it seals it at rest the moment it lands.
 3. **The instance operator is in the trust path** for inbound mail and for accounts (they can reset accounts, like Proton's recovery flows). Self-hosting moves that trust from a corporation to the operator.
-4. **Password-protected E2E for key-less external recipients** (Proton's password-emails feature) is planned, not in v1 (see ROADMAP).
+4. **All-or-nothing sealing** per message: mixed recipient lists degrade to `tls_only` instead of per-recipient copies.
+5. **Sender aliases have no key** (several owners, one address), so mail *to* an alias is `tls_only`.
+6. **Password-protected E2E for key-less external recipients** (Proton's password-emails feature) is not implemented (see ROADMAP).
 
 ## Key management
 
-- Install generates: server master key (32B), per-account signing key (Ed25519/OpenPGP), per-account encryption subkey.
-- WKD publishing is automatic for every managed address.
-- Key rotation: new subkey, rewrap content keys lazily on access; old keys retained until rewrap completes.
-- Export/import of account keys via CLI + API (owner can leave with their keys).
+- Install generates: server master key (32B). `pigeon keygen` also creates the bootstrap account's OpenPGP identity and prints its fingerprint.
+- Per-account OpenPGP certificate: Ed25519 primary + signing subkey + Curve25519 encryption subkey, generated on first need, private half sealed under the master key (AAD `pgp:{account_id}`).
+- WKD publishing is automatic for every account of this instance.
+- Discovery pins are stored per address; mismatches are surfaced, never auto-rotated. Recovery is the operator command `pigeon unpin-peer-key <address>` (audited), described above.
+- Concurrent first uses of an account key converge on **one** identity: the insert is create-only, so two simultaneous requests cannot leave the published certificate and the stored secret key describing different keys.
+- Key rotation: new subkey, re-publish; old keys retained. Not yet automated (rotating an *account* key is an explicit `PUT`-style operation on the key row, and a remote *peer* rotation needs the unpin above).
+- Export/import of account keys via CLI + API (owner can leave with their keys) — planned, see ROADMAP.
 
 ## What an admin must never do
 
 Never place the master key file on network-shared storage with world-readable permissions, never commit it anywhere, never bake it into images. The installer and `/healthz` surface key-file permission checks to catch misconfiguration early.
+
+Never put a domain in `PIGEON_E2E_PLAINTEXT_DOMAINS` "just in case": that list is the only way to make Pigeon lie about its own protection, every use is logged, and the API reports `plaintext_override` for those messages forever.

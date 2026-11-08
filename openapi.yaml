@@ -20,7 +20,10 @@ info:
     suppressions, account admin, sender-alias administration, and multi-tenant administration (organizations,
     members, invitations, catch-all routing).
 
-    Errors are RFC 7807 `application/problem+json`. Rate limits (per key): 10 req/s sustained, burst 50;
+    Errors are RFC 7807 `application/problem+json`. The WKD key-directory endpoints (`/.well-known/pigeon-pgp`
+    and `/.well-known/openpgpkey/...`) are unauthenticated and rate limited per source address: 5 req/s
+    sustained with a bounded burst, `429` with `Retry-After` beyond it.
+    Rate limits (per key): 10 req/s sustained, burst 50;
     daily send quota per account (default 50,000). Responses carry X-RateLimit-Limit / X-RateLimit-Remaining
     / X-RateLimit-Reset; 429 carries Retry-After. Problem types: rate-limited, quota-exceeded, idempotent-replay,
     not-cancellable, validation, unauthorized, forbidden, from-not-allowed, not-found, conflict, last-owner,
@@ -44,6 +47,83 @@ tags:
 - name: aliases
 - name: system
 paths:
+  /.well-known/pigeon-pgp:
+    get:
+      tags:
+      - system
+      security: []
+      summary: Publish the OpenPGP key of a local address (WKD simple endpoint)
+      description: 'The Pigeon-to-Pigeon key directory: any instance (or PGP client) can fetch the
+        certificate it must seal mail to for `email`.
+
+        Answers only for accounts of this instance. A sender alias has several owners, so it publishes
+        nothing. The key is created on the first request for an existing account that never needed one
+        yet, so an address may answer 404 once and 200 afterwards.
+
+        Discovery failures on the sending side never block delivery: the message goes out `tls_only`.
+
+        '
+      operationId: pigeonWkdKey
+      parameters:
+      - name: email
+        in: query
+        required: true
+        schema:
+          type: string
+          format: email
+      responses:
+        '200':
+          description: Armored OpenPGP certificate
+          content:
+            application/pgp-keys:
+              schema:
+                type: string
+        '404':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+      x-rate-limit: 'per source address, unauthenticated: 5 req/s sustained with a bounded burst (Retry-After on 429)'
+  /.well-known/openpgpkey/{domain}/hu/{hash}:
+    get:
+      tags:
+      - system
+      security: []
+      summary: Publish a local key under its advanced-WKD hash (draft-koch-openpgp-webkey-service)
+      description: 'The same certificate as the simple endpoint, in binary, keyed by
+        z-base-32(SHA-1(lowercased local part)) for a domain this instance serves.
+
+        A wrong hash and a foreign domain both answer 404, so the endpoint cannot be used to enumerate
+        addresses of other domains.
+
+        '
+      operationId: advancedWkdKey
+      parameters:
+      - name: domain
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: hash
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: ^[ybndrfg8ejkmcpqxot1uwisza345h769]{1,64}$
+      responses:
+        '200':
+          description: Binary OpenPGP certificate
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '404':
+          $ref: '#/components/responses/Problem'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+      x-rate-limit: 'shared with the simple endpoint: per source address, unauthenticated'
   /healthz:
     get:
       tags:
@@ -2597,6 +2677,29 @@ components:
         content_id:
           type: string
           description: inline reference as cid:content_id
+    E2e:
+      type: string
+      description: 'Payload protection actually in force (docs/e2ee-model.md layer 3).
+
+        * `sealed`: the MIME body is OpenPGP-sealed (RFC 4880) to the discovered key of every recipient,
+        plus the sending account''s own key so the sent copy stays readable. The sending server, the
+        network and the receiving server''s storage cannot read the body.
+
+        * `tls_only`: transport TLS only. Either a recipient published no discoverable key, or every
+        recipient is a local account of this instance (delivery never leaves, so layer 1 at-rest
+        sealing is what applies).
+
+        * `plaintext_override`: an operator explicitly exempted a recipient domain
+        (`PIGEON_E2E_PLAINTEXT_DOMAINS`); always logged, never a default.
+
+        Headers, including `Subject`, stay in the clear in every case: SMTP routing needs them
+        (Proton''s documented subject-line caveat). Discovery failures never block delivery.
+
+        '
+      enum:
+      - sealed
+      - tls_only
+      - plaintext_override
     SendAccepted:
       type: object
       additionalProperties: false
@@ -2613,11 +2716,7 @@ components:
           - queued
           - scheduled
         e2e:
-          type: string
-          enum:
-          - sealed
-          - tls_only
-          - plaintext_override
+          $ref: '#/components/schemas/E2e'
     BatchResults:
       type: object
       additionalProperties: false
@@ -2692,11 +2791,7 @@ components:
           type: boolean
           description: true when created by a sandbox key
         e2e:
-          type: string
-          enum:
-          - sealed
-          - tls_only
-          - plaintext_override
+          $ref: '#/components/schemas/E2e'
         mx:
           type: object
           properties:

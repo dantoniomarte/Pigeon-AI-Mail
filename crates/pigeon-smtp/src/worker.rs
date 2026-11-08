@@ -25,6 +25,24 @@
 //! listing needs a `status = 'bounced'` terminal state in `store` (tracked in
 //! `docs/ROADMAP.md`).
 //!
+//! # Delivery is per recipient domain, and retries never duplicate a delivery
+//!
+//! [`crate::client::OutboundSmtpClient::deliver`] opens one SMTP transaction per
+//! recipient domain, because MX records belong to the recipient's domain (issue
+//! #70). The queue still holds **one row per message**, so the worker sees the
+//! aggregate verdict: a message whose recipients span `example.org` (accepted)
+//! and `example.net` (deferred) stays queued, and a `5xx` suppresses only the
+//! addresses that actually bounced — never the whole recipient list.
+//!
+//! The dangerous half of that shape is the **retry**. Re-sending the whole message
+//! would deliver a second copy to the domain that already accepted it, so every
+//! domain that reached a terminal verdict in an attempt is recorded on the queue
+//! row ([`store::Storage::queue_mark_domains_delivered`]) and the next attempt
+//! filters them out before calling the client. A domain is terminal when it
+//! answered `2xx`, `5xx` or a local refusal; only a deferral keeps it outstanding.
+//! Once nothing is outstanding the job is settled, and a job whose every domain is
+//! already delivered is completed without opening a connection at all.
+//!
 //! # DKIM keys
 //!
 //! Signing keys are **per sending domain**, so the worker looks one up for every
@@ -66,7 +84,7 @@ use pigeon_crypto::MasterKey;
 use pigeon_dkim::DkimKeyPair;
 use store::{ClaimedJob, SqliteStorage, Storage};
 
-use crate::client::{DeliveryStatus, OutboundSmtpClient};
+use crate::client::{DeliveryResult, DeliveryStatus, OutboundSmtpClient};
 use crate::error::{Result, SmtpError};
 use crate::server::parse_message;
 
@@ -304,9 +322,37 @@ impl QueueWorker {
             }
         };
 
+        // Retry safety: an earlier attempt may already have delivered to some of
+        // these domains. Delivering to them again is duplicate mail, so they are
+        // filtered out before the client ever opens a connection.
+        let outstanding: Vec<EmailAddress> = prepared
+            .recipients
+            .iter()
+            .filter(|recipient| {
+                !job.delivered_domains
+                    .iter()
+                    .any(|delivered| delivered.eq_ignore_ascii_case(recipient.domain()))
+            })
+            .cloned()
+            .collect();
+        if outstanding.is_empty() {
+            tracing::info!(
+                message_id = job.message_id,
+                delivered = ?job.delivered_domains,
+                "every recipient domain was already delivered: settling without a connection"
+            );
+            self.settle_status(&prepared, "sent");
+            self.record_event(
+                job.message_id,
+                "email.sent",
+                "every recipient domain was delivered by an earlier attempt",
+            );
+            return self.complete(&job, "already delivered");
+        }
+
         let result = self
             .client
-            .deliver(&prepared.from, &prepared.recipients, &prepared.mime)
+            .deliver(&prepared.from, &outstanding, &prepared.mime)
             .await;
 
         let result = match result {
@@ -319,6 +365,11 @@ impl QueueWorker {
                 return self.fail(&job, &reason);
             }
         };
+
+        // Record what this attempt finished, *before* deciding what to do next: a
+        // crash right after `queue_fail` must not lose the fact that some domains
+        // already received the message.
+        self.record_delivered_domains(&job, &result);
 
         let detail = format!(
             "mx={} code={} {}",
@@ -341,7 +392,9 @@ impl QueueWorker {
                 tracing::warn!(message_id = job.message_id, %detail, "delivery bounced");
                 self.record_event(job.message_id, "email.bounced", &detail);
                 self.settle_status(&prepared, "bounced");
-                self.suppress(&prepared, &detail);
+                // Only the domains that answered `5xx`: another recipient domain
+                // of the same message may have accepted it.
+                self.suppress(&prepared, &result, &detail);
                 self.complete(&job, "bounced")
             }
             DeliveryStatus::Failed => {
@@ -350,6 +403,39 @@ impl QueueWorker {
                 self.settle_status(&prepared, "failed");
                 self.complete(&job, "local failure")
             }
+        }
+    }
+
+    /// Persist the recipient domains this attempt finished for good.
+    ///
+    /// Only domains with a **terminal** verdict are recorded: `Deferred` means the
+    /// domain is still owed the message, so it must stay outstanding. A relay
+    /// delivery reports an empty domain name and is skipped by the store, because a
+    /// smarthost is not domain-scoped — recording it would make the retry believe
+    /// there is nothing left to send.
+    fn record_delivered_domains(&self, job: &ClaimedJob, result: &DeliveryResult) {
+        let domains: Vec<String> = result
+            .groups
+            .iter()
+            .filter(|group| group.result.status != DeliveryStatus::Deferred)
+            .map(|group| group.domain.clone())
+            .filter(|domain| !domain.is_empty())
+            .collect();
+        if domains.is_empty() {
+            return;
+        }
+        if let Err(error) = self
+            .store
+            .queue_mark_domains_delivered(&job.claim_token, &domains)
+        {
+            // Losing this write is not fatal for *this* attempt, but it is exactly
+            // what causes duplicate mail on the next one, so it is an error line.
+            tracing::error!(
+                %error,
+                message_id = job.message_id,
+                domains = ?domains,
+                "could not record the delivered domains; a retry may duplicate them"
+            );
         }
     }
 
@@ -379,10 +465,17 @@ impl QueueWorker {
     ///
     /// Suppression is scoped to the sending account (the message owner), not to
     /// the domain: one account's bounce must not silence another account's mail.
-    fn suppress(&self, prepared: &Prepared, detail: &str) {
+    /// Recipients are taken from the domains the `5xx` actually came from, so a
+    /// single bounced address never suppresses a sibling recipient that was
+    /// delivered.
+    fn suppress(&self, prepared: &Prepared, result: &DeliveryResult, detail: &str) {
+        let bounced = result.recipients_with(DeliveryStatus::Bounced);
+        if bounced.is_empty() {
+            return;
+        }
         if let Err(error) = self.db.insert_suppressions(
             prepared.account_id,
-            &prepared.recipients,
+            &bounced,
             &format!("hard bounce: {detail}"),
             Some("smtp"),
         ) {
@@ -426,6 +519,9 @@ impl std::fmt::Debug for QueueWorker {
 }
 
 /// A message ready to be put on the wire.
+///
+/// `recipients` is the **whole** envelope; [`QueueWorker::process`] filters out the
+/// domains an earlier attempt already delivered to before handing it to the client.
 struct Prepared {
     account_id: i64,
     public_id: String,

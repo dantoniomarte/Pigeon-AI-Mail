@@ -41,7 +41,9 @@ pub mod error;
 pub mod server;
 pub mod worker;
 
-pub use client::{DeliveryConfig, DeliveryResult, DeliveryStatus, OutboundSmtpClient};
+pub use client::{
+    DeliveryConfig, DeliveryGroup, DeliveryResult, DeliveryStatus, OutboundSmtpClient,
+};
 pub use dns::{HickoryMxSource, MxRecord, MxResolver, MxSource, DEFAULT_SMTP_PORT};
 pub use error::{Result, SmtpError};
 pub use server::{

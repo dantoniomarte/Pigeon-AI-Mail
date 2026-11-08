@@ -6,6 +6,7 @@
 //! * message body — `account:{account_id}:message:{message_id}`
 //! * attachment — `account:{account_id}:message:{message_id}:attachment:{ordinal}:{filename}`
 //! * domain DKIM private key — `dkim:{domain}`
+//! * account OpenPGP private key — `pgp:{account_id}`
 //! * TOTP secret — `totp:{account_id}`
 //!
 //! The body form is the one `docs/e2ee-model.md` and the `store` crate document
@@ -42,6 +43,16 @@ pub fn attachment(account_id: i64, message_id: i64, ordinal: usize, filename: &s
 /// resolve a key by domain and selector only.
 pub fn dkim_key(domain: &str) -> String {
     format!("dkim:{domain}")
+}
+
+/// AAD for an account's sealed OpenPGP private key.
+///
+/// Per **account**, not per domain: unlike DKIM (one identity per sending
+/// domain), an OpenPGP certificate is a mailbox identity, so a blob sealed for
+/// `account:1` must not open while claiming `account:2` — that would hand one
+/// person's secret key to another account's row.
+pub fn pgp_key(account_id: i64) -> String {
+    format!("pgp:{account_id}")
 }
 
 /// AAD for an account's wrapped TOTP secret.
@@ -99,6 +110,18 @@ mod tests {
             dkim_key("a.example"),
             dkim_key("b.example"),
             "two domains must never share a DKIM key binding"
+        );
+    }
+
+    #[test]
+    fn pgp_key_aad_is_pinned_per_account() {
+        assert_eq!(pgp_key(1), "pgp:1");
+        assert_ne!(pgp_key(1), pgp_key(2));
+        assert_ne!(pgp_key(1), pgp_key(11));
+        assert_ne!(
+            pgp_key(1),
+            dkim_key("1"),
+            "the PGP and DKIM domains never collide"
         );
     }
 

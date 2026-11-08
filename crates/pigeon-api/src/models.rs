@@ -61,9 +61,72 @@ pub const HEADER_DENYLIST: [&str; 13] = [
     "authentication-results",
 ];
 
-/// `e2e` reported until key discovery and OpenPGP sealing land: transport TLS,
-/// no recipient key discovered. Matches the `SendAccepted.e2e` enum.
-pub const E2E_PLACEHOLDER: &str = "tls_only";
+/// Payload protection actually in force for one message.
+///
+/// This is the `e2e` field of `SendAccepted`, `EmailView` and the webhook payloads,
+/// and `docs/e2ee-model.md` defines what each value promises:
+///
+/// * [`E2e::Sealed`] — the body is OpenPGP-sealed to **every** recipient's
+///   discovered key (plus the sender's own, so the sent copy stays readable). The
+///   sending server, the network and the receiving server's storage cannot read
+///   it.
+/// * [`E2e::TlsOnly`] — transport TLS, no end-to-end payload seal: at least one
+///   recipient had no discoverable key, or delivery stays inside this instance.
+/// * [`E2e::PlaintextOverride`] — an operator explicitly opted a recipient domain
+///   out of E2E ([`crate::state::ApiConfig::plaintext_override_domains`]). Always
+///   logged, never a default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum E2e {
+    /// Sealed to every recipient.
+    Sealed,
+    /// Transport TLS only.
+    TlsOnly,
+    /// Explicit per-domain plaintext override.
+    PlaintextOverride,
+}
+
+impl E2e {
+    /// Canonical wire/storage spelling.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            E2e::Sealed => "sealed",
+            E2e::TlsOnly => "tls_only",
+            E2e::PlaintextOverride => "plaintext_override",
+        }
+    }
+
+    /// Parse a stored value, or `None` when it is not one of the three.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "sealed" => Some(E2e::Sealed),
+            "tls_only" => Some(E2e::TlsOnly),
+            "plaintext_override" => Some(E2e::PlaintextOverride),
+            _ => None,
+        }
+    }
+
+    /// Every value the contract allows.
+    pub const ALL: [E2e; 3] = [E2e::Sealed, E2e::TlsOnly, E2e::PlaintextOverride];
+}
+
+impl Default for E2e {
+    /// The safe default: no seal, no claim.
+    fn default() -> Self {
+        E2e::TlsOnly
+    }
+}
+
+impl Serialize for E2e {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl std::fmt::Display for E2e {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 /// A parsed `Name <addr@example.com>` mailbox.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2024,10 +2087,25 @@ mod tests {
     }
 
     #[test]
-    fn e2e_placeholder_is_valid_for_the_contract_enum() {
-        assert!(matches!(
-            E2E_PLACEHOLDER,
-            "sealed" | "tls_only" | "plaintext_override"
-        ));
+    fn every_e2e_value_round_trips_and_only_the_three_exist() {
+        assert_eq!(E2e::ALL.len(), 3);
+        for value in E2e::ALL {
+            assert_eq!(E2e::parse(value.as_str()), Some(value));
+            // The contract's enum is exactly these spellings; anything else is a
+            // stored value a client would reject.
+            assert!(matches!(
+                value.as_str(),
+                "sealed" | "tls_only" | "plaintext_override"
+            ));
+        }
+        assert_eq!(E2e::parse("pgp"), None);
+        assert_eq!(E2e::parse(""), None);
+        assert_eq!(
+            E2e::default(),
+            E2e::TlsOnly,
+            "the safe default claims nothing"
+        );
+        assert_eq!(serde_json::to_string(&E2e::Sealed).unwrap(), "\"sealed\"");
+        assert_eq!(E2e::PlaintextOverride.to_string(), "plaintext_override");
     }
 }

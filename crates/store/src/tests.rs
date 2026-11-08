@@ -3786,3 +3786,464 @@ fn deactivating_a_member_revokes_sessions_and_api_keys_but_keeps_the_row() {
         Err(StoreError::NotFound)
     ));
 }
+
+// ---------------------------------------------------------------------------
+// Layer-3 OpenPGP keys
+// ---------------------------------------------------------------------------
+
+/// Two accounts on one domain each get **their own** key row: unlike
+/// `dkim_keys` (domain-scoped), a mailbox identity is per account, so sealing
+/// "to an address" can never hand one person's mail to another.
+#[test]
+fn pgp_keys_are_per_account_and_resolve_by_address() {
+    let fixture = fixture();
+    let first = fixture
+        .storage
+        .create_account(&addr("carol@example.com"))
+        .expect("account");
+    let second = fixture
+        .storage
+        .create_account(&addr("dave@example.com"))
+        .expect("account");
+
+    fixture
+        .storage
+        .put_pgp_key(
+            first,
+            "-----BEGIN PGP PUBLIC KEY BLOCK-----\nA\n",
+            b"sealed-a",
+            "FPR-A",
+        )
+        .expect("put first");
+    fixture
+        .storage
+        .put_pgp_key(
+            second,
+            "-----BEGIN PGP PUBLIC KEY BLOCK-----\nB\n",
+            b"sealed-b",
+            "FPR-B",
+        )
+        .expect("put second");
+
+    let row = fixture
+        .storage
+        .get_pgp_key(first)
+        .expect("get")
+        .expect("row");
+    assert_eq!(row.account_id, first);
+    assert_eq!(row.fingerprint, "FPR-A");
+    assert_eq!(row.private_sealed, b"sealed-a");
+    assert!(
+        !row.created_at.is_empty(),
+        "the row records when it was made"
+    );
+
+    // The published lookup is by address, because that is what WKD asks with.
+    assert_eq!(
+        fixture
+            .storage
+            .get_pgp_public_by_email("carol@example.com")
+            .expect("lookup")
+            .expect("published"),
+        (
+            "-----BEGIN PGP PUBLIC KEY BLOCK-----\nA\n".to_string(),
+            "FPR-A".to_string()
+        )
+    );
+    assert_eq!(
+        fixture
+            .storage
+            .get_pgp_public_by_email("dave@example.com")
+            .expect("lookup")
+            .expect("published")
+            .1,
+        "FPR-B"
+    );
+
+    // An address that is not an account here publishes nothing at all — a sender
+    // alias has several owners and no identity of its own.
+    assert!(fixture
+        .storage
+        .get_pgp_public_by_email("nobody@example.com")
+        .expect("lookup")
+        .is_none());
+    assert!(fixture
+        .storage
+        .get_pgp_public_by_email("someone@elsewhere.example")
+        .expect("lookup")
+        .is_none());
+}
+
+#[test]
+fn putting_a_pgp_key_twice_rotates_the_single_row() {
+    let fixture = fixture();
+    let account = new_account(&fixture.storage);
+    fixture
+        .storage
+        .put_pgp_key(account, "old-public", b"old-sealed", "OLD-FPR")
+        .expect("first put");
+    fixture
+        .storage
+        .put_pgp_key(account, "new-public", b"new-sealed", "NEW-FPR")
+        .expect("rotation");
+
+    let row = fixture
+        .storage
+        .get_pgp_key(account)
+        .expect("get")
+        .expect("row");
+    assert_eq!(row.public_armored, "new-public");
+    assert_eq!(row.private_sealed, b"new-sealed");
+    assert_eq!(row.fingerprint, "NEW-FPR");
+}
+
+#[test]
+fn put_pgp_key_rejects_empty_material_and_unknown_accounts() {
+    let fixture = fixture();
+    let account = new_account(&fixture.storage);
+    assert!(matches!(
+        fixture.storage.put_pgp_key(account, "", b"sealed", "FPR"),
+        Err(StoreError::InvalidArgument(_))
+    ));
+    assert!(matches!(
+        fixture.storage.put_pgp_key(account, "public", b"", "FPR"),
+        Err(StoreError::InvalidArgument(_))
+    ));
+    assert!(matches!(
+        fixture
+            .storage
+            .put_pgp_key(account, "public", b"sealed", ""),
+        Err(StoreError::InvalidArgument(_))
+    ));
+    assert!(matches!(
+        fixture
+            .storage
+            .put_pgp_key(account + 99, "public", b"sealed", "FPR"),
+        Err(StoreError::NotFound)
+    ));
+}
+
+/// The pin never rotates: a later, different key is recorded as a mismatch and
+/// the originally trusted key keeps being used.
+#[test]
+fn a_peer_key_pin_is_never_silently_rotated() {
+    let fixture = fixture();
+    fixture
+        .storage
+        .pin_pgp_peer_key("carol@example.org", "FPR-1", "armored-1", "pigeon-pgp")
+        .expect("pin");
+    let pinned = fixture
+        .storage
+        .get_pgp_peer_key("carol@example.org")
+        .expect("get")
+        .expect("row");
+    assert_eq!(pinned.fingerprint, "FPR-1");
+    assert!(
+        pinned.pin_status.is_none(),
+        "a first pin has no verdict yet: it has not been re-checked"
+    );
+    assert!(pinned.last_checked_at.is_none());
+
+    // Re-seeing the same key records a confirmation, and the timestamp is a real
+    // timestamp rather than a smuggled verdict.
+    fixture
+        .storage
+        .pin_pgp_peer_key("carol@example.org", "FPR-1", "armored-1", "pigeon-pgp")
+        .expect("re-check");
+    let rechecked = fixture
+        .storage
+        .get_pgp_peer_key("carol@example.org")
+        .expect("get")
+        .expect("row");
+    assert_eq!(rechecked.pin_status.as_deref(), Some("match"));
+    let checked_at = rechecked.last_checked_at.clone().expect("checked at");
+    assert_eq!(
+        checked_at.matches(':').count(),
+        2,
+        "last_checked_at is an SQLite datetime (HH:MM:SS), not a verdict: {checked_at:?}"
+    );
+    assert!(
+        !checked_at.starts_with("match") && !checked_at.starts_with("mismatch"),
+        "the verdict belongs in pin_status: {checked_at:?}"
+    );
+
+    // A different key at the same address is reported, not adopted.
+    fixture
+        .storage
+        .pin_pgp_peer_key("carol@example.org", "FPR-2", "armored-2", "wkd-advanced")
+        .expect("mismatch");
+    let row = fixture
+        .storage
+        .get_pgp_peer_key("carol@example.org")
+        .expect("get")
+        .expect("row");
+    assert_eq!(row.fingerprint, "FPR-1", "the pin wins");
+    assert_eq!(row.public_armored, "armored-1");
+    assert_eq!(row.pin_status.as_deref(), Some("mismatch:FPR-2"));
+    assert_eq!(row.source, "pigeon-pgp", "the original source is kept");
+}
+
+/// The operator's recovery path: deleting the pin re-opens trust on first use.
+#[test]
+fn deleting_a_pin_reopens_first_use_and_refuses_a_rotated_key_only_once() {
+    let fixture = fixture();
+    fixture
+        .storage
+        .pin_pgp_peer_key("carol@example.org", "FPR-1", "armored-1", "pigeon-pgp")
+        .expect("pin");
+    fixture
+        .storage
+        .pin_pgp_peer_key("carol@example.org", "FPR-2", "armored-2", "pigeon-pgp")
+        .expect("mismatch");
+    assert_eq!(
+        fixture
+            .storage
+            .get_pgp_peer_key("carol@example.org")
+            .expect("get")
+            .expect("row")
+            .pin_status
+            .as_deref(),
+        Some("mismatch:FPR-2")
+    );
+
+    assert!(
+        fixture
+            .storage
+            .delete_pgp_peer_key("carol@example.org")
+            .expect("delete"),
+        "the pin existed"
+    );
+    assert!(fixture
+        .storage
+        .get_pgp_peer_key("carol@example.org")
+        .expect("get")
+        .is_none());
+
+    // Deleting again is a no-op that reports "nothing removed", so an operator can
+    // re-run the command safely.
+    assert!(!fixture
+        .storage
+        .delete_pgp_peer_key("carol@example.org")
+        .expect("second delete"));
+
+    // Clearing the pin lets the new key be adopted on the next contact, with a
+    // clean status: this is a trust reset, not a rotation.
+    fixture
+        .storage
+        .pin_pgp_peer_key("carol@example.org", "FPR-2", "armored-2", "pigeon-pgp")
+        .expect("re-pin");
+    let row = fixture
+        .storage
+        .get_pgp_peer_key("carol@example.org")
+        .expect("get")
+        .expect("row");
+    assert_eq!(row.fingerprint, "FPR-2");
+    assert!(row.pin_status.is_none());
+}
+
+/// Two concurrent first uses converge on one identity: the loser re-reads the
+/// winner's row instead of replacing it.
+#[test]
+fn insert_pgp_key_if_absent_is_the_race_free_first_use_primitive() {
+    let fixture = fixture();
+    let account = new_account(&fixture.storage);
+
+    assert!(
+        fixture
+            .storage
+            .insert_pgp_key_if_absent(account, "public-a", b"sealed-a", "FPR-A")
+            .expect("first insert"),
+        "the first key is stored"
+    );
+    assert!(
+        !fixture
+            .storage
+            .insert_pgp_key_if_absent(account, "public-b", b"sealed-b", "FPR-B")
+            .expect("second insert"),
+        "a second candidate must not overwrite an existing identity"
+    );
+    let row = fixture
+        .storage
+        .get_pgp_key(account)
+        .expect("get")
+        .expect("row");
+    assert_eq!(row.fingerprint, "FPR-A");
+    assert_eq!(row.public_armored, "public-a");
+
+    // Rotation is the *other* primitive and still replaces the row.
+    fixture
+        .storage
+        .put_pgp_key(account, "public-c", b"sealed-c", "FPR-C")
+        .expect("rotate");
+    assert_eq!(
+        fixture
+            .storage
+            .get_pgp_key(account)
+            .expect("get")
+            .expect("row")
+            .fingerprint,
+        "FPR-C"
+    );
+}
+
+/// `delivered_domains` records terminal per-domain verdicts so a retry can skip
+/// them, and it refuses to write to a claim this worker no longer owns.
+#[test]
+fn queue_delivered_domains_accumulate_and_are_claim_scoped() {
+    let fixture = fixture();
+    let account = new_account(&fixture.storage);
+    let message_id = fixture.storage.reserve_message_id().expect("reserve");
+    let key = generate_content_key();
+    fixture
+        .storage
+        .insert_message(
+            NewMessage {
+                account_id: account,
+                direction: Direction::Out,
+                from_addr: addr("owner@example.com"),
+                to_addrs: vec![addr("carol@example.org"), addr("dave@example.net")],
+                subject: "hi".to_string(),
+                sealed_body: seal_content(
+                    &key,
+                    b"body",
+                    message_aad(account, message_id).as_bytes(),
+                )
+                .expect("seal"),
+                idempotency_key: None,
+                delivered_for: None,
+            },
+            message_id,
+        )
+        .expect("insert");
+    fixture.storage.queue_enqueue(message_id, 0).expect("queue");
+
+    let job = fixture
+        .storage
+        .queue_claim("worker", 300)
+        .expect("claim")
+        .expect("job");
+    assert!(
+        job.delivered_domains.is_empty(),
+        "a first attempt has delivered to nothing"
+    );
+
+    // A smarthost delivery is not domain-scoped: an empty name must be ignored.
+    fixture
+        .storage
+        .queue_mark_domains_delivered(&job.claim_token, &["".to_string()])
+        .expect("empty is ignored");
+
+    fixture
+        .storage
+        .queue_mark_domains_delivered(&job.claim_token, &["Example.ORG".to_string()])
+        .expect("mark");
+    fixture
+        .storage
+        .queue_mark_domains_delivered(
+            &job.claim_token,
+            &["example.org".to_string(), "example.net".to_string()],
+        )
+        .expect("mark more");
+
+    fixture
+        .storage
+        .queue_fail(&job.claim_token, "example.net deferred", 0)
+        .expect("fail");
+    let retried = fixture
+        .storage
+        .queue_claim("worker", 300)
+        .expect("claim")
+        .expect("due again");
+    assert_eq!(
+        retried.delivered_domains,
+        vec!["example.org".to_string(), "example.net".to_string()],
+        "the domains survive the retry, lowercased and de-duplicated"
+    );
+
+    // A token that owns nothing is rejected instead of writing a stale row.
+    assert!(matches!(
+        fixture
+            .storage
+            .queue_mark_domains_delivered("not-a-live-token", &["example.org".to_string()]),
+        Err(StoreError::QueueClaim(_))
+    ));
+}
+
+#[test]
+fn peer_pins_are_per_address_and_reject_empty_material() {
+    let fixture = fixture();
+    assert!(fixture
+        .storage
+        .get_pgp_peer_key("carol@example.org")
+        .expect("get")
+        .is_none());
+    assert!(matches!(
+        fixture
+            .storage
+            .pin_pgp_peer_key("carol@example.org", "", "armored", "pigeon-pgp"),
+        Err(StoreError::InvalidArgument(_))
+    ));
+
+    fixture
+        .storage
+        .pin_pgp_peer_key("carol@example.org", "FPR-1", "armored-1", "pigeon-pgp")
+        .expect("pin one");
+    fixture
+        .storage
+        .pin_pgp_peer_key("dave@example.net", "FPR-2", "armored-2", "pigeon-pgp")
+        .expect("pin two");
+    assert_eq!(
+        fixture
+            .storage
+            .get_pgp_peer_key("dave@example.net")
+            .expect("get")
+            .expect("row")
+            .fingerprint,
+        "FPR-2"
+    );
+}
+
+/// The sealed private key roundtrips through the store's BLOB column byte for
+/// byte: this crate must never be the thing that mangles key material.
+#[test]
+fn a_sealed_private_key_roundtrips_through_the_database() {
+    let fixture = fixture();
+    let account = new_account(&fixture.storage);
+    let master = MasterKey::parse(&TEST_KEY).expect("master key");
+    let secret =
+        b"-----BEGIN PGP PRIVATE KEY BLOCK-----\nsecret\n-----END PGP PRIVATE KEY BLOCK-----\n";
+    let content_key = generate_content_key();
+    let sealed_body = seal_content(&content_key, secret, b"pgp:1").expect("seal");
+    let wrapped = master
+        .wrap_content_key(&content_key, b"pgp:1")
+        .expect("wrap");
+    let mut blob = Vec::new();
+    blob.extend_from_slice(&(wrapped.len() as u32).to_be_bytes());
+    blob.extend_from_slice(&wrapped);
+    blob.extend_from_slice(&sealed_body);
+
+    fixture
+        .storage
+        .put_pgp_key(account, "public-armored", &blob, "FPR")
+        .expect("put");
+    let stored = fixture
+        .storage
+        .get_pgp_key(account)
+        .expect("get")
+        .expect("row")
+        .private_sealed;
+    assert_eq!(stored, blob);
+
+    // And the envelope still opens under the same master key with the AAD the
+    // API layer uses.
+    let wrapped_len = u32::from_be_bytes(stored[..4].try_into().expect("length prefix")) as usize;
+    let opened_key = master
+        .unwrap_content_key(&stored[4..4 + wrapped_len], b"pgp:1")
+        .expect("unwrap");
+    let opened = open_content(&opened_key, &stored[4 + wrapped_len..], b"pgp:1").expect("open");
+    assert_eq!(opened, secret);
+    assert!(
+        open_content(&opened_key, &stored[4 + wrapped_len..], b"pgp:2").is_err(),
+        "the AAD binds the key to its account"
+    );
+}

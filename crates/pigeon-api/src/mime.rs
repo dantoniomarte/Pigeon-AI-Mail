@@ -15,6 +15,18 @@
 //! Header values are already validated (no CR/LF, addresses parsed) by
 //! [`crate::models::SendRequest::validate`], so this module never re-checks
 //! caller text.
+//!
+//! # Sealed messages (layer 3)
+//!
+//! [`build_encrypted`] renders the same envelope with the body replaced by an
+//! OpenPGP seal, in the shape RFC 3156 §4 defines: a `multipart/encrypted` with a
+//! `Version: 1` control part and an `application/octet-stream` part holding the
+//! armored message. The plaintext that gets sealed is [`body_part_bytes`] — the
+//! body part **with its own headers**, which is what RFC 3156 requires and what
+//! makes the message openable by any PGP-capable client.
+//!
+//! `From`, `To`, `Subject`, `Date` and `Message-ID` stay in the clear: SMTP routing
+//! needs them, and that is the same subject-line caveat Proton documents.
 
 use base64::Engine;
 
@@ -25,6 +37,101 @@ const CRLF: &str = "\r\n";
 
 /// Render `send` as a complete MIME message, CRLF-terminated and ready to seal.
 pub fn build(send: &ValidatedSend, message_id: &str, created_unix: i64) -> Vec<u8> {
+    let mut headers = envelope_headers(send, message_id, created_unix);
+    let (body_headers, body) = body_part(send);
+    headers.extend(body_headers);
+
+    let mut out = String::with_capacity(body.len() + 1024);
+    for (name, value) in headers {
+        out.push_str(&name);
+        out.push_str(": ");
+        out.push_str(&value);
+        out.push_str(CRLF);
+    }
+    out.push_str(CRLF);
+    out.push_str(&body);
+    out.into_bytes()
+}
+
+/// The body part on its own — headers **and** body — as the plaintext an OpenPGP
+/// seal covers (RFC 3156 §4: the encrypted entity is a MIME body part).
+pub fn body_part_bytes(send: &ValidatedSend) -> Vec<u8> {
+    let (headers, body) = body_part(send);
+    let mut out = String::with_capacity(body.len() + 512);
+    for (name, value) in headers {
+        out.push_str(&name);
+        out.push_str(": ");
+        out.push_str(&value);
+        out.push_str(CRLF);
+    }
+    out.push_str(CRLF);
+    out.push_str(&body);
+    out.into_bytes()
+}
+
+/// Render `send` with its body replaced by an OpenPGP seal (layer 3).
+///
+/// `armored` is the sealed payload from [`pigeon_crypto::seal_payload`]; the
+/// headers of the message stay exactly as [`build`] renders them, because the
+/// envelope must remain routable and readable.
+pub fn build_encrypted(
+    send: &ValidatedSend,
+    message_id: &str,
+    created_unix: i64,
+    armored: &str,
+) -> Vec<u8> {
+    let boundary = format!("pgp-{}", random_token());
+    let mut headers = envelope_headers(send, message_id, created_unix);
+    headers.push((
+        "Content-Type".to_string(),
+        format!(
+            "multipart/encrypted; protocol=\"application/pgp-encrypted\"; boundary=\"{boundary}\""
+        ),
+    ));
+
+    let mut out = String::with_capacity(armored.len() + 2048);
+    for (name, value) in headers {
+        out.push_str(&name);
+        out.push_str(": ");
+        out.push_str(&value);
+        out.push_str(CRLF);
+    }
+    out.push_str(CRLF);
+
+    // Part 1: the version control part, with an empty body (RFC 3156 §4).
+    out.push_str(&format!("--{boundary}{CRLF}"));
+    out.push_str("Content-Type: application/pgp-encrypted\r\n");
+    out.push_str("Content-Description: PGP/MIME version identification\r\n");
+    out.push_str(CRLF);
+    out.push_str(&format!("Version: 1{CRLF}"));
+    out.push_str(CRLF);
+
+    // Part 2: the armored OpenPGP message.
+    out.push_str(&format!("--{boundary}{CRLF}"));
+    out.push_str(&format!(
+        "Content-Type: application/octet-stream; name=\"encrypted.asc\"{CRLF}"
+    ));
+    out.push_str("Content-Description: OpenPGP encrypted message\r\n");
+    out.push_str(&format!(
+        "Content-Disposition: inline; filename=\"encrypted.asc\"{CRLF}"
+    ));
+    out.push_str(CRLF);
+    // The armor already ends with its own newline; normalize to CRLF so no bare
+    // LF reaches an intermediary that folds differently than we do.
+    for line in armored.replace("\r\n", "\n").lines() {
+        out.push_str(line);
+        out.push_str(CRLF);
+    }
+    out.push_str(&format!("--{boundary}--{CRLF}"));
+    out.into_bytes()
+}
+
+/// Caller-visible headers, independent of how the body is protected.
+fn envelope_headers(
+    send: &ValidatedSend,
+    message_id: &str,
+    created_unix: i64,
+) -> Vec<(String, String)> {
     let domain = send.from.address.domain();
     let mut headers: Vec<(String, String)> = Vec::new();
     headers.push(("From".to_string(), send.from.to_header()));
@@ -48,20 +155,7 @@ pub fn build(send: &ValidatedSend, message_id: &str, created_unix: i64) -> Vec<u
     for (name, value) in &send.headers {
         headers.push((name.clone(), value.clone()));
     }
-
-    let (body_headers, body) = body_part(send);
-    headers.extend(body_headers);
-
-    let mut out = String::with_capacity(body.len() + 1024);
-    for (name, value) in headers {
-        out.push_str(&name);
-        out.push_str(": ");
-        out.push_str(&value);
-        out.push_str(CRLF);
-    }
-    out.push_str(CRLF);
-    out.push_str(&body);
-    out.into_bytes()
+    headers
 }
 
 /// Headers and body of the message's `body` part(s), wrapped in
@@ -338,6 +432,55 @@ mod tests {
                 address: pigeon_core::EmailAddress::parse("dana@pigeonmail.dev").expect("address")
             }
         );
+    }
+
+    #[test]
+    fn the_sealed_body_is_the_body_part_with_its_own_headers() {
+        let mut json = base();
+        json["html"] = serde_json::json!("<p>Thanks!</p>");
+        let send = validated(json);
+        let inner = String::from_utf8(body_part_bytes(&send)).expect("utf8");
+        // RFC 3156 encrypts a MIME body part, headers included, and nothing of the
+        // envelope: the subject and the addresses stay outside the seal.
+        assert!(inner.starts_with("Content-Type: multipart/alternative; boundary="));
+        assert!(inner.contains("Content-Type: text/plain; charset=utf-8"));
+        assert!(!inner.contains("Subject:"));
+        assert!(!inner.contains("From:"));
+        assert!(!inner.contains("To:"));
+    }
+
+    #[test]
+    fn a_sealed_message_keeps_the_envelope_and_wraps_the_ciphertext() {
+        let send = validated(base());
+        let armor = "-----BEGIN PGP MESSAGE-----\n\nhQEMA123\n-----END PGP MESSAGE-----\n";
+        let mime =
+            String::from_utf8(build_encrypted(&send, "eml_1", 1_793_923_200, armor)).expect("utf8");
+
+        // The envelope is routing information and stays readable (Proton's
+        // documented subject-line caveat).
+        assert!(mime.contains("From: Dana <dana@pigeonmail.dev>\r\n"));
+        assert!(mime.contains("Subject: Invoice #2041 paid\r\n"));
+        assert!(mime.contains("Message-ID: <eml_1@pigeonmail.dev>\r\n"));
+        assert!(mime.contains("Date: Fri, 06 Nov 2026 00:00:00 +0000\r\n"));
+
+        // The body is an RFC 3156 multipart/encrypted with a version part and the
+        // armored payload, and no plaintext of the original body survives.
+        assert!(mime.contains(
+            "Content-Type: multipart/encrypted; protocol=\"application/pgp-encrypted\"; boundary=\"pgp-"
+        ));
+        assert!(mime.contains("Content-Type: application/pgp-encrypted"));
+        assert!(mime.contains("Version: 1\r\n"));
+        assert!(mime.contains("Content-Type: application/octet-stream; name=\"encrypted.asc\""));
+        assert!(mime.contains("-----BEGIN PGP MESSAGE-----"));
+        assert!(
+            !mime.contains("Thanks!"),
+            "the plaintext body must not appear: {mime}"
+        );
+        assert!(
+            !mime.replace("\r\n", "").contains('\n'),
+            "the armored block is normalized to CRLF: {mime}"
+        );
+        assert!(mime.trim_end().ends_with("--"));
     }
 
     #[test]

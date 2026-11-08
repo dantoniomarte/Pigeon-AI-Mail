@@ -99,13 +99,23 @@ impl DeliveryStatus {
 /// One delivery attempt's outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeliveryResult {
+    /// Verdict for the whole message: the aggregate over [`Self::groups`].
     pub status: DeliveryStatus,
-    /// Mail exchanger that was tried (or the relay host).
+    /// Mail exchanger that was tried (or the relay host). With several recipient
+    /// domains this is the distinct host list, comma-separated.
     pub mx_host: String,
     /// SMTP reply code; `421` when no peer answered at all.
     pub code: u16,
     /// Reply text or transport error, for the event log.
     pub message: String,
+    /// Per recipient domain detail, in the order the domains were tried.
+    ///
+    /// MX routing is per **recipient** domain, so one message can end with
+    /// several verdicts (`example.org` accepted, `example.net` deferred). The
+    /// queue, however, holds one row per message: [`Self::status`] is the
+    /// aggregate, and this list is what lets the worker attribute a bounce to the
+    /// recipients that actually bounced.
+    pub groups: Vec<DeliveryGroup>,
 }
 
 impl DeliveryResult {
@@ -120,8 +130,33 @@ impl DeliveryResult {
             mx_host: mx_host.into(),
             code,
             message: message.into(),
+            groups: Vec::new(),
         }
     }
+
+    /// The recipients whose own transaction ended in `status`.
+    ///
+    /// Used to suppress exactly the addresses a `5xx` was received for, instead
+    /// of every recipient of a multi-domain message.
+    pub fn recipients_with(&self, status: DeliveryStatus) -> Vec<EmailAddress> {
+        self.groups
+            .iter()
+            .filter(|group| group.result.status == status)
+            .flat_map(|group| group.recipients.iter().cloned())
+            .collect()
+    }
+}
+
+/// One SMTP transaction: the recipients that share a domain, and its verdict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliveryGroup {
+    /// Recipient domain this transaction was addressed to. Empty when the whole
+    /// message went through a relay, which is not domain-scoped.
+    pub domain: String,
+    /// Verdict for this domain's recipients.
+    pub result: DeliveryResult,
+    /// The recipients carried by this transaction.
+    pub recipients: Vec<EmailAddress>,
 }
 
 /// Outbound delivery tuning.
@@ -214,42 +249,119 @@ impl OutboundSmtpClient {
     }
 
     /// Deliver `mime` (the exact bytes stored for the message) to every
-    /// recipient.
+    /// recipient, **one SMTP transaction per recipient domain**.
     ///
     /// `mime` is signed by the caller (see [`crate::worker`]) because signature
     /// generation belongs with the queue, not the socket.
+    ///
+    /// # Why per recipient domain
+    ///
+    /// MX records describe where a **recipient's** domain accepts mail. Routing a
+    /// message to the sender's own MX is issue #70: every external send looked up
+    /// `from.domain()`, connected to this server's own exchanger and deferred
+    /// forever. Recipients are therefore grouped by their own domain, each domain
+    /// is resolved separately (with the per-candidate fallback of RFC 5321 §5.1),
+    /// and each transaction carries only that domain's recipients. `MAIL FROM`
+    /// stays the sender on every transaction, exactly like an MTA relaying one
+    /// multi-domain message.
+    ///
+    /// A domain that cannot be resolved defers **only its own** recipients: the
+    /// remaining domains are still attempted, and the aggregate verdict keeps the
+    /// message in the queue for a retry.
+    ///
+    /// With a smarthost ([`DeliveryConfig::relay`]) MX records do not apply at
+    /// all: the relay receives the whole recipient set in one transaction, as
+    /// before.
     pub async fn deliver(
         &self,
         from: &EmailAddress,
         recipients: &[EmailAddress],
         mime: &[u8],
     ) -> Result<DeliveryResult> {
-        let (candidates, port) = match &self.config.relay {
-            // A relay is a single destination: MX records do not apply.
-            Some((host, port)) => (
-                vec![MxRecord {
-                    preference: 0,
-                    exchange: host.clone(),
+        if let Some((host, port)) = &self.config.relay {
+            // A relay is a single destination: one transaction, every recipient,
+            // and the provider routes by domain.
+            let candidates = vec![MxRecord {
+                preference: 0,
+                exchange: host.clone(),
+            }];
+            let result = self
+                .deliver_candidates(host, *port, from, recipients, mime, &candidates)
+                .await;
+            return Ok(DeliveryResult {
+                groups: vec![DeliveryGroup {
+                    domain: String::new(),
+                    result: result.clone(),
+                    recipients: recipients.to_vec(),
                 }],
-                *port,
-            ),
-            None => (
-                self.resolver.resolve(from.domain()).await?,
-                self.resolver.port(),
-            ),
-        };
+                ..result
+            });
+        }
 
+        let mut groups: Vec<DeliveryGroup> = Vec::new();
+        for (domain, group) in group_by_domain(recipients) {
+            let result = self.deliver_to_domain(&domain, from, &group, mime).await;
+            groups.push(DeliveryGroup {
+                domain,
+                result,
+                recipients: group,
+            });
+        }
+        Ok(aggregate(groups))
+    }
+
+    /// One recipient domain: resolve it, then try its exchangers in order.
+    async fn deliver_to_domain(
+        &self,
+        domain: &str,
+        from: &EmailAddress,
+        recipients: &[EmailAddress],
+        mime: &[u8],
+    ) -> DeliveryResult {
+        let candidates = match self.resolver.resolve(domain).await {
+            Ok(candidates) => candidates,
+            // A failed lookup is this domain's problem only, and it is
+            // retryable: report it as deferred instead of dropping the other
+            // domains' deliveries.
+            Err(error) => {
+                return DeliveryResult::new(
+                    DeliveryStatus::Deferred,
+                    domain,
+                    421,
+                    format!("MX lookup failed: {error}"),
+                )
+            }
+        };
+        let port = self.resolver.port_for(domain);
+        self.deliver_candidates(domain, port, from, recipients, mime, &candidates)
+            .await
+    }
+
+    /// Try every candidate exchanger until one answers; defer when none does.
+    ///
+    /// `target` only names what is being delivered to — a recipient domain, or the
+    /// relay host — for the log line and for the "nothing answered" verdict.
+    async fn deliver_candidates(
+        &self,
+        target: &str,
+        port: u16,
+        from: &EmailAddress,
+        recipients: &[EmailAddress],
+        mime: &[u8],
+        candidates: &[MxRecord],
+    ) -> DeliveryResult {
         let mut last_error: Option<(String, String)> = None;
         for candidate in candidates {
             match self
                 .deliver_to(&candidate.exchange, port, from, recipients, mime)
                 .await
             {
-                Ok(result) => return Ok(result),
+                Ok(result) => return result,
                 Err(error) => {
                     // Transport failure: try the next exchanger, remembering why
                     // this one did not work.
                     tracing::warn!(
+                        target,
                         mx = %candidate.exchange,
                         %error,
                         "delivery attempt failed, trying the next mail exchanger"
@@ -261,17 +373,17 @@ impl OutboundSmtpClient {
 
         let (host, message) = last_error.unwrap_or_else(|| {
             (
-                from.domain().to_string(),
+                target.to_string(),
                 "no mail exchanger available".to_string(),
             )
         });
         // Nothing answered anywhere: defer so the queue retries with backoff.
-        Ok(DeliveryResult::new(
+        DeliveryResult::new(
             DeliveryStatus::Deferred,
             host,
             421,
             format!("no mail exchanger accepted the connection: {message}"),
-        ))
+        )
     }
 
     /// One complete attempt against one host. `Err` means "transport failure,
@@ -435,6 +547,97 @@ impl OutboundSmtpClient {
                 "STARTTLS is required but unavailable: {text} (PIGEON_SMTP_OUT_STARTTLS=required)"
             ),
         )
+    }
+}
+
+/// Group recipients by their own domain, keeping first-appearance order so two
+/// runs of the same message produce the same transaction sequence.
+fn group_by_domain(recipients: &[EmailAddress]) -> Vec<(String, Vec<EmailAddress>)> {
+    let mut groups: Vec<(String, Vec<EmailAddress>)> = Vec::new();
+    for recipient in recipients {
+        let domain = recipient.domain().to_string();
+        match groups.iter_mut().find(|(known, _)| *known == domain) {
+            Some((_, group)) => group.push(recipient.clone()),
+            None => groups.push((domain, vec![recipient.clone()])),
+        }
+    }
+    groups
+}
+
+/// Fold the per-domain verdicts into the one verdict the queue understands.
+///
+/// Precedence is `Deferred` first on purpose: the queue is per **message**, so a
+/// retryable domain has to keep the job alive — reporting a bounce instead would
+/// drop that recipient's mail. Among the permanent verdicts a remote `5xx`
+/// (`Bounced`) outranks a local refusal (`Failed`) because it is a definitive
+/// answer about the recipient.
+fn aggregate(groups: Vec<DeliveryGroup>) -> DeliveryResult {
+    if groups.is_empty() {
+        // Unreachable from the send pipeline (validation requires one recipient),
+        // but `deliver` is public: fail locally rather than invent a verdict.
+        return DeliveryResult::new(
+            DeliveryStatus::Failed,
+            String::new(),
+            0,
+            "no recipients to deliver to",
+        );
+    };
+
+    if groups.len() == 1 {
+        // One domain: the single-domain verdict *is* the answer, unchanged.
+        let single = groups[0].result.clone();
+        return DeliveryResult { groups, ..single };
+    }
+    let first = &groups[0];
+    let status = if groups
+        .iter()
+        .any(|group| group.result.status == DeliveryStatus::Deferred)
+    {
+        DeliveryStatus::Deferred
+    } else if groups
+        .iter()
+        .any(|group| group.result.status == DeliveryStatus::Bounced)
+    {
+        DeliveryStatus::Bounced
+    } else if groups
+        .iter()
+        .any(|group| group.result.status == DeliveryStatus::Failed)
+    {
+        DeliveryStatus::Failed
+    } else {
+        DeliveryStatus::Sent
+    };
+    let representative = groups
+        .iter()
+        .find(|group| group.result.status == status)
+        .unwrap_or(first);
+
+    // Distinct hosts in the order they were tried, so the event log keeps stating
+    // where the message actually went.
+    let mut hosts: Vec<&str> = Vec::new();
+    for group in &groups {
+        if !hosts.contains(&group.result.mx_host.as_str()) {
+            hosts.push(&group.result.mx_host);
+        }
+    }
+
+    let message = groups
+        .iter()
+        .map(|group| {
+            format!(
+                "{} via {}: code={} {}",
+                group.domain, group.result.mx_host, group.result.code, group.result.message
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    DeliveryResult {
+        status,
+        mx_host: hosts.join(","),
+        code: representative.result.code,
+        message,
+        groups,
     }
 }
 

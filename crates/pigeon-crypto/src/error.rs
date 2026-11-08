@@ -29,4 +29,6 @@ pub enum CryptoError {
     ApiKeyFormat(String),
     #[error("API key hashing failed: {0}")]
     Hashing(String),
+    #[error("OpenPGP: {0}")]
+    Pgp(String),
 }

@@ -139,6 +139,21 @@ impl TestEnv {
         .expect("count queue rows")
     }
 
+    /// Re-arm a requeued job so the next `drain` picks it up now.
+    ///
+    /// `queue_fail` applies the real backoff (30 s for a first failure), which is
+    /// correct in production and untestable in a unit test. This is the same
+    /// "time has passed" step, written straight to the row.
+    pub fn make_queue_due(&self, message_id: i64) {
+        let conn = rusqlite::Connection::open(&self.db_path).expect("open db");
+        conn.execute(
+            "UPDATE queue SET run_after = 0, claimed_at = NULL, claim_token = NULL
+              WHERE message_id = ?1",
+            [message_id],
+        )
+        .expect("make the job due");
+    }
+
     /// `run_after` of the one queue row for `message_id`, if it still exists.
     pub fn queue_run_after(&self, message_id: i64) -> Option<i64> {
         let conn = rusqlite::Connection::open(&self.db_path).expect("open db");
@@ -279,11 +294,22 @@ impl RawClient {
     }
 }
 
+/// One SMTP transaction a [`FakeMx`] received.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceivedMessage {
+    /// Envelope sender, exactly as announced in `MAIL FROM:<...>`.
+    pub mail_from: String,
+    /// Envelope recipients, in the order the `RCPT TO` commands arrived.
+    pub recipients: Vec<String>,
+    /// The message data, as text.
+    pub payload: String,
+}
+
 /// A fake MX host: speaks just enough ESMTP to accept one message per
 /// connection and remembers what it received.
 pub struct FakeMx {
     pub address: SocketAddr,
-    pub received: Arc<Mutex<Vec<String>>>,
+    pub received: Arc<Mutex<Vec<ReceivedMessage>>>,
     handle: tokio::task::JoinHandle<()>,
 }
 
@@ -307,13 +333,34 @@ impl FakeMx {
         .await
     }
 
+    /// Start a fake MX that **temporarily** fails its first `failures` transactions
+    /// (`451` after `DATA`) and accepts everything afterwards.
+    ///
+    /// This is the "one domain deferred, the other accepted" shape a retry has to
+    /// survive without sending a duplicate copy.
+    pub async fn start_deferring(failures: usize, offer_starttls: bool) -> Self {
+        Self::start_full(offer_starttls, None, failures).await
+    }
+
     async fn start_with(offer_starttls: bool, rcpt_reply: Option<String>) -> Self {
+        Self::start_full(offer_starttls, rcpt_reply, 0).await
+    }
+
+    async fn start_full(
+        offer_starttls: bool,
+        rcpt_reply: Option<String>,
+        defer_first: usize,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind fake mx");
         let address = listener.local_addr().expect("fake mx address");
         let received = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&received);
+        // A mutex rather than an atomic counter: the decrement is a
+        // read-modify-write (`fetch_update` is newer than this crate's MSRV), and
+        // one short critical section per connection costs nothing.
+        let pending_failures = Arc::new(Mutex::new(defer_first));
         let handle = tokio::spawn(async move {
             loop {
                 let Ok((stream, _peer)) = listener.accept().await else {
@@ -321,8 +368,19 @@ impl FakeMx {
                 };
                 let sink = Arc::clone(&sink);
                 let rcpt_reply = rcpt_reply.clone();
+                let pending = Arc::clone(&pending_failures);
                 tokio::spawn(async move {
-                    handle_fake_session(stream, sink, offer_starttls, rcpt_reply).await;
+                    // Each connection consumes one programmed failure.
+                    let defer_this = {
+                        let mut left = pending.lock().expect("lock");
+                        if *left > 0 {
+                            *left -= 1;
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    handle_fake_session(stream, sink, offer_starttls, rcpt_reply, defer_this).await;
                 });
             }
         });
@@ -335,12 +393,38 @@ impl FakeMx {
 
     /// Everything the fake MX has received so far, joined.
     pub fn delivered(&self) -> String {
-        self.received.lock().expect("lock").join("\n---\n")
+        self.received
+            .lock()
+            .expect("lock")
+            .iter()
+            .map(|message| message.payload.as_str())
+            .collect::<Vec<_>>()
+            .join("\n---\n")
     }
 
     /// Number of messages accepted.
     pub fn count(&self) -> usize {
         self.received.lock().expect("lock").len()
+    }
+
+    /// The envelope recipients of every accepted transaction, in arrival order.
+    pub fn recipient_sets(&self) -> Vec<Vec<String>> {
+        self.received
+            .lock()
+            .expect("lock")
+            .iter()
+            .map(|message| message.recipients.clone())
+            .collect()
+    }
+
+    /// The envelope senders of every accepted transaction.
+    pub fn senders(&self) -> Vec<String> {
+        self.received
+            .lock()
+            .expect("lock")
+            .iter()
+            .map(|message| message.mail_from.clone())
+            .collect()
     }
 }
 
@@ -352,9 +436,10 @@ impl Drop for FakeMx {
 
 async fn handle_fake_session(
     stream: TcpStream,
-    sink: Arc<Mutex<Vec<String>>>,
+    sink: Arc<Mutex<Vec<ReceivedMessage>>>,
     offer_starttls: bool,
     rcpt_reply: Option<String>,
+    defer_data: bool,
 ) {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
@@ -362,6 +447,11 @@ async fn handle_fake_session(
     if write_half.write_all(banner.as_bytes()).await.is_err() {
         return;
     }
+
+    // Envelope state, captured from the commands so a test can assert *who* was
+    // talking to this exchanger, not only what bytes arrived.
+    let mut mail_from = String::new();
+    let mut recipients: Vec<String> = Vec::new();
 
     let mut line = String::new();
     loop {
@@ -386,12 +476,31 @@ async fn handle_fake_session(
                 response.push_str("250 8BITMIME\r\n");
                 response
             }
+            "MAIL" => {
+                mail_from = command
+                    .split_once(':')
+                    .map(|(_, rest)| rest.trim().trim_matches(['<', '>']).to_string())
+                    .unwrap_or_default();
+                "250 2.0.0 Ok\r\n".to_string()
+            }
             "RCPT" => match &rcpt_reply {
                 Some(reply) => format!("{reply}\r\n"),
-                None => "250 2.0.0 Ok\r\n".to_string(),
+                None => {
+                    let recipient = command
+                        .split_once(':')
+                        .map(|(_, rest)| rest.trim().trim_matches(['<', '>']).to_string())
+                        .unwrap_or_default();
+                    recipients.push(recipient);
+                    "250 2.0.0 Ok\r\n".to_string()
+                }
             },
-            "HELO" | "MAIL" | "NOOP" => "250 2.0.0 Ok\r\n".to_string(),
+            "HELO" | "NOOP" => "250 2.0.0 Ok\r\n".to_string(),
             "STARTTLS" => "454 4.7.0 TLS not available here\r\n".to_string(),
+            "DATA" if defer_data => {
+                // A temporary failure at the end of the transaction: the peer is
+                // expected to retry later, not to bounce.
+                "451 4.3.2 try again later\r\n".to_string()
+            }
             "DATA" => {
                 if write_half.write_all(b"354 go ahead\r\n").await.is_err() {
                     return;
@@ -408,7 +517,11 @@ async fn handle_fake_session(
                     }
                     payload.push_str(&data_line);
                 }
-                sink.lock().expect("lock").push(payload);
+                sink.lock().expect("lock").push(ReceivedMessage {
+                    mail_from: mail_from.clone(),
+                    recipients: recipients.clone(),
+                    payload,
+                });
                 "250 2.0.0 Ok: queued as fake\r\n".to_string()
             }
             "QUIT" => {

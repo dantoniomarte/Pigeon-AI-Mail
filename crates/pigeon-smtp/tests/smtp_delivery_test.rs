@@ -111,8 +111,10 @@ async fn queued_message_is_delivered_and_recorded_as_sent() {
     let settled = worker.drain(10).await.expect("drain");
     assert_eq!(settled, 1, "one job was due");
 
-    // --- the peer received the exact stored MIME ----------------------------
-    assert_eq!(fake.count(), 1, "one message reached the fake MX");
+    // --- the peers received the exact stored MIME ---------------------------
+    // Routing is per recipient domain (issue #70), so a message with two domains
+    // reaches the fake MX in two transactions, each carrying one recipient.
+    assert_eq!(fake.count(), 2, "one transaction per recipient domain");
     let delivered = fake.delivered();
     assert!(
         delivered.contains("Subject: Invoice #2041 paid"),
@@ -126,9 +128,15 @@ async fn queued_message_is_delivered_and_recorded_as_sent() {
         delivered.contains("From: dana@pigeonmail.dev"),
         "{delivered}"
     );
-    assert!(
-        delivered.contains("To: carol@example.org, dave@example.net"),
-        "{delivered}"
+    let mut recipients = fake.recipient_sets();
+    recipients.sort();
+    assert_eq!(
+        recipients,
+        vec![
+            vec!["carol@example.org".to_string()],
+            vec!["dave@example.net".to_string()]
+        ],
+        "each transaction carries only its own domain's recipient"
     );
 
     // --- the queue row is gone, the lifecycle says sent ---------------------

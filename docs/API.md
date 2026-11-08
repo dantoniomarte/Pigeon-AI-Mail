@@ -65,11 +65,24 @@ Queues a message for delivery. Returns **202** (not 201, and not Resend's 200 �
 { "id": "eml_9f2a44c1", "status": "queued", "e2e": "sealed" }
 ```
 
-`e2e` reports the payload protection, aligned with [docs/e2ee-model.md](e2ee-model.md):
+`e2e` reports the payload protection **actually in force**, aligned with [docs/e2ee-model.md](e2ee-model.md) layer 3:
 
-- `sealed` — OpenPGP to the recipient's published key (Pigeon↔Pigeon or WKD).
-- `tls_only` — STARTTLS transport, no recipient key discovered (the e2ee model's "key discovery failure" case).
-- `plaintext_override` — explicit per-domain plaintext override (always logged).
+- `sealed` — the body (not the headers) is OpenPGP-sealed (RFC 4880) to the published key of **every**
+  recipient, plus the sending account's own key so the sent copy stays readable. Keys are discovered
+  before queueing: another Pigeon instance answers for its own accounts, and any domain publishing WKD keys
+  is used the same way.
+- `tls_only` — STARTTLS transport, no end-to-end seal. Either a recipient published no discoverable key,
+  or every recipient is a local account of this instance (the message never leaves, so layer 1 at-rest
+  sealing is what applies). A discovery failure **never blocks delivery**.
+- `plaintext_override` — an operator explicitly exempted a recipient domain with
+  `PIGEON_E2E_PLAINTEXT_DOMAINS` (comma-separated, empty by default). Always logged; never automatic.
+
+Sealing is all-or-nothing per message: one unsealable recipient means the whole message goes `tls_only`
+(there is no per-recipient copy in v1). The `e2e` value is stored on the email row and carried by the
+lifecycle views and webhooks, so it cannot drift from what was actually sent.
+
+Subject lines and headers stay in the clear in every case — SMTP routing needs them, which is the same
+caveat Proton documents.
 
 **Errors**: `422 validation` (field-level `errors[]`) · `402 quota-exceeded` (quota{limit,used,reset_at}) · `429 rate-limited` · `409 idempotent-replay` · `413` body too large.
 
@@ -341,6 +354,43 @@ Domain matching is case-insensitive and the rule is keyed by domain alone, so a 
 ## Suppressions
 
 `GET /v1/suppressions` (page) · `POST /v1/suppressions` {addresses≤100, reason: manual|bounce|complaint} · `DELETE /v1/suppressions/{address}`. Hard bounces add automatically; removal is an explicit operator action.
+
+## WKD — publishing your users' keys
+
+Two unauthenticated endpoints serve the public key of an address **of this instance** (see
+[docs/e2ee-model.md](e2ee-model.md) layer 3). They answer for accounts only: a sender alias has several
+owners and publishes nothing.
+
+### `GET /.well-known/pigeon-pgp?email=<address>`
+
+The Pigeon-to-Pigeon key directory. `200` with `Content-Type: application/pgp-keys` and the armored
+certificate; `404 not-found` for an address this instance does not serve; `422 validation` for a missing or
+malformed `email`.
+
+The key is created **on first need** (first publication request or first sealed send), so an existing
+account may answer `404` once and `200` afterwards.
+
+Both WKD routes are **rate limited per source address** (unauthenticated, so there is no key to throttle):
+5 requests/second sustained with a bounded burst. Above it the answer is `429 rate-limited` with
+`Retry-After`, the same problem type and headers the authenticated API uses.
+
+### `GET /.well-known/openpgpkey/{domain}/hu/{hash}`
+
+Advanced WKD (draft-koch-openpgp-webkey-service): the same certificate in **binary**, keyed by
+`z-base-32(SHA-1(lowercased local part))`, for a domain this instance serves. A wrong hash and a foreign
+domain both answer `404`, so the endpoint cannot be used to enumerate addresses of other domains.
+
+Outbound discovery tries, in order: `/.well-known/pigeon-pgp` on the recipient's domain, then the advanced
+path on `openpgpkey.<domain>`, then the advanced path on `<domain>` itself. The first key seen for an
+address is **pinned** (trust on first use); a later different key is reported and the pinned key keeps being
+used — never silently rotated. Each lookup is bounded by a 10-second wall-clock deadline, and a lookup that
+fails simply downgrades the message to `tls_only`: discovery never blocks delivery.
+
+If a peer reports that they rotated their key while this server keeps sealing to the old one, the fix is the
+operator command `pigeon unpin-peer-key <address>` (audited as `pgp.unpin`), which clears the pin so the next
+lookup re-runs trust on first use. It is a **trust reset**: verify the new fingerprint out of band first.
+See [docs/e2ee-model.md](e2ee-model.md) "Key rotation and the pin" for the symptom, the confirmation steps and
+the tradeoff.
 
 ## Health
 

@@ -43,6 +43,15 @@ clap = { version = "4", features = ["derive"] }
 tempfile = "3"
 thiserror = "2"
 zeroize = "1"
+# OpenPGP (RFC 4880/9580) for the layer-3 end-to-end payload seal. The pure-Rust
+# crypto backend avoids a C toolchain (nettle/openssl) in the build; the layer
+# only needs Ed25519 signing + Cv25519 encryption keys.
+sequoia-openpgp = { version = "2.4", default-features = false, features = [
+    "crypto-rust",
+    "compression-deflate",
+    "allow-experimental-crypto",
+    "allow-variable-time-crypto",
+] }
 hex = "0.4"
 # SMTP transport. hickory 0.25 renamed the runtime feature to `tokio`; it is
 # enabled by default together with `system-config` (/etc/resolv.conf).
@@ -62,6 +71,9 @@ rustls = { version = "0.23", default-features = false, features = [
     "std",
     "tls12",
 ] }
+# Trust anchors for outbound HTTPS key discovery (WKD). A discovered key decides
+# who mail is sealed to, so it must come over an authenticated connection.
+webpki-roots = "1"
 
 [profile.release]
 lto = "thin"

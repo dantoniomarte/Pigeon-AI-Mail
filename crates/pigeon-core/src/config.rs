@@ -32,6 +32,7 @@ pub const KNOWN_ENV_SUFFIXES: &[&str] = &[
     "MASTER_KEY_FILE",
     "SMTP_OUT_STARTTLS",
     "WEBMAIL",
+    "E2E_PLAINTEXT_DOMAINS",
     "LOG",
     // Deprecated alias for LOG, accepted for one release.
     "LOG_FILTER",
@@ -95,6 +96,13 @@ pub struct Config {
     pub smtp_out_starttls: StartTlsMode,
     /// Serve the webmail UI (`PIGEON_WEBMAIL`).
     pub webmail: bool,
+    /// Recipient domains exempted from end-to-end sealing
+    /// (`PIGEON_E2E_PLAINTEXT_DOMAINS`, comma-separated).
+    ///
+    /// Empty by default: sealing is automatic and on. A domain listed here gets
+    /// `plaintext_override` reported for messages addressed to it, and every such
+    /// send is logged — an operator has to ask for it.
+    pub e2e_plaintext_domains: Vec<String>,
     /// `tracing` filter string (`PIGEON_LOG`).
     pub log_filter: String,
 }
@@ -108,6 +116,7 @@ impl Default for Config {
             master_key_file: PathBuf::from("/etc/pigeon/master.key"),
             smtp_out_starttls: StartTlsMode::Required,
             webmail: false,
+            e2e_plaintext_domains: Vec::new(),
             log_filter: "info".to_string(),
         }
     }
@@ -162,6 +171,9 @@ impl Config {
         if let Some(v) = get("WEBMAIL")? {
             cfg.webmail = parse_bool("WEBMAIL", &v)?;
         }
+        if let Some(v) = get("E2E_PLAINTEXT_DOMAINS")? {
+            cfg.e2e_plaintext_domains = parse_domains("E2E_PLAINTEXT_DOMAINS", &v)?;
+        }
         // PIGEON_LOG is the documented name. PIGEON_LOG_FILTER is the
         // pre-0.1 name kept as a deprecated alias for one release; if both are
         // set the documented one wins.
@@ -174,6 +186,39 @@ impl Config {
         }
         Ok(cfg)
     }
+}
+
+/// Parse a comma-separated domain list, lowercasing and rejecting nonsense.
+///
+/// An empty value is "no exemptions" (the default). Anything that is not a bare
+/// domain is an error rather than a silently ignored entry: a typo in an exemption
+/// list would otherwise leave mail sealed that the operator believes is plain.
+fn parse_domains(suffix: &str, value: &str) -> Result<Vec<String>> {
+    let mut domains = Vec::new();
+    for entry in value.split(',') {
+        let domain = entry.trim().to_ascii_lowercase();
+        if domain.is_empty() {
+            continue;
+        }
+        if domain.len() > 253
+            || domain.starts_with('.')
+            || domain.ends_with('.')
+            || !domain
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+            || !domain.contains('.')
+            // No empty label: `a..test` or `a.test.` are typos, not domains.
+            || domain.split('.').any(str::is_empty)
+        {
+            return Err(CoreError::Config(format!(
+                "{ENV_PREFIX}{suffix} entry {entry:?} is not a domain name"
+            )));
+        }
+        if !domains.contains(&domain) {
+            domains.push(domain);
+        }
+    }
+    Ok(domains)
 }
 
 fn parse_bool(suffix: &str, value: &str) -> Result<bool> {
@@ -210,6 +255,10 @@ mod tests {
         assert_eq!(cfg.smtp_out_starttls, StartTlsMode::Required);
         assert!(!cfg.webmail);
         assert_eq!(cfg.log_filter, "info");
+        assert!(
+            cfg.e2e_plaintext_domains.is_empty(),
+            "end-to-end sealing is on by default: nothing is exempted"
+        );
     }
 
     #[test]
@@ -243,6 +292,7 @@ mod tests {
             ("PIGEON_SMTP_IN_ADDR", ":2525"),
             ("PIGEON_SMTP_OUT_STARTTLS", "required"),
             ("PIGEON_WEBMAIL", "on"),
+            ("PIGEON_E2E_PLAINTEXT_DOMAINS", "legacy.example"),
             ("PIGEON_LOG", "info"),
         ];
         for (name, _) in documented {
@@ -350,6 +400,39 @@ mod tests {
         }
         let err = from_pairs(&[("PIGEON_SMTP_OUT_STARTTLS", "sometimes")]).unwrap_err();
         assert!(matches!(err, CoreError::Config(_)));
+    }
+
+    #[test]
+    fn plaintext_domains_parse_from_a_comma_separated_list() {
+        let cfg = from_pairs(&[("PIGEON_E2E_PLAINTEXT_DOMAINS", " Legacy.Example , b.test ")])
+            .expect("parses");
+        assert_eq!(
+            cfg.e2e_plaintext_domains,
+            vec!["legacy.example".to_string(), "b.test".to_string()],
+            "entries are trimmed and lowercased"
+        );
+        // Duplicates collapse: the list is a set of domains, not of spellings.
+        let cfg = from_pairs(&[("PIGEON_E2E_PLAINTEXT_DOMAINS", "a.test,a.test")]).expect("parses");
+        assert_eq!(cfg.e2e_plaintext_domains, vec!["a.test".to_string()]);
+
+        // An empty value is the documented default, not an error.
+        let cfg = from_pairs(&[("PIGEON_E2E_PLAINTEXT_DOMAINS", "")]).expect("parses");
+        assert!(cfg.e2e_plaintext_domains.is_empty());
+    }
+
+    #[test]
+    fn a_typo_in_the_plaintext_list_is_an_error_not_a_silent_default() {
+        for bad in [
+            "legacy",
+            "a..test",
+            ".a.test",
+            "a.test.",
+            "a b.test",
+            "a@test.example",
+        ] {
+            let err = from_pairs(&[("PIGEON_E2E_PLAINTEXT_DOMAINS", bad)]).unwrap_err();
+            assert!(matches!(err, CoreError::Config(_)), "{bad:?} -> {err}");
+        }
     }
 
     #[test]

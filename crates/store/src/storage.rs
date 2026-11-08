@@ -147,6 +147,12 @@ pub struct ClaimedJob {
     /// Worker that took the claim ([`Storage::queue_claim`]'s `worker_id`),
     /// kept in the row for observability.
     pub claimed_by: String,
+    /// Recipient domains an earlier attempt already delivered to (lowercased).
+    ///
+    /// Delivery is per recipient domain, so a retry must skip these: delivering
+    /// again would put a duplicate copy in somebody's inbox. Empty on a first
+    /// attempt and on every row that predates migration `0017`.
+    pub delivered_domains: Vec<String>,
 }
 
 /// A job that exhausted its attempts and will not be claimed again, as
@@ -361,6 +367,50 @@ pub struct AliasAssignmentRow {
     pub account_id: i64,
     pub assigned_by: i64,
     pub created_at: String,
+}
+
+/// One account's OpenPGP identity (layer 3).
+///
+/// `private_sealed` is the transferable secret key **sealed under the master
+/// key** (AAD `pgp:{account_id}`); this crate stores ciphertext and never sees
+/// plaintext key material, exactly like `dkim_keys`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PgpKeyRow {
+    pub account_id: i64,
+    /// Armored public certificate, as WKD publishes it.
+    pub public_armored: String,
+    /// Sealed transferable secret key.
+    pub private_sealed: Vec<u8>,
+    /// Uppercase hex fingerprint of the primary key.
+    pub fingerprint: String,
+    pub created_at: String,
+}
+
+/// A key discovered at another domain and **pinned** on first contact.
+///
+/// Deliberately only the public half plus the fingerprint: a peer's private key
+/// never exists here, so `pgp_keys` is the only table with secret material.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PgpPeerKeyRow {
+    /// Normalized address the pin belongs to.
+    pub email_norm: String,
+    pub fingerprint: String,
+    pub public_armored: String,
+    /// Where the key was found (`pigeon-pgp`, `wkd-advanced`, `local`), for the
+    /// audit trail.
+    pub source: String,
+    pub first_seen_at: String,
+    pub last_seen_at: String,
+    /// Verdict of the last re-check against the live endpoint: `None` means
+    /// pinned and not re-checked yet, `Some("match")` a confirmation, and
+    /// `Some("mismatch:<fingerprint>")` the warning an operator must see.
+    ///
+    /// Separate from [`Self::last_checked_at`] on purpose: one answers "what
+    /// happened", the other "when", and merging them made the timestamp
+    /// unreadable.
+    pub pin_status: Option<String>,
+    /// When the endpoint was last re-read (SQLite `datetime('now')`), or `None`.
+    pub last_checked_at: Option<String>,
 }
 
 /// Persistence contract used by services (ADR 0002 point 2).
@@ -579,6 +629,17 @@ pub trait Storage {
     /// does not own a live job — a stale claim another worker already took over
     /// — is [`StoreError::QueueClaim`], never a silent no-op.
     fn queue_fail(&self, claim_token: &str, error: &str, backoff_secs: u64) -> Result<()>;
+
+    /// Record that the live claim already delivered to `domains` (lowercased).
+    ///
+    /// Called once per attempt, as each recipient-domain group reaches a terminal
+    /// verdict, so the next attempt only targets the domains still outstanding.
+    /// Empty domain names (a smarthost delivery, which is not domain-scoped) are
+    /// ignored: they must never make a retry look complete.
+    ///
+    /// A token that no longer owns a live claim is [`StoreError::QueueClaim`], so a
+    /// worker that lost its lease cannot write to somebody else's job.
+    fn queue_mark_domains_delivered(&self, claim_token: &str, domains: &[String]) -> Result<()>;
 
     /// Dead-lettered jobs, oldest first, for operators and bounce handling.
     fn list_dead(&self, limit: i64) -> Result<Vec<DeadJob>>;
@@ -1005,6 +1066,86 @@ pub trait Storage {
     /// it holds a DKIM identity for. An address on any other domain can neither
     /// receive nor send here.
     fn served_domains(&self) -> Result<Vec<String>>;
+
+    // ------------------------------------------------- layer-3 OpenPGP keys
+
+    /// Store an account's OpenPGP identity **only if it has none yet**.
+    ///
+    /// Returns `true` when this call created the row and `false` when a key was
+    /// already there. That is the race-free first-use primitive: two concurrent
+    /// first uses generate candidates, exactly one wins, and the loser re-reads the
+    /// winner's row instead of overwriting it — so an account never ends up with
+    /// two identities (one published, one stored, mail sealed to the wrong one).
+    ///
+    /// Rotation is a different operation and uses [`Storage::put_pgp_key`].
+    fn insert_pgp_key_if_absent(
+        &self,
+        account_id: i64,
+        public_armored: &str,
+        private_sealed: &[u8],
+        fingerprint: &str,
+    ) -> Result<bool>;
+
+    /// Create or replace an account's OpenPGP identity (upsert on `account_id`).
+    ///
+    /// `private_sealed` arrives already sealed under the master key; this crate
+    /// never sees the plaintext secret key. Re-putting rotates the row in place,
+    /// which is what a deliberate key rotation does — and why nothing else may
+    /// write this table.
+    fn put_pgp_key(
+        &self,
+        account_id: i64,
+        public_armored: &str,
+        private_sealed: &[u8],
+        fingerprint: &str,
+    ) -> Result<()>;
+
+    /// Load an account's OpenPGP identity, or `None` when it has none yet.
+    ///
+    /// `None` is a normal state: keys are generated lazily on first use (first
+    /// WKD publication or first sealed send), so an account that never sent or
+    /// received sealed mail has no row.
+    fn get_pgp_key(&self, account_id: i64) -> Result<Option<PgpKeyRow>>;
+
+    /// The published key for one address, whoever asks.
+    ///
+    /// This is what WKD serves: `(public_armored, fingerprint)`. `None` when the
+    /// address is not a local account here — a sender alias owns no key, because
+    /// it has several owners and sealing to one of them would be a lie.
+    fn get_pgp_public_by_email(&self, email_norm: &str) -> Result<Option<(String, String)>>;
+
+    /// Pin a peer key, or refresh an existing pin.
+    ///
+    /// The first call for an address is the trust decision. Later calls **never**
+    /// change the stored key: they only update `last_checked_at` with the result
+    /// of the comparison (`match` or `mismatch:<fingerprint>`), so a replaced
+    /// foreign key is reported instead of silently followed.
+    fn pin_pgp_peer_key(
+        &self,
+        email_norm: &str,
+        fingerprint: &str,
+        public_armored: &str,
+        source: &str,
+    ) -> Result<()>;
+
+    /// The current pin for an address, if any.
+    fn get_pgp_peer_key(&self, email_norm: &str) -> Result<Option<PgpPeerKeyRow>>;
+
+    /// Delete the pin for an address; `true` when a row was removed.
+    ///
+    /// The operator's recovery path (issue found in review): a peer that rotates
+    /// its key keeps serving a pin this server will not follow, so sealed mail is
+    /// produced that the recipient cannot open. Removing the pin re-runs trust on
+    /// first use, which is exactly as safe as the first contact was — the caller
+    /// takes responsibility for having verified the new key out of band.
+    fn delete_pgp_peer_key(&self, email_norm: &str) -> Result<bool>;
+
+    /// Every account whose address is on `domain`, as `(account_id, address)`.
+    ///
+    /// The advanced WKD lookup arrives with a domain and a hash instead of an
+    /// address, so publication needs "who is on this domain" to find the row the
+    /// hash names.
+    fn accounts_on_domain(&self, domain: &str) -> Result<Vec<(i64, EmailAddress)>>;
 }
 
 /// Claim statement, kept in one place so the tests can `EXPLAIN QUERY PLAN` the
@@ -1060,7 +1201,7 @@ UPDATE queue
        )
         ORDER BY run_after, id
         LIMIT 1)
-RETURNING id, message_id, claim_token, attempts, claimed_by";
+RETURNING id, message_id, claim_token, attempts, claimed_by, delivered_domains";
 
 /// SQLite-backed [`Storage`].
 pub struct SqliteStorage {
@@ -1208,6 +1349,14 @@ fn encode_string_list(values: &[String]) -> Result<String> {
     serde_json::to_string(values).map_err(|error| {
         StoreError::InvalidArgument(format!("could not encode a draft list as JSON: {error}"))
     })
+}
+
+/// Decode a JSON array column that may be `NULL` — an older row, or "nothing yet".
+fn decode_optional_string_list(column: &str, raw: Option<&str>) -> Result<Vec<String>> {
+    match raw {
+        Some(raw) => decode_string_list(column, raw),
+        None => Ok(Vec::new()),
+    }
 }
 
 /// Decode a JSON array of strings. Anything else is [`StoreError::Corrupt`].
@@ -2004,15 +2153,35 @@ impl Storage for SqliteStorage {
         let conn = self.lock();
         let job = conn
             .query_row(QUEUE_CLAIM_SQL, params![token, worker_id, lease], |row| {
-                Ok(ClaimedJob {
-                    id: row.get(0)?,
-                    message_id: row.get(1)?,
-                    claim_token: row.get(2)?,
-                    attempts: row.get(3)?,
-                    claimed_by: row.get(4)?,
-                })
+                // The delivered-domain list is JSON, which rusqlite cannot decode:
+                // read it raw here and decode below, so a corrupt row is a
+                // `Corrupt` error instead of a driver error.
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
             })
             .optional()?;
+        let job = match job {
+            Some((id, message_id, claim_token, attempts, claimed_by, delivered)) => {
+                Some(ClaimedJob {
+                    id,
+                    message_id,
+                    claim_token,
+                    attempts,
+                    claimed_by,
+                    delivered_domains: decode_optional_string_list(
+                        "queue.delivered_domains",
+                        delivered.as_deref(),
+                    )?,
+                })
+            }
+            None => None,
+        };
         Ok(job)
     }
 
@@ -3346,6 +3515,248 @@ impl Storage for SqliteStorage {
             .query_map([], |row| row.get(0))?
             .collect::<rusqlite::Result<Vec<String>>>()?;
         Ok(rows)
+    }
+
+    fn put_pgp_key(
+        &self,
+        account_id: i64,
+        public_armored: &str,
+        private_sealed: &[u8],
+        fingerprint: &str,
+    ) -> Result<()> {
+        self.check_pgp_key_args(account_id, public_armored, private_sealed, fingerprint)?;
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO pgp_keys (account_id, public_armored, private_sealed, fingerprint)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (account_id) DO UPDATE SET
+                 public_armored = excluded.public_armored,
+                 private_sealed = excluded.private_sealed,
+                 fingerprint = excluded.fingerprint,
+                 created_at = datetime('now')",
+            params![account_id, public_armored, private_sealed, fingerprint],
+        )?;
+        Ok(())
+    }
+
+    fn insert_pgp_key_if_absent(
+        &self,
+        account_id: i64,
+        public_armored: &str,
+        private_sealed: &[u8],
+        fingerprint: &str,
+    ) -> Result<bool> {
+        self.check_pgp_key_args(account_id, public_armored, private_sealed, fingerprint)?;
+        let conn = self.lock();
+        // `OR IGNORE`, not an upsert: a concurrent first use that already stored a
+        // key must win, so the loser re-reads it instead of replacing an identity
+        // some mail may already be sealed to.
+        let inserted = conn.execute(
+            "INSERT OR IGNORE INTO pgp_keys
+                 (account_id, public_armored, private_sealed, fingerprint)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![account_id, public_armored, private_sealed, fingerprint],
+        )?;
+        Ok(inserted > 0)
+    }
+
+    fn get_pgp_key(&self, account_id: i64) -> Result<Option<PgpKeyRow>> {
+        let conn = self.lock();
+        let row = conn
+            .query_row(
+                "SELECT account_id, public_armored, private_sealed, fingerprint, created_at
+                   FROM pgp_keys WHERE account_id = ?1",
+                [account_id],
+                |row| {
+                    Ok(PgpKeyRow {
+                        account_id: row.get(0)?,
+                        public_armored: row.get(1)?,
+                        private_sealed: row.get(2)?,
+                        fingerprint: row.get(3)?,
+                        created_at: row.get(4)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    fn get_pgp_public_by_email(&self, email_norm: &str) -> Result<Option<(String, String)>> {
+        let conn = self.lock();
+        let row = conn
+            .query_row(
+                "SELECT k.public_armored, k.fingerprint
+                   FROM pgp_keys k
+                   JOIN accounts a ON a.id = k.account_id
+                  WHERE a.email_norm = ?1",
+                [email_norm],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    fn pin_pgp_peer_key(
+        &self,
+        email_norm: &str,
+        fingerprint: &str,
+        public_armored: &str,
+        source: &str,
+    ) -> Result<()> {
+        if fingerprint.trim().is_empty() || public_armored.trim().is_empty() {
+            return Err(StoreError::InvalidArgument(
+                "a peer key pin needs a fingerprint and the certificate".to_string(),
+            ));
+        }
+        let conn = self.lock();
+        // `ON CONFLICT` deliberately touches only the audit columns: the key that
+        // was pinned first stays the key this server seals to, whatever the
+        // endpoint serves later.
+        conn.execute(
+            "INSERT INTO pgp_peer_keys (email_norm, fingerprint, public_armored, source)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (email_norm) DO UPDATE SET
+                 last_seen_at = datetime('now'),
+                 last_checked_at = datetime('now'),
+                 pin_status = CASE
+                     WHEN pgp_peer_keys.fingerprint = excluded.fingerprint THEN 'match'
+                     ELSE 'mismatch:' || excluded.fingerprint
+                 END",
+            params![email_norm, fingerprint, public_armored, source],
+        )?;
+        Ok(())
+    }
+
+    fn accounts_on_domain(&self, domain: &str) -> Result<Vec<(i64, EmailAddress)>> {
+        let conn = self.lock();
+        let mut statement = conn.prepare(
+            "SELECT id, email FROM accounts
+              WHERE substr(email_norm, instr(email_norm, '@') + 1) = lower(?1)
+              ORDER BY id",
+        )?;
+        let rows = statement.query_map([domain], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut accounts = Vec::new();
+        for row in rows {
+            let (id, raw) = row?;
+            // A stored address that no longer parses is reported, not silently
+            // skipped: publication answering "no key" for a broken row would hide
+            // the corruption.
+            accounts.push((id, EmailAddress::parse(&raw)?));
+        }
+        Ok(accounts)
+    }
+
+    fn get_pgp_peer_key(&self, email_norm: &str) -> Result<Option<PgpPeerKeyRow>> {
+        let conn = self.lock();
+        let row = conn
+            .query_row(
+                "SELECT email_norm, fingerprint, public_armored, source,
+                        first_seen_at, last_seen_at, pin_status, last_checked_at
+                   FROM pgp_peer_keys WHERE email_norm = ?1",
+                [email_norm],
+                |row| {
+                    Ok(PgpPeerKeyRow {
+                        email_norm: row.get(0)?,
+                        fingerprint: row.get(1)?,
+                        public_armored: row.get(2)?,
+                        source: row.get(3)?,
+                        first_seen_at: row.get(4)?,
+                        last_seen_at: row.get(5)?,
+                        pin_status: row.get(6)?,
+                        last_checked_at: row.get(7)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    fn delete_pgp_peer_key(&self, email_norm: &str) -> Result<bool> {
+        let conn = self.lock();
+        let removed = conn.execute(
+            "DELETE FROM pgp_peer_keys WHERE email_norm = ?1",
+            [email_norm],
+        )?;
+        Ok(removed > 0)
+    }
+
+    fn queue_mark_domains_delivered(&self, claim_token: &str, domains: &[String]) -> Result<()> {
+        let fresh: Vec<String> = domains
+            .iter()
+            .map(|domain| domain.trim().to_ascii_lowercase())
+            // A smarthost delivery is not domain-scoped: recording an empty name
+            // would make the next attempt believe there is nothing left to do.
+            .filter(|domain| !domain.is_empty())
+            .collect();
+        if fresh.is_empty() {
+            return Ok(());
+        }
+
+        let conn = self.lock();
+        // Read-modify-write inside one transaction, and only while this worker
+        // still owns the row: a stale claim cannot write to somebody else's job.
+        let tx = conn.unchecked_transaction()?;
+        let current = tx
+            .query_row(
+                "SELECT delivered_domains FROM queue WHERE claim_token = ?1",
+                [claim_token],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+        let Some(current) = current else {
+            return Err(StoreError::QueueClaim(
+                "no live claim owns that token".to_string(),
+            ));
+        };
+        let mut merged =
+            decode_optional_string_list("queue.delivered_domains", current.as_deref())?;
+        for domain in fresh {
+            if !merged.iter().any(|known| known == &domain) {
+                merged.push(domain);
+            }
+        }
+        let updated = tx.execute(
+            "UPDATE queue SET delivered_domains = ?2 WHERE claim_token = ?1",
+            params![claim_token, encode_string_list(&merged)?],
+        )?;
+        if updated == 0 {
+            return Err(StoreError::QueueClaim(
+                "no live claim owns that token".to_string(),
+            ));
+        }
+        tx.commit()?;
+        Ok(())
+    }
+}
+
+impl SqliteStorage {
+    /// Reject a PGP key row that could not be published or opened, and refuse an
+    /// account that does not exist.
+    fn check_pgp_key_args(
+        &self,
+        account_id: i64,
+        public_armored: &str,
+        private_sealed: &[u8],
+        fingerprint: &str,
+    ) -> Result<()> {
+        if public_armored.trim().is_empty() || private_sealed.is_empty() {
+            return Err(StoreError::InvalidArgument(
+                "a PGP key needs both a public certificate and a sealed private key".to_string(),
+            ));
+        }
+        if fingerprint.trim().is_empty() {
+            return Err(StoreError::InvalidArgument(
+                "a PGP key needs its fingerprint".to_string(),
+            ));
+        }
+        // The account must exist: `account_id` is the primary key and a dangling
+        // key would be published for an address that cannot receive mail.
+        if self.get_account(account_id).is_err() {
+            return Err(StoreError::NotFound);
+        }
+        Ok(())
     }
 }
 

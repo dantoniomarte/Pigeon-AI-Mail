@@ -15,6 +15,19 @@
 //!    same id (the `store` crate guarantees the two cannot diverge).
 //! 6. **Queue** — `run_after` is now, or `scheduled_at` when it is in the future.
 //!
+//! Step 5 also decides the **payload protection** (layer 3, `docs/e2ee-model.md`):
+//!
+//! * every recipient's key was discovered (and one of them is external) → the MIME
+//!   body is OpenPGP-sealed to those keys plus the sender's own, `e2e = sealed`;
+//! * a recipient has no discoverable key, or every recipient is a local account of
+//!   this instance → `tls_only` for the whole message (v1 is all-or-nothing: there
+//!   is no per-recipient copy, so a mixed list cannot claim `sealed`);
+//! * a recipient domain is on the operator's explicit override list →
+//!   `plaintext_override`, logged, never a default.
+//!
+//! Sealing **never blocks delivery**: a discovery or seal failure downgrades the
+//! message to `tls_only` and the send proceeds.
+//!
 //! The sealed body *is* the generated MIME: the worker transmits exactly those
 //! bytes, and `?raw=true` hands the same bytes back to a sandbox caller.
 
@@ -31,15 +44,15 @@ use crate::handlers::{
     blocking, bool_param, enum_param, int_param, opt_param, Params, ProblemJson,
 };
 use crate::models::{
-    is_valid_tag, AttachmentPart, BatchRequest, BatchResult, BatchResults, DeferredView, EmailPage,
-    EmailResponse, EmailStatus, EmailView, PageMeta, SendAccepted, SendRequest, TemplateRender,
-    E2E_PLACEHOLDER, MAX_BATCH_ITEMS,
+    is_valid_tag, AttachmentPart, BatchRequest, BatchResult, BatchResults, DeferredView, E2e,
+    EmailPage, EmailResponse, EmailStatus, EmailView, PageMeta, SendAccepted, SendRequest,
+    TemplateRender, MAX_BATCH_ITEMS,
 };
 use crate::problem::{
     from_not_allowed, internal, not_found, validation, FieldError, Problem, ProblemType, Quota,
 };
 use crate::state::AppState;
-use crate::{aad, ids, mime, templates, time};
+use crate::{aad, ids, mime, pgp, templates, time, wkd};
 
 /// Every lifecycle status, for `?status=` validation.
 const STATUSES: [&str; 8] = [
@@ -354,14 +367,26 @@ pub(crate) fn accept(
         .master_key
         .wrap_content_key(&content_key, message_aad.as_bytes())
         .map_err(internal)?;
-    let body = mime::build(&send, &public_id, now);
-    let sealed_body = pigeon_crypto::seal_content(&content_key, &body, message_aad.as_bytes())
-        .map_err(internal)?;
 
     // The envelope carries bcc; the MIME never does.
     let mut to_addrs: Vec<EmailAddress> = send.to.clone();
     to_addrs.extend(send.cc.iter().cloned());
     to_addrs.extend(send.bcc.iter().cloned());
+
+    // Layer 3: decide *before* rendering, because the answer decides which bytes
+    // are stored. This is also where the sender's key is created if it has none.
+    let protection = decide_protection(state, context.account_id, &to_addrs);
+    let body = protected_body(
+        state,
+        context.account_id,
+        &send,
+        &public_id,
+        now,
+        &protection,
+    );
+    let (body, e2e) = body;
+    let sealed_body = pigeon_crypto::seal_content(&content_key, &body, message_aad.as_bytes())
+        .map_err(internal)?;
 
     let stored_id = state
         .store
@@ -409,7 +434,7 @@ pub(crate) fn accept(
             cc_addrs: send.cc.iter().map(ToString::to_string).collect(),
             tags: send.tags.clone(),
             sandbox: context.sandbox,
-            e2e: E2E_PLACEHOLDER.to_string(),
+            e2e: e2e.as_str().to_string(),
             wrapped_key,
         })
         .map_err(Problem::from)?;
@@ -460,8 +485,136 @@ pub(crate) fn accept(
     Ok(SendAccepted {
         id: public_id,
         status,
-        e2e: E2E_PLACEHOLDER.to_string(),
+        e2e: e2e.as_str().to_string(),
     })
+}
+
+/// How one message will be protected on the wire, decided before it is stored.
+enum PayloadProtection {
+    /// Seal to every recipient certificate, plus the sender's own.
+    Sealed(Vec<sequoia_openpgp::Cert>),
+    /// Transport TLS only: no seal.
+    TlsOnly,
+    /// An operator explicitly exempted a recipient domain (named for the log line
+    /// and the audit trail).
+    PlaintextOverride,
+}
+
+impl PayloadProtection {
+    fn e2e(&self) -> E2e {
+        match self {
+            PayloadProtection::Sealed(_) => E2e::Sealed,
+            PayloadProtection::TlsOnly => E2e::TlsOnly,
+            PayloadProtection::PlaintextOverride => E2e::PlaintextOverride,
+        }
+    }
+}
+
+/// Decide the payload protection for `recipients`.
+///
+/// Order matters: the explicit override wins over everything (an operator asked for
+/// it, and it is logged), then discovery decides between `sealed` and `tls_only`.
+fn decide_protection(
+    state: &AppState,
+    account_id: i64,
+    recipients: &[EmailAddress],
+) -> PayloadProtection {
+    if let Some(domain) = recipients
+        .iter()
+        .map(EmailAddress::domain)
+        .find(|domain| state.config.is_plaintext_override(domain))
+    {
+        tracing::warn!(
+            account_id,
+            domain,
+            "recipient domain is exempted from end-to-end sealing: sending plaintext_override"
+        );
+        return PayloadProtection::PlaintextOverride;
+    }
+
+    let discovery = wkd::discover_for(state, recipients);
+    for mismatch in &discovery.mismatches {
+        // A changed key is never adopted silently; the pin stays and the operator
+        // gets a line they can act on.
+        tracing::warn!(account_id, %mismatch, "pinned recipient key no longer matches");
+    }
+    if !discovery.every_recipient_is_sealable() {
+        if !discovery.local.is_empty() {
+            tracing::debug!(
+                account_id,
+                local = discovery.local.len(),
+                "local recipients: delivery stays inside this instance, so it is tls_only"
+            );
+        }
+        return PayloadProtection::TlsOnly;
+    }
+    PayloadProtection::Sealed(discovery.certificates())
+}
+
+/// Render the message body for `protection`, returning it with the value the API
+/// must report.
+///
+/// A seal that fails — a broken key, an unexpected crypto error — downgrades to
+/// `tls_only` instead of failing the send: `docs/e2ee-model.md` makes
+/// "encryption never blocks delivery" an invariant, and reporting the downgrade
+/// honestly is what keeps the `e2e` field trustworthy.
+fn protected_body(
+    state: &AppState,
+    account_id: i64,
+    send: &crate::models::ValidatedSend,
+    public_id: &str,
+    now: i64,
+    protection: &PayloadProtection,
+) -> (Vec<u8>, E2e) {
+    let PayloadProtection::Sealed(certificates) = protection else {
+        return (mime::build(send, public_id, now), protection.e2e());
+    };
+
+    let own_key = match state.store.get_account(account_id) {
+        Ok((id, address)) => pgp::ensure_account_key(&state.store, &state.master_key, id, &address),
+        Err(error) => {
+            tracing::warn!(account_id, %error, "cannot load the sending account");
+            return (mime::build(send, public_id, now), E2e::TlsOnly);
+        }
+    };
+    let own_key = match own_key {
+        Ok(key) => key,
+        Err(error) => {
+            tracing::warn!(account_id, %error, "cannot load the sender's own key");
+            return (mime::build(send, public_id, now), E2e::TlsOnly);
+        }
+    };
+    let own_certificate = match own_key.certificate() {
+        Ok(cert) => cert,
+        Err(error) => {
+            tracing::warn!(account_id, %error, "the sender's stored key is unusable");
+            return (mime::build(send, public_id, now), E2e::TlsOnly);
+        }
+    };
+
+    // RFC 3156: the encrypted entity is the body part, headers included.
+    let plaintext = mime::body_part_bytes(send);
+    match pgp::seal_to_all(certificates, &own_certificate, &plaintext) {
+        Ok(armored) => {
+            tracing::info!(
+                account_id,
+                recipients = certificates.len(),
+                "message body sealed end to end"
+            );
+            (
+                mime::build_encrypted(send, public_id, now, &armored),
+                E2e::Sealed,
+            )
+        }
+        Err(error) => {
+            tracing::warn!(
+                account_id,
+                %error,
+                "sealing failed; delivering tls_only instead of dropping the message"
+            );
+            (mime::build(send, public_id, now), E2e::TlsOnly)
+        }
+    }
 }
 
 /// Seal one attachment under the message content key.

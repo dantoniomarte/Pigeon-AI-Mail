@@ -11,6 +11,16 @@ pigeon-core.workspace = true
 pigeon-crypto.workspace = true
 pigeon-dkim.workspace = true
 store.workspace = true
+# OpenPGP primitives for the layer-3 seal (key generation, seal, open) and the
+# certificate type the WKD endpoints hand around.
+sequoia-openpgp.workspace = true
+# WKD's advanced path keys a request by z-base-32(SHA-1(local part)), which is
+# the draft's definition — not a signature, so this is the only use here.
+sha1 = "0.10"
+# Outbound HTTPS for WKD discovery: the workspace already builds rustls for
+# SMTP, and `webpki-roots` supplies the CA bundle the image does not ship.
+rustls.workspace = true
+webpki-roots.workspace = true
 axum.workspace = true
 base64.workspace = true
 hex.workspace = true

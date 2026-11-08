@@ -24,6 +24,7 @@ pub mod suppressions;
 pub mod templates;
 pub mod twofa;
 pub mod webhooks;
+pub mod wkd;
 
 use std::collections::HashMap;
 

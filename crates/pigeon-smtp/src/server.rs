@@ -929,7 +929,10 @@ fn ingest_message(
             cc_addrs: Vec::new(),
             tags: Vec::new(),
             sandbox: false,
-            e2e: pigeon_api::models::E2E_PLACEHOLDER.to_string(),
+            // Inbound mail from a foreign sender is never `sealed`: the server
+            // received TLS-or-clear bytes and sealed them at rest (layer 1). See
+            // `pigeon_api::handlers::wkd::INBOUND_E2E`.
+            e2e: pigeon_api::handlers::wkd::INBOUND_E2E.as_str().to_string(),
             wrapped_key,
         })?;
 

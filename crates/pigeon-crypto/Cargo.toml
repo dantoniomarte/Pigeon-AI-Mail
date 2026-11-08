@@ -17,5 +17,6 @@ zeroize.workspace = true
 hex.workspace = true
 thiserror.workspace = true
 rand_core = { version = "0.6", features = ["getrandom"] }
+sequoia-openpgp.workspace = true
 
 [dev-dependencies]

@@ -25,3 +25,9 @@ tracing.workspace = true
 # the assertion the delivery tests need; read it directly from the same file.
 rusqlite.workspace = true
 tempfile.workspace = true
+# The layer-3 end-to-end test drives the real API router (to queue a send the way
+# a client does) and reads the JSON answer, so it needs the HTTP stack the API
+# itself uses.
+axum.workspace = true
+serde_json.workspace = true
+tower = { workspace = true, features = ["util"] }

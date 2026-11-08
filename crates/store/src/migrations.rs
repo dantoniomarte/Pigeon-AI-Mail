@@ -140,6 +140,33 @@ use crate::error::Result;
 /// The schema is **unreleased**, so checks that SQLite cannot add later
 /// (`CHECK` constraints, `AUTOINCREMENT` on `accounts.id`) are edited in place in
 /// `0001` rather than shipped as a table rebuild.
+///
+/// `0015` adds the **layer-3 end-to-end** key table, `pgp_keys`.
+///
+/// One OpenPGP certificate per account (never per domain, unlike `dkim_keys`):
+/// the private half belongs to one mailbox, so sealing a message "to the
+/// account" is the only meaningful granularity. `public_armored` is what WKD
+/// publishes, `private_sealed` is the transferable secret key sealed under the
+/// master key with the same length-prefixed envelope as a DKIM key (AAD
+/// `pgp:{account_id}`), and `fingerprint` is the primary key's uppercase hex —
+/// the identity a pin compares against.
+///
+/// `0016` adds `pgp_peer_keys`: the **trust-on-first-use pin** for keys
+/// discovered at other domains.
+///
+/// Discovery is the one place where this server accepts key material from the
+/// network, so the first key seen for an address is pinned and later changes are
+/// reported instead of silently followed — an attacker who takes over a foreign
+/// WKD endpoint must not become the new recipient key for mail already in flight.
+/// The row keeps the address it belongs to (not the domain), because WKD
+/// publishes per address. `pin_status` holds the verdict of the last re-check
+/// (`match` / `mismatch:<fingerprint>`) and `last_checked_at` the timestamp, so a
+/// reader can tell a stale pin from a confirmed one.
+///
+/// `0017` adds `queue.delivered_domains`: outbound delivery is per **recipient
+/// domain**, and a retry must not re-deliver to a domain that already accepted the
+/// message. The column is the per-job record that makes "only retry what failed"
+/// possible (see [`crate::Storage::queue_mark_domains_delivered`]).
 pub const MIGRATIONS: &[&str] = &[
     // ---------------------------------------------------------------- 0001
     r#"
@@ -567,6 +594,53 @@ SELECT domain, target_account_id, target_account_id, 0
   FROM catchall_rules
  WHERE target_account_id IS NOT NULL
 ON CONFLICT (domain, account_id) DO NOTHING;
+"#,
+    // ---------------------------------------------------------------- 0015
+    r#"
+CREATE TABLE IF NOT EXISTS pgp_keys (
+  account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+  public_armored TEXT NOT NULL,
+  private_sealed BLOB NOT NULL,
+  fingerprint TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+-- Discovery resolves a recipient by address, so the email -> key lookup is the
+-- one index that matters. Several accounts on one domain each have their own
+-- key, which is exactly why this is not a domain-keyed lookup.
+CREATE INDEX IF NOT EXISTS idx_pgp_keys_fingerprint ON pgp_keys (fingerprint);
+"#,
+    // ---------------------------------------------------------------- 0016
+    r#"
+CREATE TABLE IF NOT EXISTS pgp_peer_keys (
+  email_norm TEXT PRIMARY KEY,
+  fingerprint TEXT NOT NULL,
+  public_armored TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT '',
+  first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+  last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+  -- Result of the last re-check: NULL until the endpoint has been re-read once,
+  -- then 'match' or 'mismatch:<served fingerprint>'. Kept apart from
+  -- `last_checked_at` so "when" stays a timestamp and "what" stays a verdict.
+  pin_status TEXT NULL,
+  last_checked_at TEXT NULL
+);
+"#,
+    // ---------------------------------------------------------------- 0017
+    r#"
+-- Which recipient domains a queued message has already been delivered to.
+--
+-- MX routing is per recipient domain, so one message can be accepted by
+-- `example.org` and deferred by `example.net` in the same attempt. The queue row
+-- is per message, so without this column the retry would re-deliver to the domain
+-- that already got the message: duplicate mail at the recipient, the worst
+-- possible failure mode for a transactional mail server.
+--
+-- A JSON array of lowercased domains (the same encoding as `messages.to_addrs`,
+-- so corrupt content fails to decode loudly instead of silently re-sending
+-- everywhere). NULL means "nothing delivered yet", which is every pre-existing
+-- row. A domain is recorded once it reaches a **terminal** verdict (accepted,
+-- bounced or locally refused); only a deferral leaves it outstanding.
+ALTER TABLE queue ADD COLUMN delivered_domains TEXT NULL;
 "#,
 ];
 

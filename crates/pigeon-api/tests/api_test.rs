@@ -7,15 +7,19 @@
 //! proves they do.
 
 use axum::body::{to_bytes, Body};
+use axum::extract::ConnectInfo;
 use axum::http::{header, HeaderMap, Method, Request, StatusCode};
 use axum::Router;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
+use pigeon_api::wkd::KeyFetcher;
 use pigeon_api::{ApiConfig, AppState};
 use pigeon_core::{ApiKeyScope, Direction, EmailAddress, MessageFolder};
 use pigeon_crypto::MasterKey;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use store::{NewMessage, Storage};
 use tempfile::TempDir;
 use tower::ServiceExt;
@@ -44,6 +48,15 @@ impl TestApp {
     }
 
     fn with_config(config: ApiConfig) -> Self {
+        Self::with_state(config, Arc::new(NoKeys))
+    }
+
+    /// Build the app with an explicit key directory.
+    ///
+    /// Every test injects one: discovery is the only part of the send pipeline
+    /// that talks to the network, and a suite that fetched `example.org` would be
+    /// slow, flaky and dependent on somebody else's DNS.
+    fn with_state(config: ApiConfig, fetcher: Arc<dyn KeyFetcher>) -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("pigeon.db");
         let state = AppState::open(
@@ -51,7 +64,8 @@ impl TestApp {
             MasterKey::parse(&TEST_MASTER_KEY).expect("master key"),
             config,
         )
-        .expect("state");
+        .expect("state")
+        .with_key_fetcher(fetcher);
         let account = EmailAddress::parse("owner@example.com").expect("address");
         let account_id = state.store.create_account(&account).expect("account");
         let (_, full_key) = pigeon_api::keys::issue(
@@ -110,6 +124,7 @@ impl TestApp {
             status,
             headers,
             body,
+            raw: bytes.to_vec(),
         }
     }
 
@@ -151,10 +166,91 @@ impl TestApp {
     }
 }
 
+/// A key directory that publishes nothing: the default for tests that are not
+/// about sealing.
+#[derive(Debug)]
+struct NoKeys;
+
+impl KeyFetcher for NoKeys {
+    fn fetch(&self, _url: &str) -> Result<Option<Vec<u8>>, String> {
+        Ok(None)
+    }
+}
+
+/// A key directory that generates and serves one certificate per address.
+///
+/// It keeps the private halves so a test can play the recipient and prove the seal
+/// really is only openable by the account key.
+#[derive(Debug, Default)]
+struct KeyDirectory {
+    keys: Mutex<HashMap<String, (String, String)>>,
+    /// When set, only these addresses publish a key (everything else 404s, like a
+    /// domain that has no WKD entry for the address).
+    only: Option<Vec<String>>,
+}
+
+impl KeyDirectory {
+    /// A directory that publishes keys for exactly `addresses`.
+    fn only(addresses: &[&str]) -> Self {
+        Self {
+            keys: Mutex::new(HashMap::new()),
+            only: Some(addresses.iter().map(|a| a.to_lowercase()).collect()),
+        }
+    }
+
+    fn key_for(&self, address: &str) -> (String, String) {
+        let address = address.to_lowercase();
+        let mut keys = self.keys.lock().expect("lock");
+        keys.entry(address.clone())
+            .or_insert_with(|| {
+                let generated =
+                    pigeon_crypto::generate_account_key(&address).expect("generated key");
+                (generated.public_armored, generated.private_armored)
+            })
+            .clone()
+    }
+
+    fn private_for(&self, address: &str) -> String {
+        self.key_for(address).1
+    }
+}
+
+impl KeyFetcher for KeyDirectory {
+    fn fetch(&self, url: &str) -> Result<Option<Vec<u8>>, String> {
+        // Only the simple endpoint answers; the advanced paths are exercised by
+        // their own tests.
+        let Some((_, query)) = url.split_once("?email=") else {
+            return Ok(None);
+        };
+        let address = query.replace("%40", "@").replace("%2E", ".");
+        if let Some(only) = &self.only {
+            if !only.contains(&address.to_lowercase()) {
+                return Ok(None);
+            }
+        }
+        Ok(Some(self.key_for(&address).0.into_bytes()))
+    }
+}
+
+/// Pull the armored OpenPGP message out of a stored PGP/MIME body.
+fn armored_payload(mime: &str) -> String {
+    let start = mime
+        .find("-----BEGIN PGP MESSAGE-----")
+        .unwrap_or_else(|| panic!("no armored payload in {mime}"));
+    let end = mime
+        .find("-----END PGP MESSAGE-----")
+        .map(|index| index + "-----END PGP MESSAGE-----".len())
+        .unwrap_or_else(|| panic!("no armored payload end in {mime}"));
+    mime[start..end].replace("\r\n", "\n")
+}
+
 struct Response {
     status: StatusCode,
     headers: HeaderMap,
     body: Value,
+    /// Exactly what the handler wrote: `body` is the JSON reading of it, which
+    /// cannot represent a binary key.
+    raw: Vec<u8>,
 }
 
 impl Response {
@@ -175,12 +271,31 @@ impl Response {
     }
 }
 
+/// Source address every request reports.
+///
+/// The WKD endpoints are rate limited per source address, and they read the peer
+/// from `ConnectInfo`, which `axum::serve` fills in from the socket. A router
+/// driven directly (as here) has no socket, so the harness supplies the same
+/// extension the server would.
+const TEST_PEER: ([u8; 4], u16) = ([198, 51, 100, 9], 4242);
+
 fn build(
     method: Method,
     path: &str,
     key: Option<&str>,
     body: Option<Value>,
     extra_headers: &[(&str, &str)],
+) -> Request<Body> {
+    build_from(method, path, key, body, extra_headers, TEST_PEER)
+}
+
+fn build_from(
+    method: Method,
+    path: &str,
+    key: Option<&str>,
+    body: Option<Value>,
+    extra_headers: &[(&str, &str)],
+    peer: ([u8; 4], u16),
 ) -> Request<Body> {
     let mut builder = Request::builder()
         .method(method)
@@ -192,12 +307,16 @@ fn build(
     for (name, value) in extra_headers {
         builder = builder.header(*name, *value);
     }
-    match body {
+    let mut request = match body {
         Some(value) => builder
             .body(Body::from(value.to_string()))
             .expect("request"),
         None => builder.body(Body::empty()).expect("request"),
-    }
+    };
+    request
+        .extensions_mut()
+        .insert(ConnectInfo(std::net::SocketAddr::from(peer)));
+    request
 }
 
 fn valid_send() -> Value {
@@ -231,7 +350,7 @@ async fn post_emails_queues_and_returns_a_lifecycle_view() {
     assert_eq!(response.body["status"], "queued");
     assert_eq!(
         response.body["e2e"], "tls_only",
-        "no recipient key discovery yet: transport TLS only"
+        "no recipient publishes a key in this app: transport TLS only, never a false `sealed`"
     );
     // Rate-limit headers ride on (successful) authenticated responses.
     assert_eq!(response.headers["x-ratelimit-limit"], "10");
@@ -3265,4 +3384,415 @@ async fn mail_to_an_alias_reaches_every_assignee_and_files_under_its_address() {
         "the removed holder receives nothing new"
     );
     let _ = stop.send(());
+}
+
+// ---------------------------------------------------------------------------
+// Layer 3 — WKD publication and honest e2e reporting
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn wkd_publishes_the_key_of_a_local_account_and_nothing_else() {
+    let app = TestApp::new();
+
+    let published = app
+        .get("/.well-known/pigeon-pgp?email=owner%40example.com", None)
+        .await;
+    assert_eq!(published.status, StatusCode::OK, "{:?}", published.body);
+    assert_eq!(
+        published.headers[header::CONTENT_TYPE],
+        "application/pgp-keys",
+        "the published answer declares what it is"
+    );
+    let armor = published.body.as_str().expect("armored key");
+    assert!(armor.starts_with("-----BEGIN PGP PUBLIC KEY BLOCK-----"));
+    assert!(
+        !armor.contains("PRIVATE KEY"),
+        "a key directory publishes public halves only"
+    );
+
+    // The published key really is the account's key: the store agrees.
+    let (stored, fingerprint) = app
+        .state
+        .store
+        .get_pgp_public_by_email("owner@example.com")
+        .expect("lookup")
+        .expect("published row");
+    assert_eq!(stored, armor);
+    assert_eq!(fingerprint.len(), 40);
+
+    // Addresses this instance does not serve publish nothing.
+    let foreign = app
+        .get("/.well-known/pigeon-pgp?email=carol%40example.org", None)
+        .await;
+    foreign.assert_problem(StatusCode::NOT_FOUND, "not-found");
+
+    // A malformed request explains itself instead of 404-ing silently.
+    let missing = app.get("/.well-known/pigeon-pgp", None).await;
+    missing.assert_problem(StatusCode::UNPROCESSABLE_ENTITY, "validation");
+    let invalid = app
+        .get("/.well-known/pigeon-pgp?email=not-an-address", None)
+        .await;
+    invalid.assert_problem(StatusCode::UNPROCESSABLE_ENTITY, "validation");
+}
+
+#[tokio::test]
+async fn advanced_wkd_serves_the_binary_key_under_its_zbase32_hash() {
+    let app = TestApp::new();
+    let hash = pigeon_api::wkd::zbase32_sha1("owner");
+    let path = format!("/.well-known/openpgpkey/example.com/hu/{hash}");
+    let response = app.get(&path, None).await;
+    assert_eq!(response.status, StatusCode::OK, "{:?}", response.body);
+    assert_eq!(
+        response.headers[header::CONTENT_TYPE],
+        "application/octet-stream"
+    );
+
+    // The body is the same certificate, in binary: parse it back and compare the
+    // fingerprint with the one the simple endpoint publishes.
+    let (cert, fingerprint) =
+        pigeon_crypto::parse_cert_with_fingerprint(&response.raw).expect("served key parses");
+    assert_eq!(fingerprint.len(), 40);
+    let (stored, stored_fingerprint) = app
+        .state
+        .store
+        .get_pgp_public_by_email("owner@example.com")
+        .expect("lookup")
+        .expect("published row");
+    assert_eq!(fingerprint, stored_fingerprint);
+    let stored_cert = pigeon_crypto::parse_cert(stored.as_bytes()).expect("stored cert");
+    assert_eq!(
+        cert.fingerprint(),
+        stored_cert.fingerprint(),
+        "both endpoints serve one identity"
+    );
+}
+
+/// The simple endpoint gates on the **served domain** before it looks anything up,
+/// exactly like the advanced path: a foreign domain and a non-existent address on a
+/// served domain are indistinguishable, so the endpoint is not an enumeration
+/// oracle.
+#[tokio::test]
+async fn the_simple_endpoint_answers_404_for_a_foreign_domain() {
+    let app = TestApp::new();
+
+    // A served domain with no such mailbox.
+    let unknown_local = app
+        .get("/.well-known/pigeon-pgp?email=nobody%40example.com", None)
+        .await;
+    unknown_local.assert_problem(StatusCode::NOT_FOUND, "not-found");
+
+    // A domain this instance does not serve at all.
+    let foreign = app
+        .get(
+            "/.well-known/pigeon-pgp?email=carol%40foreign.example",
+            None,
+        )
+        .await;
+    foreign.assert_problem(StatusCode::NOT_FOUND, "not-found");
+
+    // Same status, same problem type, same shape: nothing tells the caller which
+    // of the two it hit.
+    assert_eq!(unknown_local.body["type"], foreign.body["type"]);
+    assert_eq!(unknown_local.status, foreign.status);
+
+    // And no key was created for the foreign address on the way.
+    assert!(app
+        .state
+        .store
+        .get_pgp_public_by_email("carol@foreign.example")
+        .expect("lookup")
+        .is_none());
+
+    // The gate is "is this domain served", not "does this account exist": a second
+    // account on the same domain still publishes after the first one answered.
+    assert!(pigeon_api::wkd::served_domain(&app.state.store, "example.com").expect("served"));
+    assert!(!pigeon_api::wkd::served_domain(&app.state.store, "foreign.example").expect("served"));
+}
+
+/// Both unauthenticated WKD routes share one per-address budget, and the refusal is
+/// the contract's `429` with `Retry-After`.
+#[tokio::test]
+async fn the_wkd_endpoints_are_rate_limited_per_source_address() {
+    let app = TestApp::new();
+    // A fresh app has a full bucket; drain it from one address.
+    let peer = ([203, 0, 113, 40], 5000);
+    let mut limited = false;
+    for _ in 0..(pigeon_api::rate_limit::WKD_RATE_BURST + 1) {
+        let response = app
+            .call(build_from(
+                Method::GET,
+                "/.well-known/pigeon-pgp?email=owner%40example.com",
+                None,
+                None,
+                &[],
+                peer,
+            ))
+            .await;
+        if response.status == StatusCode::TOO_MANY_REQUESTS {
+            limited = true;
+            response.assert_problem(StatusCode::TOO_MANY_REQUESTS, "rate-limited");
+            let retry_after = response.headers["retry-after"]
+                .to_str()
+                .expect("retry-after")
+                .parse::<u64>()
+                .expect("a number of seconds");
+            assert!(retry_after >= 1, "the client is told when to come back");
+            break;
+        }
+        assert_eq!(response.status, StatusCode::OK, "{:?}", response.body);
+    }
+    assert!(
+        limited,
+        "a burst above WKD_RATE_BURST must be refused instead of served forever"
+    );
+
+    // The advanced route shares the budget: one directory, one limit.
+    let advanced = app
+        .call(build_from(
+            Method::GET,
+            &format!(
+                "/.well-known/openpgpkey/example.com/hu/{}",
+                pigeon_api::wkd::zbase32_sha1("owner")
+            ),
+            None,
+            None,
+            &[],
+            peer,
+        ))
+        .await;
+    advanced.assert_problem(StatusCode::TOO_MANY_REQUESTS, "rate-limited");
+
+    // A different address is unaffected.
+    let other = app
+        .call(build_from(
+            Method::GET,
+            "/.well-known/pigeon-pgp?email=owner%40example.com",
+            None,
+            None,
+            &[],
+            ([203, 0, 113, 41], 5000),
+        ))
+        .await;
+    assert_eq!(other.status, StatusCode::OK, "{:?}", other.body);
+}
+
+#[tokio::test]
+async fn advanced_wkd_answers_404_for_a_wrong_hash_or_a_foreign_domain() {
+    let app = TestApp::new();
+    let wrong = app
+        .get(
+            "/.well-known/openpgpkey/example.com/hu/aaaaaaaaaaaaaaaa",
+            None,
+        )
+        .await;
+    wrong.assert_problem(StatusCode::NOT_FOUND, "not-found");
+    let foreign = app
+        .get(
+            &format!(
+                "/.well-known/openpgpkey/elsewhere.example/hu/{}",
+                pigeon_api::wkd::zbase32_sha1("owner")
+            ),
+            None,
+        )
+        .await;
+    foreign.assert_problem(StatusCode::NOT_FOUND, "not-found");
+}
+
+#[tokio::test]
+async fn e2e_is_sealed_when_every_recipient_publishes_a_key() {
+    let directory = Arc::new(KeyDirectory::default());
+    let app = TestApp::with_state(ApiConfig::default(), directory.clone());
+    let sandbox_key = app.key_with(&[ApiKeyScope::Full], true);
+
+    let response = app
+        .post(
+            "/v1/emails",
+            Some(&sandbox_key),
+            json!({
+                "from": "Dana <owner@example.com>",
+                "to": ["carol@example.org"],
+                "cc": ["dave@example.net"],
+                "subject": "Sealed invoice",
+                "text": "The renewal was processed.",
+            }),
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::ACCEPTED, "{:?}", response.body);
+    assert_eq!(
+        response.body["e2e"], "sealed",
+        "every recipient key was discovered: the payload must be sealed: {:?}",
+        response.body
+    );
+    let id = response.body["id"].as_str().expect("id").to_string();
+
+    // The lifecycle row carries the same honest value.
+    let view = app
+        .get(&format!("/v1/emails/{id}"), Some(&sandbox_key))
+        .await;
+    assert_eq!(view.body["e2e"], "sealed");
+
+    // The stored MIME is a PGP/MIME message: headers in the clear, body sealed.
+    let raw = app
+        .get(&format!("/v1/emails/{id}?raw=true"), Some(&sandbox_key))
+        .await;
+    let mime = raw.body["mime"].as_str().expect("mime");
+    assert!(
+        mime.contains("Content-Type: multipart/encrypted; protocol=\"application/pgp-encrypted\""),
+        "{mime}"
+    );
+    assert!(mime.contains("Subject: Sealed invoice"), "{mime}");
+    assert!(
+        !mime.contains("The renewal was processed."),
+        "the body must not survive in the clear: {mime}"
+    );
+
+    // Only the recipients' account keys open it — including the sender's own, so
+    // the sent copy stays readable by the account that sent it.
+    let payload = armored_payload(mime);
+    let opened = pigeon_crypto::open_payload_with_key(
+        directory.private_for("carol@example.org").as_bytes(),
+        payload.as_bytes(),
+    )
+    .expect("the recipient's account key opens the seal");
+    let opened = String::from_utf8(opened).expect("utf8");
+    assert!(
+        opened.contains("Content-Type: text/plain; charset=utf-8"),
+        "{opened}"
+    );
+    assert!(
+        opened.contains("VGhlIHJlbmV3YWwgd2FzIHByb2Nlc3NlZC4="),
+        "the body part carries the original text (base64 per MIME): {opened}"
+    );
+    assert!(
+        opened.contains("Content-Type:"),
+        "the sealed entity is a MIME body part, headers included: {opened}"
+    );
+    assert!(
+        pigeon_crypto::open_payload_with_key(
+            directory.private_for("dave@example.net").as_bytes(),
+            payload.as_bytes()
+        )
+        .is_ok(),
+        "every recipient of the message can open it"
+    );
+
+    // The sender's own key opens the same payload (sent-folder readability).
+    let own = pigeon_api::pgp::ensure_account_key(
+        &app.state.store,
+        &app.state.master_key,
+        app.account_id,
+        &EmailAddress::parse("owner@example.com").expect("address"),
+    )
+    .expect("own key");
+    assert!(
+        pigeon_crypto::open_payload_with_key(own.private_armored.as_bytes(), payload.as_bytes())
+            .is_ok(),
+        "the sending account must be able to read its own sent mail"
+    );
+}
+
+#[tokio::test]
+async fn a_recipient_without_a_key_makes_the_whole_message_tls_only() {
+    // Only `carol` answers; `nokey.example` publishes nothing.
+    let directory = Arc::new(KeyDirectory::only(&["carol@example.org"]));
+    let app = TestApp::with_state(ApiConfig::default(), directory.clone());
+
+    let response = app
+        .post(
+            "/v1/emails",
+            Some(&app.full_key),
+            json!({
+                "from": "Dana <owner@example.com>",
+                "to": ["carol@example.org", "stranger@nokey.example"],
+                "subject": "Mixed",
+                "text": "body",
+            }),
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::ACCEPTED, "{:?}", response.body);
+    assert_eq!(
+        response.body["e2e"], "tls_only",
+        "v1 is all-or-nothing: one unsealable recipient downgrades the whole message"
+    );
+}
+
+#[tokio::test]
+async fn a_local_recipient_keeps_the_message_tls_only() {
+    // A second mailbox on this instance: delivery never leaves, layer 1 already
+    // covers storage, and sealing would hide the mail from the webmail.
+    let directory = Arc::new(KeyDirectory::default());
+    let app = TestApp::with_state(ApiConfig::default(), directory);
+    app.state
+        .store
+        .create_account(&EmailAddress::parse("mate@example.com").expect("address"))
+        .expect("second account");
+
+    let response = app
+        .post(
+            "/v1/emails",
+            Some(&app.full_key),
+            json!({
+                "from": "Dana <owner@example.com>",
+                "to": ["mate@example.com"],
+                "subject": "Internal",
+                "text": "body",
+            }),
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::ACCEPTED, "{:?}", response.body);
+    assert_eq!(response.body["e2e"], "tls_only");
+}
+
+#[tokio::test]
+async fn an_explicit_plaintext_override_is_reported_and_never_seals() {
+    let directory = Arc::new(KeyDirectory::default());
+    let app = TestApp::with_state(
+        ApiConfig {
+            plaintext_override_domains: vec!["legacy.example".to_string()],
+            ..ApiConfig::default()
+        },
+        directory.clone(),
+    );
+    let sandbox_key = app.key_with(&[ApiKeyScope::Full], true);
+
+    let response = app
+        .post(
+            "/v1/emails",
+            Some(&sandbox_key),
+            json!({
+                "from": "Dana <owner@example.com>",
+                "to": ["archive@legacy.example"],
+                "subject": "Overridden",
+                "text": "readable on purpose",
+            }),
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::ACCEPTED, "{:?}", response.body);
+    assert_eq!(
+        response.body["e2e"], "plaintext_override",
+        "an operator opt-out is reported, never hidden behind tls_only"
+    );
+
+    // And the body really is in the clear: the override means what it says.
+    let id = response.body["id"].as_str().expect("id");
+    let raw = app
+        .get(&format!("/v1/emails/{id}?raw=true"), Some(&sandbox_key))
+        .await;
+    let mime = raw.body["mime"].as_str().expect("mime");
+    assert!(!mime.contains("multipart/encrypted"), "{mime}");
+    assert!(
+        mime.contains("cmVhZGFibGUgb24gcHVycG9zZQ=="),
+        "the body is in the clear (base64 per MIME): {mime}"
+    );
+}
+
+#[tokio::test]
+async fn the_override_list_matches_case_insensitively() {
+    let config = ApiConfig {
+        plaintext_override_domains: vec!["Legacy.Example".to_string()],
+        ..ApiConfig::default()
+    };
+    assert!(config.is_plaintext_override("legacy.example"));
+    assert!(config.is_plaintext_override("LEGACY.EXAMPLE"));
+    assert!(!config.is_plaintext_override("other.example"));
 }

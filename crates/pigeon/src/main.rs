@@ -10,6 +10,11 @@
 //!   environment to paste into the unit file. Nothing is written to disk except
 //!   the account and key rows in the database, so an operator always sees the key
 //!   material exactly once.
+//! * `pigeon unpin-peer-key <address>` — operator recovery for the layer-3 trust
+//!   store: forget the key pinned for a recipient address so the next lookup runs
+//!   trust-on-first-use again. Needed when a peer rotates its key: until the pin is
+//!   cleared, outbound mail stays sealed to the old key (see
+//!   `docs/e2ee-model.md` "Key rotation and the pin").
 //!
 //! # One process, four services
 //!
@@ -39,6 +44,12 @@
 //!   relayed through; unset means direct-to-MX delivery.
 //! * `PIGEON_SMTP_TEST_MX_PORT` — pins every MX connection to one port (loopback
 //!   testing only).
+//!
+//! End-to-end payload sealing (layer 3) is **on** with no configuration: every
+//! account gets an OpenPGP identity the first time it is needed, this instance
+//! publishes it at `/.well-known/pigeon-pgp`, and outbound mail is sealed whenever
+//! every recipient's key can be discovered. `PIGEON_E2E_PLAINTEXT_DOMAINS` is the
+//! only way to opt a recipient domain out, and it is logged.
 //!
 //! DKIM signing is **on**, per domain: the worker looks the `From:` domain's key
 //! up in the `dkim_keys` store, unseals it under the master key and prepends a
@@ -96,6 +107,20 @@ enum Command {
         #[arg(long)]
         db_path: Option<PathBuf>,
     },
+    /// Forget the pinned OpenPGP key of a recipient address (re-runs trust on
+    /// first use).
+    ///
+    /// Use it after a peer rotates its key out of band: a pin is never rotated
+    /// automatically, so sealed mail keeps targeting the old key until the pin is
+    /// cleared. Clear it only after verifying the new fingerprint with the
+    /// recipient.
+    UnpinPeerKey {
+        /// Recipient address whose pin should be removed.
+        address: String,
+        /// Database file; defaults to `PIGEON_DB_PATH`.
+        #[arg(long)]
+        db_path: Option<PathBuf>,
+    },
 }
 
 fn main() {
@@ -118,6 +143,9 @@ fn run() -> Result<(), Box<dyn Error>> {
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty()),
+        // Layer 3 is on unless an operator names a recipient domain here; the list
+        // is parsed and validated by `pigeon_core::Config`.
+        plaintext_override_domains: config.e2e_plaintext_domains.clone(),
         ..ApiConfig::default()
     };
     let pigeon = Pigeon::parse();
@@ -127,6 +155,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             serve(config, api_config)
         }
         Command::Keygen { account, db_path } => keygen(&config, &account, db_path),
+        Command::UnpinPeerKey { address, db_path } => unpin_peer_key(&config, &address, db_path),
         Command::Mcp => {
             init_tracing(&config.log_filter);
             mcp(config)
@@ -220,6 +249,7 @@ async fn serve(config: Config, api_config: ApiConfig) -> Result<(), Box<dyn Erro
         db_path = %config.db_path.display(),
         master_key_file = %config.master_key_file.display(),
         starttls = %config.smtp_out_starttls,
+        plaintext_override_domains = ?config.e2e_plaintext_domains,
         "pigeon listening"
     );
 
@@ -369,6 +399,10 @@ fn keygen(config: &Config, account: &str, db_path: Option<PathBuf>) -> Result<()
             .ok_or("account exists but could not be loaded")?,
         Err(error) => return Err(error.into()),
     };
+    // Create the account's OpenPGP identity now: the first external sender that
+    // looks this address up in WKD gets a key instead of waiting for a key
+    // generation inside that request.
+    let pgp = pigeon_api::pgp::ensure_account_key(&store, &master_key, account_id, &email)?;
     let (key_id, api_key) = pigeon_api::keys::issue(
         &store,
         &db,
@@ -381,6 +415,8 @@ fn keygen(config: &Config, account: &str, db_path: Option<PathBuf>) -> Result<()
     println!("pigeon keygen");
     println!("  account:                 {email} (id {account_id})");
     println!("  master key (64 hex):     {hex_key}");
+    println!("  openpgp fingerprint:     {}", pgp.fingerprint);
+    println!("  wkd key url:             /.well-known/pigeon-pgp?email={email}");
     println!("  api key id:              {key_id}");
     println!("  api key (shown once):    {api_key}");
     println!();
@@ -408,6 +444,65 @@ fn keygen(config: &Config, account: &str, db_path: Option<PathBuf>) -> Result<()
         "  PIGEON_PUBLIC_IP=<this server's public IP>   # needed by GET /v1/domains/{{id}}/dns"
     );
     println!("  PIGEON_API_KEY={api_key}                     # clients only; never commit it");
+    Ok(())
+}
+
+/// Forget the pinned OpenPGP key of one recipient address.
+///
+/// The layer-3 trust store pins the first key it sees for an address and **never**
+/// follows a later change ([`store::Storage::pin_pgp_peer_key`]), because silent
+/// rotation is exactly what an attacker who takes over a key directory would want.
+/// The cost of that rigidity is a lockout when a peer legitimately rotates: mail
+/// keeps being sealed to a key the recipient no longer holds. This command is the
+/// deliberate way out — it deletes the pin (audited) so the next discovery runs
+/// trust-on-first-use again.
+///
+/// What it does *not* do is decide whether the new key is the right one. That is the
+/// operator's job, out of band, before running it.
+fn unpin_peer_key(
+    config: &Config,
+    address: &str,
+    db_path: Option<PathBuf>,
+) -> Result<(), Box<dyn Error>> {
+    let path = db_path.unwrap_or_else(|| config.db_path.clone());
+    let address = EmailAddress::parse(address)?;
+    let normalized = address.normalized();
+    let store = SqliteStorage::open(&path)?;
+
+    let previous = store.get_pgp_peer_key(&normalized)?;
+    let removed = store.delete_pgp_peer_key(&normalized)?;
+
+    // Audited either way: "the operator cleared this pin" is exactly the kind of
+    // action that must show up in the trail, including when it changed nothing.
+    let detail = match &previous {
+        Some(row) => format!("was {} (source {})", row.fingerprint, row.source),
+        None => "was not pinned".to_string(),
+    };
+    if let Err(error) = store.audit(
+        "cli:operator",
+        "pgp.unpin",
+        &format!("{normalized}: {detail}"),
+    ) {
+        // A missing audit row must not fail the recovery the operator asked for.
+        eprintln!("pigeon: could not write the audit row: {error}");
+    }
+
+    match (removed, previous) {
+        (true, Some(row)) => {
+            println!("pigeon unpin-peer-key");
+            println!("  address:      {normalized}");
+            println!("  removed pin:  {}", row.fingerprint);
+            println!();
+            println!("The next send re-runs trust on first use and will pin whatever");
+            println!("the directory serves then. Verify that fingerprint with the");
+            println!("recipient before you rely on it.");
+        }
+        _ => {
+            println!("pigeon unpin-peer-key");
+            println!("  address:      {normalized}");
+            println!("  no pin was stored, so nothing changed");
+        }
+    }
     Ok(())
 }
 
@@ -519,7 +614,36 @@ mod tests {
                 assert_eq!(account, "admin@pigeon.local");
                 assert!(db_path.is_none());
             }
-            Command::Serve | Command::Mcp => panic!("expected keygen"),
+            _ => panic!("expected keygen"),
+        }
+
+        // The layer-3 recovery command: address is positional, database optional.
+        let parsed = Pigeon::try_parse_from(["pigeon", "unpin-peer-key", "carol@example.org"])
+            .expect("unpin-peer-key parses");
+        match parsed.command {
+            Command::UnpinPeerKey { address, db_path } => {
+                assert_eq!(address, "carol@example.org");
+                assert!(db_path.is_none());
+            }
+            _ => panic!("expected unpin-peer-key"),
+        }
+        let parsed = Pigeon::try_parse_from([
+            "pigeon",
+            "unpin-peer-key",
+            "carol@example.org",
+            "--db-path",
+            "/tmp/pigeon.db",
+        ])
+        .expect("unpin-peer-key with flags parses");
+        match parsed.command {
+            Command::UnpinPeerKey { address, db_path } => {
+                assert_eq!(address, "carol@example.org");
+                assert_eq!(
+                    db_path.as_deref(),
+                    Some(std::path::Path::new("/tmp/pigeon.db"))
+                );
+            }
+            _ => panic!("expected unpin-peer-key"),
         }
 
         let parsed = Pigeon::try_parse_from([
@@ -539,7 +663,55 @@ mod tests {
                     Some(std::path::Path::new("/tmp/pigeon.db"))
                 );
             }
-            Command::Serve | Command::Mcp => panic!("expected keygen"),
+            _ => panic!("expected keygen"),
         }
+    }
+
+    /// The recovery command really clears the pin, leaves a trail, and refuses a
+    /// missing database instead of inventing one.
+    #[test]
+    fn unpin_peer_key_clears_the_pin_and_audits_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("pigeon.db");
+        let store = SqliteStorage::open(&path).expect("open store");
+        store
+            .pin_pgp_peer_key("carol@example.org", "FPR-1", "armored", "pigeon-pgp")
+            .expect("pin");
+        drop(store);
+
+        let config = Config {
+            db_path: path.clone(),
+            ..Config::default()
+        };
+        unpin_peer_key(&config, "Carol@Example.org", Some(path.clone())).expect("unpins");
+
+        let store = SqliteStorage::open(&path).expect("reopen");
+        assert!(store
+            .get_pgp_peer_key("carol@example.org")
+            .expect("get")
+            .is_none());
+
+        // The recovery is audited: "who cleared which pin" must be answerable.
+        let conn = rusqlite::Connection::open(&path).expect("open audit db");
+        let (action, detail): (String, String) = conn
+            .query_row(
+                "SELECT action, detail FROM audit ORDER BY id DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("an audit row");
+        assert_eq!(action, "pgp.unpin");
+        assert!(detail.contains("carol@example.org"), "{detail}");
+        assert!(
+            detail.contains("FPR-1"),
+            "the dropped pin is named: {detail}"
+        );
+
+        // Idempotent: a second run reports that nothing was pinned.
+        unpin_peer_key(&config, "carol@example.org", None).expect("second run");
+        assert!(store
+            .get_pgp_peer_key("carol@example.org")
+            .expect("get")
+            .is_none());
     }
 }

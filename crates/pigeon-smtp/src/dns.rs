@@ -115,6 +115,7 @@ impl MxSource for HickoryMxSource {
 pub struct MxResolver {
     source: Box<dyn MxSource>,
     test_port: Option<u16>,
+    test_ports: std::collections::HashMap<String, u16>,
 }
 
 impl MxResolver {
@@ -123,6 +124,7 @@ impl MxResolver {
         Self {
             source: Box::new(source),
             test_port: None,
+            test_ports: std::collections::HashMap::new(),
         }
     }
 
@@ -134,6 +136,18 @@ impl MxResolver {
     /// Pin every connection to `port` (loopback testing).
     pub fn with_test_port(mut self, port: u16) -> Self {
         self.test_port = Some(port);
+        self
+    }
+
+    /// Pin the connection port of one recipient domain (loopback testing).
+    ///
+    /// Delivery resolves a **separate** MX per recipient domain, so a test that
+    /// proves multi-domain routing needs one fake exchanger per domain — on its
+    /// own loopback port. Like [`MxResolver::with_test_port`] this exists for
+    /// tests only and is never set by the binary; it takes precedence over the
+    /// global override for the named domain.
+    pub fn with_test_port_for(mut self, domain: &str, port: u16) -> Self {
+        self.test_ports.insert(domain.to_string(), port);
         self
     }
 
@@ -159,6 +173,16 @@ impl MxResolver {
     /// [`DEFAULT_SMTP_PORT`].
     pub fn port(&self) -> u16 {
         self.test_port.unwrap_or(DEFAULT_SMTP_PORT)
+    }
+
+    /// Port delivery connects to for `domain`: a per-domain test override, then
+    /// the global one, then [`DEFAULT_SMTP_PORT`].
+    pub fn port_for(&self, domain: &str) -> u16 {
+        self.test_ports
+            .get(domain)
+            .copied()
+            .or(self.test_port)
+            .unwrap_or(DEFAULT_SMTP_PORT)
     }
 
     /// Resolve `domain` into delivery candidates, best first.
@@ -191,6 +215,7 @@ impl std::fmt::Debug for MxResolver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MxResolver")
             .field("test_port", &self.test_port)
+            .field("test_ports", &self.test_ports)
             .finish_non_exhaustive()
     }
 }
@@ -296,7 +321,18 @@ mod tests {
     fn test_port_override_only_replaces_the_connection_port() {
         let resolver = MxResolver::new(FakeSource::new(&[]));
         assert_eq!(resolver.port(), DEFAULT_SMTP_PORT);
+        assert_eq!(resolver.port_for("example.com"), DEFAULT_SMTP_PORT);
         assert_eq!(resolver.with_test_port(2525).port(), 2525);
+    }
+
+    #[test]
+    fn a_per_domain_port_override_wins_over_the_global_one() {
+        let resolver = MxResolver::new(FakeSource::new(&[]))
+            .with_test_port(2525)
+            .with_test_port_for("example.org", 3001);
+        assert_eq!(resolver.port_for("example.org"), 3001);
+        assert_eq!(resolver.port_for("example.net"), 2525);
+        assert_eq!(resolver.port(), 2525, "the global override is unchanged");
     }
 
     #[test]

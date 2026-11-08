@@ -42,12 +42,14 @@ pub mod ids;
 pub mod keys;
 pub mod mime;
 pub mod models;
+pub mod pgp;
 pub mod problem;
 pub mod rate_limit;
 pub mod session;
 pub mod state;
 pub mod templates;
 pub mod time;
+pub mod wkd;
 
 use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::middleware::{from_fn_with_state, Next};
@@ -59,7 +61,7 @@ pub use state::{ApiConfig, AppState};
 
 use crate::handlers::{
     account, aliases, domains, drafts, health, messages, org, send, sessions, suppressions,
-    templates as template_handlers, twofa, webhooks,
+    templates as template_handlers, twofa, webhooks, wkd as wkd_handlers,
 };
 
 /// Build the application router.
@@ -217,6 +219,14 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(health::healthz))
         .route("/readyz", get(health::readyz))
         .route("/v1/auth/login", post(sessions::login))
+        // WKD publication: a key directory is meant to be read by anyone who
+        // wants to send sealed mail, so both endpoints are public. They answer
+        // only for accounts of this instance (see `handlers::wkd`).
+        .route("/.well-known/pigeon-pgp", get(wkd_handlers::pigeon_pgp))
+        .route(
+            "/.well-known/openpgpkey/{domain}/hu/{hash}",
+            get(wkd_handlers::advanced_wkd),
+        )
         // The body cap is enforced by the `ProblemJson` extractor so that an
         // oversized body is a `problem+json` 413, not axum's plain-text one.
         .layer(DefaultBodyLimit::disable())

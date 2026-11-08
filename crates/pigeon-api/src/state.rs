@@ -9,6 +9,7 @@ use store::SqliteStorage;
 use crate::auth::AuthState;
 use crate::db::ApiDb;
 use crate::rate_limit::{RateLimiter, BURST, SUSTAINED_RPS};
+use crate::wkd::{HttpsFetcher, KeyFetcher};
 
 /// Default daily send quota per account (`docs/API.md`).
 pub const DEFAULT_DAILY_SEND_QUOTA: i64 = 50_000;
@@ -31,6 +32,23 @@ pub struct ApiConfig {
     /// domain. Unset in a default deployment: `/v1/domains/{id}/dns` then refuses
     /// to invent an address.
     pub public_ip: Option<String>,
+    /// Recipient domains an operator has explicitly opted **out** of end-to-end
+    /// sealing (`PIGEON_E2E_PLAINTEXT_DOMAINS`).
+    ///
+    /// Empty by default and never inferred: a message with a recipient on one of
+    /// these domains is sent `tls_only`, its `e2e` value is
+    /// `plaintext_override`, and the choice is logged. This is the only way to
+    /// get an unsealed payload — see `docs/e2ee-model.md`.
+    pub plaintext_override_domains: Vec<String>,
+}
+
+impl ApiConfig {
+    /// True when `domain` is explicitly exempted from end-to-end sealing.
+    pub fn is_plaintext_override(&self, domain: &str) -> bool {
+        self.plaintext_override_domains
+            .iter()
+            .any(|override_domain| override_domain.eq_ignore_ascii_case(domain))
+    }
 }
 
 impl Default for ApiConfig {
@@ -41,6 +59,7 @@ impl Default for ApiConfig {
             rate_limit_burst: BURST,
             auth_cache_ttl_secs: DEFAULT_AUTH_CACHE_TTL_SECS,
             public_ip: None,
+            plaintext_override_domains: Vec::new(),
         }
     }
 }
@@ -64,6 +83,18 @@ pub struct AppState {
     pub auth: Arc<AuthState>,
     /// Per-account token buckets.
     pub limiter: Arc<RateLimiter>,
+    /// Per-source-address buckets for the unauthenticated WKD endpoints.
+    ///
+    /// Separate from [`Self::limiter`] because the key differs (an address, not an
+    /// account) and the budget is tighter: with no credential to throttle, the IP
+    /// is the only thing there is.
+    pub wkd_limiter: Arc<RateLimiter>,
+    /// How recipient keys are fetched for layer-3 sealing.
+    ///
+    /// Production wires [`HttpsFetcher`]; tests inject a fetcher backed by a
+    /// loopback HTTP server, so one Pigeon instance can discover another's
+    /// published key without a CA-signed certificate for `127.0.0.1`.
+    pub key_fetcher: Arc<dyn KeyFetcher>,
 }
 
 impl AppState {
@@ -80,8 +111,17 @@ impl AppState {
                 config.rate_limit_rps,
                 config.rate_limit_burst,
             )),
+            wkd_limiter: Arc::new(RateLimiter::for_wkd()),
             config: Arc::new(config),
+            key_fetcher: Arc::new(HttpsFetcher::default()),
         }
+    }
+
+    /// Replace the key fetcher (tests, and a deployment pointing discovery at an
+    /// internal mirror).
+    pub fn with_key_fetcher(mut self, fetcher: Arc<dyn KeyFetcher>) -> Self {
+        self.key_fetcher = fetcher;
+        self
     }
 
     /// Open the database (both connections), apply migrations and build state.
