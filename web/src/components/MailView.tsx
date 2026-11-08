@@ -1,6 +1,9 @@
+import { useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   AlertTriangle,
+  ArrowLeft,
+  ArrowRight,
   ChevronLeft,
   Forward,
   Lock,
@@ -43,6 +46,13 @@ export interface MailViewProps {
   onMarkRead?: (id: string, read: boolean) => void;
   onMove?: (id: string, folder: 'inbox' | 'spam' | 'trash') => void;
   onDelete?: (id: string) => void;
+  /** Older neighbour in the list the reader was opened from, `null` at the end. */
+  prevId?: string | null;
+  /** Newer neighbour in the same list, `null` at the end. */
+  nextId?: string | null;
+  onNavigate?: (id: string) => void;
+  /** J/K and the arrows stay off while an overlay (drawer, compose) is open. */
+  shortcutsEnabled?: boolean;
 }
 
 type Tone = 'ok' | 'warn' | 'bad' | 'muted';
@@ -102,9 +112,51 @@ export default function MailView({
   onMarkRead,
   onMove,
   onDelete,
+  prevId = null,
+  nextId = null,
+  onNavigate,
+  shortcutsEnabled = true,
 }: MailViewProps): JSX.Element {
   const { t, i18n } = useTranslation();
   const isSent = mode === 'sent';
+
+  // J/K and the arrow keys walk the list the reader was opened from, as long as
+  // the user is not typing somewhere and no other handler took the key first.
+  const readerOpen = message !== null || state === 'loading';
+  useEffect(() => {
+    if (onNavigate === undefined || !readerOpen || !shortcutsEnabled) {
+      return;
+    }
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) {
+        return;
+      }
+      const target = event.target;
+      if (target instanceof HTMLElement) {
+        const tag = target.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable) {
+          return;
+        }
+      }
+      // An open modal (compose) owns the keyboard while it is up.
+      if (document.querySelector('[aria-modal="true"]') !== null) {
+        return;
+      }
+      const older = event.key === 'k' || event.key === 'K' || event.key === 'ArrowUp';
+      const newer = event.key === 'j' || event.key === 'J' || event.key === 'ArrowDown';
+      if (older && prevId !== null) {
+        event.preventDefault();
+        onNavigate(prevId);
+        return;
+      }
+      if (newer && nextId !== null) {
+        event.preventDefault();
+        onNavigate(nextId);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [onNavigate, readerOpen, shortcutsEnabled, prevId, nextId]);
 
   const fullDate =
     message?.created_at !== undefined
@@ -318,6 +370,38 @@ export default function MailView({
           <ChevronLeft size={19} />
         </button>
         <span className="reader__bar-spacer" />
+        {onNavigate === undefined ? null : (
+          <div className="reader__nav" role="group" aria-label={`${t('mail.older')} / ${t('mail.newer')}`}>
+            <button
+              type="button"
+              className="icon-btn reader__nav-btn"
+              disabled={prevId === null}
+              onClick={() => {
+                if (prevId !== null) {
+                  onNavigate(prevId);
+                }
+              }}
+              aria-label={`${t('mail.older')} (K / ↑)`}
+              title={`${t('mail.older')} (K / ↑)`}
+            >
+              <ArrowLeft size={17} />
+            </button>
+            <button
+              type="button"
+              className="icon-btn reader__nav-btn"
+              disabled={nextId === null}
+              onClick={() => {
+                if (nextId !== null) {
+                  onNavigate(nextId);
+                }
+              }}
+              aria-label={`${t('mail.newer')} (J / ↓)`}
+              title={`${t('mail.newer')} (J / ↓)`}
+            >
+              <ArrowRight size={17} />
+            </button>
+          </div>
+        )}
         {isSent ? null : (
           <div className="reader__bar-actions">
             <button

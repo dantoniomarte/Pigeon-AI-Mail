@@ -28,6 +28,7 @@ import {
   textToHtml,
 } from './api';
 import { LANGUAGE_STORAGE_KEY, detectLanguage, isLanguageCode } from './i18n';
+import { type BulkOutcome, nextSurvivor, runBulk } from './bulk';
 import Compose from './components/Compose';
 import AdminPanel from './components/AdminPanel';
 import DraftsList from './components/DraftsList';
@@ -170,6 +171,9 @@ export default function App(): JSX.Element {
   const [detailDemo, setDetailDemo] = useState(false);
   const [detailToken, setDetailToken] = useState(0);
   const [readIds, setReadIds] = useState<Set<string>>(() => readReadIds());
+  // The ids MailList is actually showing, in display order: the reader walks
+  // this list for older/newer instead of refetching anything.
+  const [visibleIds, setVisibleIds] = useState<string[]>([]);
 
   const notify = useCallback((kind: ToastKind, message: string) => {
     toastId.current += 1;
@@ -399,6 +403,94 @@ export default function App(): JSX.Element {
       .catch(() => notify('error', t('common.error')));
   }, [key, notify, refresh, t]);
 
+  const handleVisibleIds = useCallback((ids: string[]) => {
+    // Compare before storing: MailList reports on every render pass and a new
+    // array identity would re-render the whole tree forever.
+    setVisibleIds((current) =>
+      current.length === ids.length && current.every((id, index) => id === ids[index]) ? current : ids,
+    );
+  }, []);
+
+  /* Bulk actions: the per-message routes, applied to a whole selection in
+     throttled chunks with one reload and one toast instead of N of each. */
+  const applyBulk = useCallback(
+    async (
+      ids: string[],
+      apply: (id: string) => Promise<void>,
+      copy: { done: (count: number) => string; failed: (done: number, failed: number) => string },
+    ): Promise<BulkOutcome> => {
+      const outcome = await runBulk(ids, { run: apply });
+      if (selectedId !== null && outcome.applied.includes(selectedId)) {
+        // The open message may have just left the visible list (read state,
+        // folder or deletion): hand the reader the next one instead of dropping
+        // the pane to its empty state.
+        setSelectedId(nextSurvivor(visibleIds, new Set(outcome.applied), selectedId));
+      }
+      refresh();
+      if (outcome.failed.length === 0) {
+        notify('success', copy.done(outcome.applied.length));
+      } else {
+        // One honest toast: what landed and what did not, never two at once.
+        notify(
+          outcome.applied.length === 0 ? 'error' : 'info',
+          copy.failed(outcome.applied.length, outcome.failed.length),
+        );
+      }
+      return outcome;
+    },
+    [notify, refresh, selectedId, visibleIds],
+  );
+
+  const handleMarkReadBulk = useCallback(
+    async (ids: string[], read: boolean): Promise<BulkOutcome> => {
+      const outcome = await applyBulk(
+        ids,
+        (id) => patchMessage(key, id, { read }),
+        {
+          done: (count) => t('mail.bulkDone', { count }),
+          failed: (done, failed) => t('mail.bulkPartial', { count: done, failed }),
+        },
+      );
+      // Move the local read set with the accepted PATCHes, so the rows lose (or
+      // regain) their bold weight before the reload finishes.
+      const accepted = new Set(outcome.applied);
+      if (accepted.size > 0) {
+        setReadIds((current) => {
+          const next = new Set(current);
+          for (const id of accepted) {
+            if (read) {
+              next.add(id);
+            } else {
+              next.delete(id);
+            }
+          }
+          persistReadIds(next);
+          return next;
+        });
+      }
+      return outcome;
+    },
+    [applyBulk, key, t],
+  );
+
+  const handleMoveBulk = useCallback(
+    (ids: string[], folder: 'inbox' | 'spam' | 'trash'): Promise<BulkOutcome> =>
+      applyBulk(ids, (id) => patchMessage(key, id, { folder }), {
+        done: (count) => t('mail.bulkDone', { count }),
+        failed: (done, failed) => t('mail.bulkPartial', { count: done, failed }),
+      }),
+    [applyBulk, key, t],
+  );
+
+  const handleDeleteBulk = useCallback(
+    (ids: string[]): Promise<BulkOutcome> =>
+      applyBulk(ids, (id) => deleteMessage(key, id), {
+        done: (count) => t('mail.bulkDeleted', { count }),
+        failed: (done, failed) => t('mail.bulkPartial', { count: done, failed }),
+      }),
+    [applyBulk, key, t],
+  );
+
   const items = useMemo<MailListItem[]>(() => {
     if (view === 'sent') {
       return sent.map((message) => ({
@@ -613,6 +705,11 @@ export default function App(): JSX.Element {
   // console both take the whole workspace.
   const showReading = selectedId !== null && view !== 'settings' && view !== 'admin';
 
+  // Older/newer walk the very list MailList renders, in its display order.
+  const navIndex = selectedId === null ? -1 : visibleIds.indexOf(selectedId);
+  const prevId = navIndex > 0 ? visibleIds[navIndex - 1] : null;
+  const nextId = navIndex >= 0 && navIndex + 1 < visibleIds.length ? visibleIds[navIndex + 1] : null;
+
   return (
     <div
       className={`app${showReading ? ' app--reading' : ''}${view === 'drafts' ? ' app--drafts' : ''}`}
@@ -692,8 +789,12 @@ export default function App(): JSX.Element {
               onMarkRead={handleMarkRead}
               onMove={handleMove}
               onDelete={handleDelete}
+              onMarkReadBulk={handleMarkReadBulk}
+              onMoveBulk={handleMoveBulk}
+              onDeleteBulk={handleDeleteBulk}
               onEmptyTrash={handleEmptyTrash}
               onSelect={setSelectedId}
+              onVisibleIds={handleVisibleIds}
               onRetry={() => setReloadToken((token) => token + 1)}
               onCompose={startCompose}
             />
@@ -710,6 +811,10 @@ export default function App(): JSX.Element {
               onMarkRead={handleMarkRead}
               onMove={handleMove}
               onDelete={handleDelete}
+              prevId={prevId}
+              nextId={nextId}
+              onNavigate={setSelectedId}
+              shortcutsEnabled={!sidebarOpen && !composeOpen}
             />
           </>
         )}

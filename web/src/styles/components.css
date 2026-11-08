@@ -987,6 +987,20 @@ body {
   font-size: 12.5px;
 }
 
+/* Older / newer: the reader walks the list it was opened from. */
+.reader__nav {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.reader__nav-btn {
+  /* 40px is the smallest comfortable target for a frequent action. */
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+}
+
 .reader__scroll {
   display: flex;
   flex-direction: column;
@@ -3277,6 +3291,150 @@ body[data-motion="off"] .mail-row__actions {
   .mail-row__actions {
     transition: none;
   }
+}
+
+/* ---------------------------------------------------------------------------
+   Selection — checkbox gutter, master checkbox, bulk action bar
+   --------------------------------------------------------------------------- */
+
+.checkbox {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  border-radius: 5px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.checkbox:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+/* Sits in the list header, so its outline should not shove the title around. */
+.check-all {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: center;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.check-all:hover {
+  background: var(--surface-2);
+}
+
+/* The label owns the click: the input keeps the semantics and the focus ring. */
+.check-all .checkbox {
+  pointer-events: none;
+}
+
+.check-all:focus-within {
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+/* A permanent gutter keeps the rows from jumping when the box fades in. */
+.mail-row--selectable {
+  padding-left: 38px;
+}
+
+.mail-row__select {
+  position: absolute;
+  top: 50%;
+  left: 4px;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  transform: translateY(-50%);
+  opacity: 0;
+  /* Invisible must also mean unclickable, exactly like the row actions. */
+  pointer-events: none;
+  transition: opacity var(--dur-1) var(--ease);
+}
+
+.mail-group__list li:hover .mail-row__select,
+.mail-group__list li:focus-within .mail-row__select,
+.mail-group__list li.is-checked .mail-row__select {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.mail-row__select:hover {
+  background: var(--surface-3);
+}
+
+.mail-group__list li.is-checked .mail-row:not(.is-selected) {
+  background: var(--surface-2);
+}
+
+/* Touch screens have no hover: the box stays visible and tappable. */
+@media (hover: none) {
+  .mail-row__select {
+    left: 0;
+    width: 40px;
+    height: 44px;
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .mail-row--selectable {
+    padding-left: 44px;
+  }
+}
+
+body[data-motion="off"] .mail-row__select {
+  transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mail-row__select {
+    transition: none;
+  }
+}
+
+/* Bulk bar replaces the segmented filter row while a selection is live, so it
+   is sticky with the list header and never scrolls away. */
+.bulk-bar {
+  grid-area: filter;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  padding: 5px 7px 5px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+  border-radius: 10px;
+  background: var(--accent-softer);
+}
+
+.bulk-bar__count {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.bulk-bar__actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.bulk-bar__actions .btn {
+  padding: 5px 9px;
+  font-size: 12px;
+}
+
+.bulk-bar__clear {
+  color: var(--muted);
 }
 
 /* ---------------------------------------------------------------- */

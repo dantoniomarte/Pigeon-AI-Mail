@@ -1,4 +1,4 @@
-import {  useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   AlertTriangle,
@@ -13,7 +13,9 @@ import {
 } from 'lucide-react';
 
 import { avatarHue, displayName, initials, type FolderCounts, type SentStatus } from '../api';
+import { deriveActiveIds, remainingSelection, type BulkOutcome } from '../bulk';
 import type { LoadState, View } from '../App';
+import BulkBar from './BulkBar';
 import type { CSSProperties } from 'react';
 
 export interface MailListItem {
@@ -50,8 +52,17 @@ export interface MailListProps {
   onMarkRead?: (id: string, read: boolean) => void;
   onMove?: (id: string, folder: 'inbox' | 'spam' | 'trash') => void;
   onDelete?: (id: string) => void;
+  /** Bulk variants: the same per-message endpoints, applied to a whole selection.
+   *  Each resolves with what the server accepted, so the selection can keep the
+   *  ids that failed. */
+  onMarkReadBulk?: (ids: string[], read: boolean) => Promise<BulkOutcome>;
+  onMoveBulk?: (ids: string[], folder: 'inbox' | 'spam' | 'trash') => Promise<BulkOutcome>;
+  onDeleteBulk?: (ids: string[]) => Promise<BulkOutcome>;
   onEmptyTrash?: () => void;
   onSelect: (id: string) => void;
+  /** Reports the ids on screen, in display order, so the reader can walk the
+   *  very same list without refetching anything. */
+  onVisibleIds?: (ids: string[]) => void;
   onRetry: () => void;
   onCompose: () => void;
 }
@@ -116,14 +127,26 @@ export default function MailList({
   onMarkRead,
   onMove,
   onDelete,
+  onMarkReadBulk,
+  onMoveBulk,
+  onDeleteBulk,
   onEmptyTrash,
   onSelect,
+  onVisibleIds,
   onRetry,
   onCompose,
 }: MailListProps): JSX.Element {
   const { t, i18n } = useTranslation();
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<MailFilter>('all');
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set<string>());
+  const [bulkBusy, setBulkBusy] = useState(false);
+  // Two-step confirm, like the drafts list: a bulk delete is irreversible.
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const masterRef = useRef<HTMLInputElement | null>(null);
+  // Sent mail is metadata-only on /v1/emails: the PATCH/DELETE message routes
+  // would 404 there, so bulk actions only exist for the mailbox folders.
+  const bulkEnabled = view !== 'sent' && (onMarkReadBulk !== undefined || onMoveBulk !== undefined || onDeleteBulk !== undefined);
 
   const timeFormat = useMemo(
     () => new Intl.DateTimeFormat(i18n.language, { hour: '2-digit', minute: '2-digit' }),
@@ -154,6 +177,94 @@ export default function MailList({
       );
     });
   }, [items, query, filter]);
+
+  /* Selection ------------------------------------------------------ */
+  const visibleIds = useMemo(() => visible.map((item) => item.id), [visible]);
+  // Only ids that are still on screen count: a row hidden by the unread filter
+  // or the search box must not be modified behind the user's back.
+  const activeIds = useMemo(() => deriveActiveIds(visibleIds, selectedIds), [visibleIds, selectedIds]);
+  const allVisibleSelected = visibleIds.length > 0 && activeIds.length === visibleIds.length;
+  const someVisibleSelected = activeIds.length > 0 && !allVisibleSelected;
+  const masterLabel = allVisibleSelected
+    ? t('mail.deselectAll')
+    : activeIds.length > 0
+      ? t('mail.selectedCount', { count: activeIds.length })
+      : t('mail.selectAll');
+
+  // A different folder or filter is a different set of rows.
+  useEffect(() => {
+    setSelectedIds((current) => (current.size === 0 ? current : new Set<string>()));
+    setConfirmDelete(false);
+  }, [view, filter, deliveredFilter]);
+
+  // `indeterminate` is a DOM property only, so it needs a ref.
+  useEffect(() => {
+    if (masterRef.current !== null) {
+      masterRef.current.indeterminate = someVisibleSelected;
+    }
+  }, [someVisibleSelected]);
+
+  const reportVisibleIds = useRef(onVisibleIds);
+  useEffect(() => {
+    reportVisibleIds.current = onVisibleIds;
+  }, [onVisibleIds]);
+  useEffect(() => {
+    reportVisibleIds.current?.(visibleIds);
+  }, [visibleIds]);
+
+  const toggleOne = useCallback((id: string, next: boolean) => {
+    setSelectedIds((current) => {
+      const copy = new Set(current);
+      if (next) {
+        copy.add(id);
+      } else {
+        copy.delete(id);
+      }
+      return copy;
+    });
+    setConfirmDelete(false);
+  }, []);
+
+  const toggleAllVisible = useCallback(() => {
+    setSelectedIds((current) => {
+      const copy = new Set(current);
+      const everyVisible = visibleIds.length > 0 && visibleIds.every((id) => current.has(id));
+      for (const id of visibleIds) {
+        if (everyVisible) {
+          copy.delete(id);
+        } else {
+          copy.add(id);
+        }
+      }
+      return copy;
+    });
+    setConfirmDelete(false);
+  }, [visibleIds]);
+
+  const clearSelection = useCallback(() => {
+    setSelectedIds(new Set<string>());
+    setConfirmDelete(false);
+  }, []);
+
+  const runBulkAction = useCallback(
+    async (action: (ids: string[]) => Promise<BulkOutcome>): Promise<void> => {
+      if (activeIds.length === 0 || bulkBusy) {
+        return;
+      }
+      const snapshot = [...activeIds];
+      setBulkBusy(true);
+      try {
+        const outcome = await action(snapshot);
+        // Only accepted ids leave the selection: a failed id stays checked (all
+        // of them when nothing succeeded) so the retry is one click away.
+        setSelectedIds((current) => remainingSelection(current, outcome.applied));
+      } finally {
+        setBulkBusy(false);
+        setConfirmDelete(false);
+      }
+    },
+    [activeIds, bulkBusy],
+  );
 
   const groups = useMemo<Group[]>(() => {
     const today = startOfDay(new Date());
@@ -283,10 +394,28 @@ export default function MailList({
     <section className="mail-list" aria-label={title}>
       <header className="mail-list__head">
         <div className="mail-list__title">
+          {bulkEnabled ? (
+            <label className="check-all" title={masterLabel}>
+              <input
+                ref={masterRef}
+                type="checkbox"
+                className="checkbox"
+                checked={allVisibleSelected}
+                disabled={visibleIds.length === 0}
+                aria-label={masterLabel}
+                onChange={toggleAllVisible}
+              />
+            </label>
+          ) : null}
           <h2>{title}</h2>
           <span className="mail-list__count">
             {countLabel}
             {spamCount !== null ? ` · ${spamCount}` : ''}
+          </span>
+          {/* Always mounted: a live region announced only when it appears is
+              silent in most screen readers. */}
+          <span className="sr-only" aria-live="polite" aria-atomic="true">
+            {activeIds.length > 0 ? t('mail.selectedCount', { count: activeIds.length }) : ''}
           </span>
         </div>
         <div className="mail-list__tools">
@@ -331,47 +460,85 @@ export default function MailList({
             </button>
           ) : null}
         </div>
-        {view === 'inbox' &&
-        deliveredOptions !== undefined &&
-        (deliveredOptions.length > 0 || (deliveredFilter ?? null) !== null) ? (
-          <label className="mail-list__delivered">
-            <span className="segmented__label">{t('mail.deliveredTo')}</span>
-            <select
-              className="input input--small"
-              value={deliveredFilter ?? ''}
-              onChange={(event) =>
-                onDeliveredFilter?.(event.target.value.length > 0 ? event.target.value : null)
+        {activeIds.length > 0 ? (
+          <BulkBar
+            count={activeIds.length}
+            busy={bulkBusy}
+            confirmDelete={confirmDelete}
+            canMarkRead={onMarkReadBulk !== undefined}
+            canSpam={onMoveBulk !== undefined && view !== 'spam'}
+            canTrash={onMoveBulk !== undefined && view !== 'trash'}
+            canDelete={onDeleteBulk !== undefined}
+            onMarkRead={(read) => {
+              if (onMarkReadBulk === undefined) {
+                return;
               }
-            >
-              <option value="">{t('mail.deliveredAll')}</option>
-              {deliveredOptions.map((option) => (
-                <option key={option.address} value={option.address}>
-                  {t('mail.deliveredOption', { address: option.address, count: option.count })}
-                </option>
-              ))}
-            </select>
-          </label>
-        ) : null}
-        {view === 'inbox' ? (
-          <div className="segmented" role="group" aria-label={t('mail.all')}>
-            <button
-              type="button"
-              aria-pressed={filter === 'all'}
-              className={`segmented__item${filter === 'all' ? ' is-active' : ''}`}
-              onClick={() => setFilter('all')}
-            >
-              {t('mail.all')}
-            </button>
-            <button
-              type="button"
-              aria-pressed={filter === 'unread'}
-              className={`segmented__item${filter === 'unread' ? ' is-active' : ''}`}
-              onClick={() => setFilter('unread')}
-            >
-              {t('mail.unread')}
-            </button>
-          </div>
-        ) : null}
+              void runBulkAction((ids) => onMarkReadBulk(ids, read));
+            }}
+            onMove={(folder) => {
+              if (onMoveBulk === undefined) {
+                return;
+              }
+              void runBulkAction((ids) => onMoveBulk(ids, folder));
+            }}
+            onDelete={() => {
+              // First click arms the confirmation, the second one really deletes.
+              if (!confirmDelete) {
+                setConfirmDelete(true);
+                return;
+              }
+              if (onDeleteBulk === undefined) {
+                return;
+              }
+              void runBulkAction((ids) => onDeleteBulk(ids));
+            }}
+            onClear={clearSelection}
+          />
+        ) : (
+          <>
+            {view === 'inbox' &&
+            deliveredOptions !== undefined &&
+            (deliveredOptions.length > 0 || (deliveredFilter ?? null) !== null) ? (
+              <label className="mail-list__delivered">
+                <span className="segmented__label">{t('mail.deliveredTo')}</span>
+                <select
+                  className="input input--small"
+                  value={deliveredFilter ?? ''}
+                  onChange={(event) =>
+                    onDeliveredFilter?.(event.target.value.length > 0 ? event.target.value : null)
+                  }
+                >
+                  <option value="">{t('mail.deliveredAll')}</option>
+                  {deliveredOptions.map((option) => (
+                    <option key={option.address} value={option.address}>
+                      {t('mail.deliveredOption', { address: option.address, count: option.count })}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
+            {view === 'inbox' ? (
+              <div className="segmented" role="group" aria-label={t('mail.all')}>
+                <button
+                  type="button"
+                  aria-pressed={filter === 'all'}
+                  className={`segmented__item${filter === 'all' ? ' is-active' : ''}`}
+                  onClick={() => setFilter('all')}
+                >
+                  {t('mail.all')}
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={filter === 'unread'}
+                  className={`segmented__item${filter === 'unread' ? ' is-active' : ''}`}
+                  onClick={() => setFilter('unread')}
+                >
+                  {t('mail.unread')}
+                </button>
+              </div>
+            ) : null}
+          </>
+        )}
       </header>
 
       {demo ? <p className="demo-banner">{t('mail.demoBanner')}</p> : null}
@@ -386,11 +553,31 @@ export default function MailList({
                   {group.items.map((item) => {
                     const hue = avatarHue(item.from);
                     const selected = item.id === selectedId;
+                    const checked = selectedIds.has(item.id);
                     return (
-                      <li key={item.id}>
+                      <li key={item.id} className={checked ? 'is-checked' : undefined}>
+                        {bulkEnabled ? (
+                          <span className="mail-row__select">
+                            <input
+                              type="checkbox"
+                              className="checkbox"
+                              checked={checked}
+                              aria-label={`${displayName(item.from)}: ${item.subject}`}
+                              onChange={(event) => toggleOne(item.id, event.target.checked)}
+                              onClick={(event) => event.stopPropagation()}
+                              onKeyDown={(event) => {
+                                // Space is native; Enter has to toggle by hand.
+                                if (event.key === 'Enter') {
+                                  event.preventDefault();
+                                  toggleOne(item.id, !checked);
+                                }
+                              }}
+                            />
+                          </span>
+                        ) : null}
                         <button
                           type="button"
-                          className={`mail-row${selected ? ' is-selected' : ''}${item.unread ? ' is-unread' : ''}`}
+                          className={`mail-row${bulkEnabled ? ' mail-row--selectable' : ''}${selected ? ' is-selected' : ''}${item.unread ? ' is-unread' : ''}`}
                           onClick={() => onSelect(item.id)}
                           aria-current={selected ? 'true' : undefined}
                         >

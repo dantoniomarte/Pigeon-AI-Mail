@@ -225,12 +225,15 @@ export interface DeliveredForCount {
 export class ApiError extends Error {
   readonly status: number;
   readonly code: string;
+  /** Seconds the server asked us to wait (429/503), in milliseconds. */
+  readonly retryAfterMs: number | null;
 
-  constructor(message: string, status: number, code: string) {
+  constructor(message: string, status: number, code: string, retryAfterMs: number | null = null) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
+    this.retryAfterMs = retryAfterMs;
   }
 
   get isNetwork(): boolean {
@@ -244,6 +247,31 @@ export class ApiError extends Error {
   get isForbidden(): boolean {
     return this.status === 403;
   }
+
+  /** The per-account rate-limit bucket said no; the request is safe to retry. */
+  get isRateLimited(): boolean {
+    return this.status === 429 || this.status === 503;
+  }
+}
+
+/** `Retry-After` is either delta-seconds or an HTTP date; both become milliseconds. */
+export function parseRetryAfter(value: string | null): number | null {
+  if (value === null) {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    return null;
+  }
+  const seconds = Number(trimmed);
+  if (Number.isFinite(seconds)) {
+    return Math.max(0, Math.round(seconds * 1000));
+  }
+  const date = Date.parse(trimmed);
+  if (Number.isNaN(date)) {
+    return null;
+  }
+  return Math.max(0, date - Date.now());
 }
 
 interface ProblemBody {
@@ -378,7 +406,7 @@ async function request<T>(key: string | null, path: string, init?: RequestInit):
     } catch {
       // Non-JSON error body: keep the status line.
     }
-    throw new ApiError(detail, response.status, code);
+    throw new ApiError(detail, response.status, code, parseRetryAfter(response.headers.get('Retry-After')));
   }
 
   if (response.status === 204) {
