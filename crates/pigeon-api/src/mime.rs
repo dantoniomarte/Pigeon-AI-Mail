@@ -222,27 +222,39 @@ fn single_body(send: &ValidatedSend) -> (Vec<(String, String)>, String) {
 
 fn text_body(text: &str) -> (Vec<(String, String)>, String) {
     (
-        vec![(
-            "Content-Type".to_string(),
-            "text/plain; charset=utf-8".to_string(),
-        )],
-        format!(
-            "Content-Transfer-Encoding: base64{CRLF}{CRLF}{}{CRLF}",
-            wrap_base64(&base64_bytes(text.as_bytes()))
-        ),
+        vec![
+            (
+                "Content-Type".to_string(),
+                "text/plain; charset=utf-8".to_string(),
+            ),
+            // The CTE is a PART HEADER: it must sit before the blank line that
+            // separates headers from the body. Writing it into the body string
+            // made clients render the literal header line and the raw base64
+            // (the text-only send path; the multipart/alternative path was
+            // always correct).
+            (
+                "Content-Transfer-Encoding".to_string(),
+                "base64".to_string(),
+            ),
+        ],
+        format!("{}{CRLF}", wrap_base64(&base64_bytes(text.as_bytes()))),
     )
 }
 
 fn html_body(html: &str) -> (Vec<(String, String)>, String) {
     (
-        vec![(
-            "Content-Type".to_string(),
-            "text/html; charset=utf-8".to_string(),
-        )],
-        format!(
-            "Content-Transfer-Encoding: base64{CRLF}{CRLF}{}{CRLF}",
-            wrap_base64(&base64_bytes(html.as_bytes()))
-        ),
+        vec![
+            (
+                "Content-Type".to_string(),
+                "text/html; charset=utf-8".to_string(),
+            ),
+            // Same part-header rule as text_body (see the comment there).
+            (
+                "Content-Transfer-Encoding".to_string(),
+                "base64".to_string(),
+            ),
+        ],
+        format!("{}{CRLF}", wrap_base64(&base64_bytes(html.as_bytes()))),
     )
 }
 
@@ -319,6 +331,46 @@ mod tests {
             "subject": "Invoice #2041 paid",
             "text": "Thanks!",
         })
+    }
+
+    #[test]
+    fn html_only_part_carries_cte_as_a_header() {
+        // Mirror of the text-only regression test: html_body() had the same
+        // body-string CTE defect, and base()-derived tests always carry a text
+        // part, so nothing exercised this function until now.
+        let mut json = base();
+        json["text"] = serde_json::Value::Null;
+        json["html"] = serde_json::json!("<p>Hi</p>");
+        let send = validated(json);
+        let mime = String::from_utf8(build(&send, "eml_cte_html", 1_793_923_200)).expect("utf8");
+        let header_block = mime.split("\r\n\r\n").next().expect("header block");
+        assert!(header_block.contains("Content-Type: text/html; charset=utf-8"));
+        assert!(header_block.contains("Content-Transfer-Encoding: base64"));
+        let body = mime.split("\r\n\r\n").nth(1).expect("body block");
+        assert!(!body.contains("Content-Transfer-Encoding"));
+    }
+
+    #[test]
+    fn text_only_part_carries_cte_as_a_header_not_body_text() {
+        // Regression: the CTE used to be written at the START of the body
+        // string, AFTER the header/body blank line — clients then rendered the
+        // literal "Content-Transfer-Encoding: base64" line and the raw base64
+        // as the message text (observed in production with an integrated
+        // transactional sender). The CTE is a part header and must precede
+        // the blank line.
+        let send = validated(base());
+        let mime = String::from_utf8(build(&send, "eml_cte_test", 1_793_923_200)).expect("utf8");
+        let header_block = mime.split("\r\n\r\n").next().expect("header block");
+        assert!(
+            header_block.contains("Content-Transfer-Encoding: base64"),
+            "CTE must be a header of the part, before the first blank line: {mime}"
+        );
+        // And the body itself must be pure base64 (no header text inside).
+        let body = mime.split("\r\n\r\n").nth(1).expect("body block");
+        assert!(
+            !body.contains("Content-Transfer-Encoding"),
+            "the body must not embed a header line: {body}"
+        );
     }
 
     #[test]
@@ -492,5 +544,21 @@ mod tests {
         // Text-only messages have no boundary at all, so compare token draws.
         assert!(one.contains("Content-Type: text/plain"));
         assert!(two.contains("Content-Type: text/plain"));
+    }
+    #[test]
+    fn text_only_body_part_bytes_is_a_well_formed_mime_entity() {
+        // Review round-1 follow-up: the PGP sealing path seals exactly what
+        // body_part_bytes() returns, so the text-only shape must be a valid
+        // MIME entity on its own: part headers, ONE blank line, then a body
+        // with no embedded header lines (the CTE now lives with the headers).
+        let send = validated(base());
+        let entity = String::from_utf8(body_part_bytes(&send)).expect("utf8");
+        let mut blocks = entity.split("\r\n\r\n");
+        let headers = blocks.next().expect("part headers");
+        assert!(headers.contains("Content-Type: text/plain; charset=utf-8"));
+        assert!(headers.contains("Content-Transfer-Encoding: base64"));
+        let body = blocks.next().expect("body");
+        assert!(!body.contains("Content-Transfer-Encoding"));
+        assert!(blocks.next().is_none(), "one header/body boundary only");
     }
 }
