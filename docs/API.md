@@ -32,10 +32,10 @@ Queues a message for delivery. Returns **202** (not 201, and not Resend's 200 �
 
 ```json
 {
-  "from": "Dana <dana@pigeonmail.dev>",
+  "from": "Dana <you@your-domain.com>",
   "to": ["carol@example.org", "dave@example.net"],
   "cc": [], "bcc": [],
-  "reply_to": "support@pigeonmail.dev",
+  "reply_to": "support@your-domain.com",
   "subject": "Invoice #2041 paid",
   "html": "<p>Thanks! Your renewal was processed.</p>",
   "text": "Thanks! Your renewal was processed.",
@@ -109,7 +109,7 @@ One invalid item never blocks the rest.
 
 ```json
 { "id": "eml_9f2a44c1", "status": "sent", "created_at": "...", "last_event": "...",
-  "from": "Dana <dana@pigeonmail.dev>", "to": ["carol@example.org"], "cc": [],
+  "from": "Dana <you@your-domain.com>", "to": ["carol@example.org"], "cc": [],
   "subject": "...", "tags": ["billing"], "sandbox": false,
   "mx": { "host": "mx1.example.org", "tls": "TLSv1.3" }, "e2e": "sealed" }
 ```
@@ -421,9 +421,15 @@ curl -X POST https://mail.example.com/v1/emails \
   -H "Authorization: Bearer pk_..." \
   -H "Idempotency-Key: invoice-2041-paid-v1" \
   -H "Content-Type: application/json" \
-  -d '{ "from": "Dana <dana@pigeonmail.dev>", "to": ["carol@example.org"],
+  -d '{ "from": "Dana <you@your-domain.com>", "to": ["carol@example.org"],
         "subject": "Invoice #2041 paid", "text": "Thanks! Your renewal was processed." }'
 ```
+
+> <!-- from-is-validated-note -->
+**`from` is validated.** It must be the calling account's own address or an
+> alias assigned to it (`GET /v1/aliases?mine=1` lists yours). Anything else is
+> `403` problem type `from-not-allowed` — see the sender-alias section below
+> for the supported "send as" path.
 
 Python: `requests.post(f"{url}/v1/emails", headers={"Authorization": f"Bearer {key}"}, json=payload)` — 202 → poll or webhook.
 
