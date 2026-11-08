@@ -3723,3 +3723,9 @@ body[data-motion="on"] .landing__hero > *:nth-child(4) { animation-delay: 0.24s;
   min-width: 180px;
   max-width: 100%;
 }
+
+
+/* Mobile-only sign-out in the top bar (desktop has it in the sidebar footer) */
+.topbar__signout {
+  display: none;
+}

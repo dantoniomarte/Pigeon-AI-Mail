@@ -1,4 +1,4 @@
-import { ChevronDown, Globe, Menu, Moon, PenLine, ShieldCheck, Sun, X } from 'lucide-react';
+import { ChevronDown, Globe, LogOut, Menu, Moon, PenLine, ShieldCheck, Sun, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import type { Theme } from '../api';
@@ -14,6 +14,7 @@ export interface TopBarProps {
   onOpenSidebar: () => void;
   sidebarOpen: boolean;
   onCompose: () => void;
+  onSignOut: () => void;
 }
 
 /** Inline pigeon mark — no external assets, colours come from tokens. */
@@ -98,6 +99,7 @@ export default function TopBar({
   onOpenSidebar,
   sidebarOpen,
   onCompose,
+  onSignOut,
 }: TopBarProps): JSX.Element {
   const { t } = useTranslation();
 
@@ -153,6 +155,15 @@ export default function TopBar({
           title={`${t('common.theme')}: ${theme === 'dark' ? t('common.light') : t('common.dark')}`}
         >
           {theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}
+        </button>
+        <button
+          type="button"
+          className="icon-btn topbar__signout"
+          onClick={onSignOut}
+          aria-label={t('common.signOut')}
+          title={t('common.signOut')}
+        >
+          <LogOut size={17} />
         </button>
         <MotionSwitch motion={motion} onToggle={onToggleMotion} />
         <button type="button" className="btn btn--primary topbar__compose" onClick={onCompose}>

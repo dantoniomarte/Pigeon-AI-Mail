@@ -468,6 +468,8 @@ export default function App(): JSX.Element {
     setSessionActive(false);
     setApiKeyFallback(false);
     setLoginOpen(false);
+    setSidebarOpen(false);
+    setDeliveredFilter(null);
     setComposeOpen(false);
     setComposeSeed(emptySeed(''));
     notify('info', t('toast.signedOut'));
@@ -629,6 +631,7 @@ export default function App(): JSX.Element {
         onOpenSidebar={() => setSidebarOpen((open) => !open)}
         sidebarOpen={sidebarOpen}
         onCompose={startCompose}
+        onSignOut={handleSignOut}
       />
 
       <span className="app__grain" aria-hidden="true" />

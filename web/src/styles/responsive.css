@@ -52,6 +52,10 @@
     box-shadow: var(--shadow-lg);
     transform: translateX(-104%);
     will-change: transform;
+    /* The drawer scrolls as a whole: the account block with the sign-out
+       button must stay reachable on short screens, not clipped by the fold. */
+    overflow-y: auto;
+    overscroll-behavior: contain;
     /* A closed drawer must leave the accessibility tree and the tab order, not
        just sit off-screen where keyboard and screen-reader users still hit it. */
     visibility: hidden;
@@ -60,6 +64,10 @@
   .sidebar.is-open {
     transform: translateX(0);
     visibility: visible;
+  }
+
+  .sidebar .nav {
+    overflow-y: visible;
   }
 
   .sidebar__close {
@@ -157,6 +165,10 @@
 
   .topbar__compose {
     display: none;
+  }
+
+  .topbar__signout {
+    display: grid;
   }
 
   .motion-switch__state {
@@ -482,5 +494,13 @@
   .mobile-tabs__item {
     font-size: 10.5px;
     padding: 9px 3px;
+  }
+}
+
+/* Very narrow phones: the topbar min-content exceeds 360px with the sign-out
+   button added — drop the motion switch there (toggle lives in Settings). */
+@media (max-width: 420px) {
+  .topbar .motion-switch {
+    display: none;
   }
 }
