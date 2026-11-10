@@ -300,7 +300,17 @@ export default function App(): JSX.Element {
     };
   }, [apiKey, reloadToken, sessionActive]);
 
+  const refresh = useCallback(() => setReloadToken((token) => token + 1), []);
+
+  // These actions only render inside the authenticated mailbox view, where
+  // apiKey is non-null; the guard keeps TypeScript honest.
+  const key = apiKey ?? '';
+
   /* Selected message body. Sent mail lives on /v1/emails (metadata only). */
+  // Opening a message is what makes it read, and read state feeds the server
+  // badge: the PATCH goes out once per message per session (the local set
+  // unbolds the row immediately, the refresh reconciles the count).
+  const openedPatchedRef = useRef(new Set<string>());
   useEffect(() => {
     if ((apiKey === null && !sessionActive) || selectedId === null || view === 'sent') {
       setDetail(null);
@@ -328,6 +338,15 @@ export default function App(): JSX.Element {
           persistReadIds(next);
           return next;
         });
+        if (!result.demo && !openedPatchedRef.current.has(selectedId)) {
+          openedPatchedRef.current.add(selectedId);
+          // The read flag lives on the server now: open marks read. A failure
+          // leaves the badge stale until the next refresh; the row is already
+          // unbolded and the next PATCH or refresh fixes the count.
+          void patchMessage(key, selectedId, { read: true })
+            .then(refresh)
+            .catch(() => undefined);
+        }
       })
       .catch((error: unknown) => {
         if (cancelled) {
@@ -338,13 +357,7 @@ export default function App(): JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, [apiKey, selectedId, detailToken, view, sessionActive]);
-
-  const refresh = useCallback(() => setReloadToken((token) => token + 1), []);
-
-  // These actions only render inside the authenticated mailbox view, where
-  // apiKey is non-null; the guard keeps TypeScript honest.
-  const key = apiKey ?? '';
+  }, [apiKey, selectedId, detailToken, view, sessionActive, key, refresh]);
 
   const handleMarkRead = useCallback((id: string, read: boolean) => {
     // Move the local read set with the PATCH: the row loses its bold weight and
@@ -539,10 +552,22 @@ export default function App(): JSX.Element {
     };
   }, [sentSelection]);
 
+  // The sidebar badge is the server's count, not a count of whatever the list is
+  // showing: `inbox` holds the *active* folder, so deriving the badge from it made
+  // the inbox claim the sent page's size as unread mail. `counts.unread_inbox` is
+  // the account's unread inbox, once, however many pages it spans. The local
+  // derivation survives only as the fallback for a page that arrived without
+  // counts (offline without demo data, or a failed read).
   const unreadCount = useMemo(
-    () => inbox.filter((message) => (demo ? (demoEnrichment(message.id)?.unread ?? false) : !readIds.has(message.id))).length,
-    [inbox, demo, readIds],
+    () =>
+      counts?.unread_inbox ??
+      inbox.filter((message) => (demo ? (demoEnrichment(message.id)?.unread ?? false) : !readIds.has(message.id))).length,
+    [counts, inbox, demo, readIds],
   );
+
+  // Same rule for Sent, which also fixes the badge's silent cap: the listing is
+  // one page of `/v1/emails`, `counts.sent` is every outbound row.
+  const sentCount = counts?.sent ?? sent.length;
 
   const handleSignOut = useCallback(() => {
     void logout().catch(() => { /* offline sign-out still completes locally */ });
@@ -738,7 +763,7 @@ export default function App(): JSX.Element {
           counts={counts}
           view={view}
           unreadCount={unreadCount}
-          sentCount={sent.length}
+          sentCount={sentCount}
           draftsCount={drafts.length}
           onSelect={handleSelectView}
           onCompose={startCompose}

@@ -1061,6 +1061,12 @@ pub struct MessageSummary {
 ///
 /// The sidebar renders one badge per folder, so the listing hands them over
 /// with the page instead of making the client issue four counting requests.
+///
+/// Each folder reports its size and, separately, how much of it is still
+/// unread: the badge is the account's unread mail, never the size of the page a
+/// client happens to be showing. `sent` carries no unread field at all — an
+/// outbound copy is never unread, and a `unread_sent: 0` would invite a client
+/// to render a badge that can never light up.
 #[derive(Debug, Clone, Serialize)]
 pub struct FolderCounts {
     /// Messages in `inbox`.
@@ -1071,6 +1077,12 @@ pub struct FolderCounts {
     pub spam: i64,
     /// Messages in `trash`.
     pub trash: i64,
+    /// Unread (`read_at IS NULL`) messages in `inbox`.
+    pub unread_inbox: i64,
+    /// Unread messages in `spam`.
+    pub unread_spam: i64,
+    /// Unread messages in `trash`.
+    pub unread_trash: i64,
 }
 
 /// One `delivered_for` marker with its inbox count: the webmail's pseudo-folder.

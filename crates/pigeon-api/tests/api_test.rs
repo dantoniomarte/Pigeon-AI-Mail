@@ -13,7 +13,7 @@ use axum::Router;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use pigeon_api::wkd::KeyFetcher;
-use pigeon_api::{ApiConfig, AppState};
+use pigeon_api::{ids, ApiConfig, AppState};
 use pigeon_core::{ApiKeyScope, Direction, EmailAddress, MessageFolder};
 use pigeon_crypto::MasterKey;
 use serde_json::{json, Value};
@@ -1216,6 +1216,165 @@ async fn empty_inbox_pages_and_decryption_requires_the_full_scope() {
         .get("/v1/messages/msg_00000001?sealed=false", Some(&read_only))
         .await;
     refused.assert_problem(StatusCode::FORBIDDEN, "forbidden");
+}
+
+/// The sidebar badges are the server's to answer: every folder reports its size
+/// *and* how much of it is still unread, so a client showing "Sent" cannot make
+/// the inbox badge claim the sent page's size.
+#[tokio::test]
+async fn folder_counts_report_per_folder_unread() {
+    let app = TestApp::new();
+
+    // An empty mailbox answers zeros, unread halves included: an absent field
+    // would push the webmail back onto a client-side guess.
+    let empty = app
+        .get("/v1/messages?folder=inbox", Some(&app.full_key))
+        .await;
+    assert_eq!(empty.status, StatusCode::OK, "{:?}", empty.body);
+    let counts = empty.body["counts"].as_object().expect("counts object");
+    for key in [
+        "inbox",
+        "sent",
+        "spam",
+        "trash",
+        "unread_inbox",
+        "unread_spam",
+        "unread_trash",
+    ] {
+        assert_eq!(
+            counts.get(key),
+            Some(&json!(0)),
+            "{key} on an empty mailbox: {:?}",
+            empty.body
+        );
+    }
+    assert!(
+        !counts.contains_key("unread_sent"),
+        "outbound mail is never unread, so sent reports no unread field: {:?}",
+        empty.body
+    );
+
+    // Mixed read/unread rows in three folders. Each folder's mix is asymmetric
+    // (more unread than read, or the other way round) so a filter that counted
+    // the wrong half could not land on the same number by accident.
+    let mut inbox_unread = Vec::new();
+    for subject in ["inbox unread a", "inbox unread b"] {
+        inbox_unread.push(seed_stored_message(
+            &app.state,
+            app.account_id,
+            MessageFolder::Inbox,
+            subject,
+        ));
+    }
+    let inbox_read = seed_stored_message(
+        &app.state,
+        app.account_id,
+        MessageFolder::Inbox,
+        "inbox read",
+    );
+    app.state
+        .store
+        .set_message_read(inbox_read, true)
+        .expect("mark inbox row read");
+
+    for _ in 0..3 {
+        seed_stored_message(
+            &app.state,
+            app.account_id,
+            MessageFolder::Trash,
+            "trash unread",
+        );
+    }
+    let trash_read = seed_stored_message(
+        &app.state,
+        app.account_id,
+        MessageFolder::Trash,
+        "trash read",
+    );
+    app.state
+        .store
+        .set_message_read(trash_read, true)
+        .expect("mark trash row read");
+
+    for _ in 0..2 {
+        seed_stored_message(
+            &app.state,
+            app.account_id,
+            MessageFolder::Spam,
+            "spam unread",
+        );
+    }
+
+    // An unread row that ended up in `sent`: a move (spam, here) keeps `read_at`
+    // NULL, so the row is genuinely unread and yet must not be reported as
+    // anybody's unread mail — outbound copies are never unread.
+    let outbound = seed_stored_message(
+        &app.state,
+        app.account_id,
+        MessageFolder::Inbox,
+        "outbound unread",
+    );
+    app.state
+        .store
+        .set_message_folder(outbound, MessageFolder::Sent)
+        .expect("move to sent");
+
+    let page = app
+        .get("/v1/messages?folder=inbox", Some(&app.full_key))
+        .await;
+    assert_eq!(page.status, StatusCode::OK, "{:?}", page.body);
+    assert_eq!(
+        page.body["counts"],
+        json!({
+            "inbox": 3,
+            "sent": 1,
+            "spam": 2,
+            "trash": 4,
+            "unread_inbox": 2,
+            "unread_spam": 2,
+            "unread_trash": 3,
+        }),
+        "per-folder totals and unread: {:?}",
+        page.body
+    );
+
+    // The counts ride along with every folder's page: the badge is the account's
+    // unread mail, never the size of the page the client happens to be showing.
+    let sent_page = app
+        .get("/v1/messages?folder=sent", Some(&app.full_key))
+        .await;
+    assert_eq!(sent_page.status, StatusCode::OK, "{:?}", sent_page.body);
+    assert_eq!(
+        sent_page.body["items"][0]["read"], false,
+        "the sent copy really is unread: {:?}",
+        sent_page.body
+    );
+    assert_eq!(
+        sent_page.body["counts"]["unread_inbox"], 2,
+        "the inbox badge does not follow the active folder: {:?}",
+        sent_page.body
+    );
+
+    // Reading one inbox row moves only the unread half, and every other folder's
+    // unread count is untouched.
+    let patched = app
+        .patch(
+            &format!("/v1/messages/{}", ids::derived(ids::MSG, inbox_unread[0])),
+            Some(&app.full_key),
+            json!({ "read": true }),
+        )
+        .await;
+    assert_eq!(patched.status, StatusCode::OK, "{:?}", patched.body);
+    let after = app
+        .get("/v1/messages?folder=inbox", Some(&app.full_key))
+        .await;
+    assert_eq!(after.body["counts"]["inbox"], 3, "{:?}", after.body);
+    assert_eq!(after.body["counts"]["unread_inbox"], 1, "{:?}", after.body);
+    assert_eq!(
+        after.body["counts"]["unread_trash"], 3,
+        "another folder's unread is untouched: {:?}",
+        after.body
+    );
 }
 
 #[tokio::test]

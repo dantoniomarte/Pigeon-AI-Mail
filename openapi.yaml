@@ -3059,11 +3059,17 @@ components:
     FolderCounts:
       type: object
       additionalProperties: false
+      description: Per-folder totals and unread counts for the caller's account, so a client renders the
+        sidebar badges without a second request. `sent` carries no unread field because an outbound copy
+        is never unread.
       required:
       - inbox
       - sent
       - spam
       - trash
+      - unread_inbox
+      - unread_spam
+      - unread_trash
       properties:
         inbox:
           type: integer
@@ -3075,6 +3081,16 @@ components:
           type: integer
           minimum: 0
         trash:
+          type: integer
+          minimum: 0
+        unread_inbox:
+          type: integer
+          minimum: 0
+          description: Inbox messages whose read state is still unread.
+        unread_spam:
+          type: integer
+          minimum: 0
+        unread_trash:
           type: integer
           minimum: 0
     MessagePatch:

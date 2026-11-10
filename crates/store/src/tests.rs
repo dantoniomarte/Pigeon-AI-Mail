@@ -1089,6 +1089,89 @@ fn count_folder_counts_one_account_and_folder() {
     );
 }
 
+/// The sidebar badges need the unread half, not only the totals: one query must
+/// answer both, and the two halves must count independently.
+#[test]
+fn count_folder_with_unread_splits_read_and_unread_rows() {
+    let fixture = fixture();
+    let account_id = new_account(&fixture.storage);
+    let other_account = fixture
+        .storage
+        .create_account(&addr("other@example.com"))
+        .unwrap();
+
+    assert_eq!(
+        fixture
+            .storage
+            .count_folder_with_unread(account_id, MessageFolder::Inbox)
+            .unwrap(),
+        (0, 0),
+        "an empty folder is zero total and zero unread, not an error"
+    );
+
+    // Inbox: two deliveries still unread, one the owner already opened.
+    let unread_a = seed_message(&fixture.storage, account_id);
+    let unread_b = seed_message(&fixture.storage, account_id);
+    let read_one = seed_message(&fixture.storage, account_id);
+    fixture.storage.set_message_read(read_one, true).unwrap();
+
+    // Trash: one trashed message that had been read, one never opened.
+    let trashed_read = seed_message(&fixture.storage, account_id);
+    fixture
+        .storage
+        .set_message_read(trashed_read, true)
+        .unwrap();
+    fixture
+        .storage
+        .set_message_folder(trashed_read, MessageFolder::Trash)
+        .unwrap();
+    let trashed_unread = seed_message(&fixture.storage, account_id);
+    fixture
+        .storage
+        .set_message_folder(trashed_unread, MessageFolder::Trash)
+        .unwrap();
+
+    // Another account's rows must never leak into either half.
+    seed_message(&fixture.storage, other_account);
+
+    assert_eq!(
+        fixture
+            .storage
+            .count_folder_with_unread(account_id, MessageFolder::Inbox)
+            .unwrap(),
+        (3, 2),
+        "total and unread are counted independently"
+    );
+    assert_eq!(
+        fixture
+            .storage
+            .count_folder_with_unread(account_id, MessageFolder::Trash)
+            .unwrap(),
+        (2, 1),
+        "read state follows the message into the trash"
+    );
+    assert_eq!(
+        fixture
+            .storage
+            .count_folder_with_unread(other_account, MessageFolder::Inbox)
+            .unwrap(),
+        (1, 1),
+        "counts never leak across accounts, unread included"
+    );
+
+    // Reading the remaining inbox rows moves only the unread half.
+    fixture.storage.set_message_read(unread_a, true).unwrap();
+    fixture.storage.set_message_read(unread_b, true).unwrap();
+    assert_eq!(
+        fixture
+            .storage
+            .count_folder_with_unread(account_id, MessageFolder::Inbox)
+            .unwrap(),
+        (3, 0),
+        "totals survive a read pass; only the unread half changes"
+    );
+}
+
 #[test]
 fn set_message_read_stamps_and_clears_the_timestamp() {
     let fixture = fixture();

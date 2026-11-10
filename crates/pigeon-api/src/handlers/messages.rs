@@ -328,23 +328,50 @@ fn summary(row: &MessageRow) -> MessageSummary {
 }
 
 /// Sidebar counts for every folder of one account.
+///
+/// Each folder is one counting query that returns both its size and its unread
+/// half. `sent` only contributes a size: outbound copies are never unread for
+/// the webmail, which never marks them read, so reporting an unread number there
+/// would be a badge that can never be cleared.
 fn folder_counts(state: &AppState, account_id: i64) -> Result<FolderCounts, Problem> {
     let mut counts = FolderCounts {
         inbox: 0,
         sent: 0,
         spam: 0,
         trash: 0,
+        unread_inbox: 0,
+        unread_spam: 0,
+        unread_trash: 0,
     };
     for folder in MessageFolder::all() {
-        let count = state
-            .store
-            .count_folder(account_id, *folder)
-            .map_err(Problem::from)?;
         match folder {
-            MessageFolder::Inbox => counts.inbox = count,
-            MessageFolder::Sent => counts.sent = count,
-            MessageFolder::Spam => counts.spam = count,
-            MessageFolder::Trash => counts.trash = count,
+            MessageFolder::Sent => {
+                counts.sent = state
+                    .store
+                    .count_folder(account_id, *folder)
+                    .map_err(Problem::from)?;
+            }
+            MessageFolder::Inbox | MessageFolder::Spam | MessageFolder::Trash => {
+                let (total, unread) = state
+                    .store
+                    .count_folder_with_unread(account_id, *folder)
+                    .map_err(Problem::from)?;
+                match folder {
+                    MessageFolder::Inbox => {
+                        counts.inbox = total;
+                        counts.unread_inbox = unread;
+                    }
+                    MessageFolder::Spam => {
+                        counts.spam = total;
+                        counts.unread_spam = unread;
+                    }
+                    MessageFolder::Trash => {
+                        counts.trash = total;
+                        counts.unread_trash = unread;
+                    }
+                    MessageFolder::Sent => unreachable!("sent is counted above"),
+                }
+            }
         }
     }
     Ok(counts)

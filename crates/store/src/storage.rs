@@ -537,6 +537,21 @@ pub trait Storage {
     /// Number of messages of `account_id` in `folder`, for the sidebar badges.
     fn count_folder(&self, account_id: i64, folder: MessageFolder) -> Result<i64>;
 
+    /// Total and unread count of `account_id`'s `folder`, as `(total, unread)`.
+    ///
+    /// The webmail shows one badge per folder: the folder's size and, separately,
+    /// how much of it is still unread. Both halves come from the same query so a
+    /// badge can never disagree with itself, and `unread` follows the same rule as
+    /// [`Storage::set_message_read`]: a row is unread while `read_at` is `NULL`.
+    ///
+    /// Outbound copies live in `sent` and are never unread (the webmail never
+    /// opens them), so callers reporting that folder use only the total.
+    fn count_folder_with_unread(
+        &self,
+        account_id: i64,
+        folder: MessageFolder,
+    ) -> Result<(i64, i64)>;
+
     /// One page of the inbox that was delivered **for** `delivered_for` (an alias
     /// or a catch-all local part), newest first.
     ///
@@ -2044,6 +2059,24 @@ impl Storage for SqliteStorage {
             "SELECT COUNT(*) FROM messages WHERE account_id = ?1 AND folder = ?2",
             params![account_id, folder.as_str()],
             |row| row.get(0),
+        )?)
+    }
+
+    fn count_folder_with_unread(
+        &self,
+        account_id: i64,
+        folder: MessageFolder,
+    ) -> Result<(i64, i64)> {
+        let conn = self.lock();
+        // Both halves in one statement: `COALESCE` keeps an empty folder at 0
+        // instead of `SUM` over no rows returning NULL, and the equality on
+        // `(account_id, folder)` still walks `idx_messages_folder`.
+        Ok(conn.query_row(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(CASE WHEN read_at IS NULL THEN 1 ELSE 0 END), 0)
+               FROM messages WHERE account_id = ?1 AND folder = ?2",
+            params![account_id, folder.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )?)
     }
 

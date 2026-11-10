@@ -287,6 +287,18 @@ export interface FolderCounts {
   sent: number;
   spam: number;
   trash: number;
+  /**
+   * Unread messages per folder, straight from the server.
+   *
+   * The sidebar badge is the account's unread mail, never the size of whichever
+   * folder the list is showing: sent mail is never marked read, so a badge
+   * derived from the active listing claimed the sent page's size was unread
+   * inbox mail. `sent` has no unread member at all — an outbound copy is never
+   * unread.
+   */
+  unread_inbox: number;
+  unread_spam: number;
+  unread_trash: number;
 }
 
 interface MessagePage {
@@ -560,6 +572,25 @@ const DEMO_SENT: SentMessage[] = [
 /* Reads                                                               */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Folder counts for the demo mailbox, derived from the sample mail itself.
+ *
+ * Demo mode has no server to count for it, and a hand-written constant would
+ * drift from the rows on screen the moment a sample is added. Deriving both
+ * halves keeps an offline badge telling the same story as the list under it.
+ */
+function demoCounts(): FolderCounts {
+  return {
+    inbox: DEMO_MESSAGES.length,
+    sent: DEMO_SENT.length,
+    spam: 0,
+    trash: 0,
+    unread_inbox: DEMO_MESSAGES.filter((message) => message.unread).length,
+    unread_spam: 0,
+    unread_trash: 0,
+  };
+}
+
 export async function fetchFolder(
   key: string | null,
   folder: MailFolder,
@@ -584,14 +615,17 @@ export async function fetchFolder(
     };
   } catch (error) {
     if (isNetworkError(error) && folder === 'inbox') {
-      return offline(
-        DEMO_MESSAGES.map((message) => ({
-          id: message.id,
-          from_addr: message.from_addr,
-          subject: message.subject,
-          created_at: message.created_at,
-        })),
-      );
+      return {
+        ...offline(
+          DEMO_MESSAGES.map((message) => ({
+            id: message.id,
+            from_addr: message.from_addr,
+            subject: message.subject,
+            created_at: message.created_at,
+          })),
+        ),
+        counts: demoCounts(),
+      };
     }
     throw error;
   }
@@ -603,7 +637,7 @@ export async function fetchSent(key: string | null): Promise<ReadResult<SentMess
     return { data: page.items, demo: false };
   } catch (error) {
     if (isNetworkError(error)) {
-      return offline(DEMO_SENT);
+      return { ...offline(DEMO_SENT), counts: demoCounts() };
     }
     throw error;
   }

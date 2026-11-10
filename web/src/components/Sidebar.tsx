@@ -18,7 +18,13 @@ import { PigeonLogo } from './TopBar';
 
 export interface SidebarProps {
   view: View;
+  /**
+   * Inbox badge: the account's unread inbox mail, resolved by `App` from the
+   * server's `counts.unread_inbox` and falling back to a local count only when
+   * that page carried no counts.
+   */
   unreadCount: number;
+  /** Sent badge: every outbound row (`counts.sent`), not just the loaded page. */
   sentCount: number;
   /** Saved drafts, shown as a badge like the other folders. */
   draftsCount: number;

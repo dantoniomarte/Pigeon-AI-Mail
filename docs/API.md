@@ -122,13 +122,14 @@ Lifecycle: `queued → scheduled → sending → sent | deferred {next_attempt_a
 
 ## Receive (inbound)
 
-### `GET /v1/messages?folder=inbox|sent|spam|trash&limit≤500&offset&delivered_for` — metadata page (never bodies). `folder` defaults to `inbox`; an unknown value is `422 validation`. The folder follows the message's direction: mail this account sends is stored in `sent` when it is accepted by `POST /v1/emails`, and received mail — alias and catch-all copies included — is stored in `inbox`, which is why those keep a `delivered_for` marker instead of a folder of their own. Items carry `folder`, `read` and — for mail that arrived for a shared address — `delivered_for`, and the page carries `counts: {inbox, sent, spam, trash}` for the sidebar badges plus `delivered_for_counts: [{address, count}]` — one request renders the whole mailbox, shared addresses included. When `delivered_for` is present, the listing is pinned to the inbox and the `folder` parameter is ignored.
+### `GET /v1/messages?folder=inbox|sent|spam|trash&limit≤500&offset&delivered_for` — metadata page (never bodies). `folder` defaults to `inbox`; an unknown value is `422 validation`. The folder follows the message's direction: mail this account sends is stored in `sent` when it is accepted by `POST /v1/emails`, and received mail — alias and catch-all copies included — is stored in `inbox`, which is why those keep a `delivered_for` marker instead of a folder of their own. Items carry `folder`, `read` and — for mail that arrived for a shared address — `delivered_for`, and the page carries `counts: {inbox, sent, spam, trash, unread_inbox, unread_spam, unread_trash}` for the sidebar badges plus `delivered_for_counts: [{address, count}]` — one request renders the whole mailbox, shared addresses included. The unread members count the rows of that folder whose read state is still unread, so a badge never has to be derived from whichever folder the client is currently listing; `sent` has no unread member at all, because an outbound copy is never unread. When `delivered_for` is present, the listing is pinned to the inbox and the `folder` parameter is ignored.
 
 ```json
 { "items": [ { "id": "msg_00000001", "from_addr": "carol@example.org", "subject": "...",
                 "created_at": "...", "folder": "inbox", "read": true } ],
   "page": { "total": 1, "has_more": false, "next_offset": null },
-  "counts": { "inbox": 1, "sent": 0, "spam": 0, "trash": 0 } }
+  "counts": { "inbox": 1, "sent": 0, "spam": 0, "trash": 0,
+              "unread_inbox": 0, "unread_spam": 0, "unread_trash": 0 } }
 ```
 
 ### `PATCH /v1/messages/{id}` — `{folder?: inbox|sent|spam|trash, read?: bool}`, at least one member. Moves the message and/or flips read state and returns the updated metadata (`200`). Unknown id → `404`, unknown folder → `422 validation`.
