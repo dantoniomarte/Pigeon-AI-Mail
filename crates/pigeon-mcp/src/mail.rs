@@ -157,6 +157,119 @@ pub fn draft_send(args: &serde_json::Value, state: &McpState) -> Result<String, 
     .to_string())
 }
 
+/// `export_message` — back up one message as its original RFC822 document.
+///
+/// The account's own rows only, either id shape, decrypted with the stored
+/// content key — the same bytes `GET /v1/messages/{id}/export` returns.
+pub fn export_message(args: &serde_json::Value, state: &McpState) -> Result<String, String> {
+    let actor = aux::actor(state)?;
+    let row_id = aux::message_row_id(aux::required_str(args, "id")?)?;
+    let message = owned_message(state, &actor, row_id)?;
+    let aad = format!("account:{}:message:{}", actor.account_id, message.id);
+    let stored = aux::api_db()?
+        .message_by_public_id(actor.account_id, &aux::message_public_id(row_id))
+        .map_err(|error| aux::store_error("could not resolve the message", error))?
+        .ok_or_else(|| {
+            format!(
+                "message {} has no lifecycle row to decrypt with",
+                aux::message_public_id(row_id)
+            )
+        })?;
+    let key = state
+        .master_key
+        .unwrap_content_key(
+            stored.wrapped_key.as_ref().ok_or_else(|| {
+                format!(
+                    "message {} has no wrapped content key",
+                    aux::message_public_id(row_id)
+                )
+            })?,
+            aad.as_bytes(),
+        )
+        .map_err(|error| format!("could not unwrap the content key: {error}"))?;
+    let document = pigeon_crypto::open_content(&key, &stored.sealed_body, aad.as_bytes())
+        .map_err(|error| format!("could not open the message body: {error}"))?;
+    let eml = String::from_utf8_lossy(&document).into_owned();
+    aux::audit(state, "message.export", &aux::message_public_id(row_id));
+    Ok(serde_json::json!({
+        "id": aux::message_public_id(row_id),
+        "format": "rfc822",
+        "bytes": document.len(),
+        "eml": eml,
+    })
+    .to_string())
+}
+
+/// `export_folder` — back up a whole folder as one mbox archive.
+pub fn export_folder(args: &serde_json::Value, state: &McpState) -> Result<String, String> {
+    let actor = aux::actor(state)?;
+    let raw_folder = aux::required_str(args, "folder")?;
+    let folder = MessageFolder::parse(raw_folder).ok_or_else(|| {
+        format!("`folder` must be one of inbox|sent|spam|trash, got {raw_folder:?}")
+    })?;
+    let mut archive = String::new();
+    let mut count = 0usize;
+    let mut skipped = 0usize;
+    let mut offset = 0i64;
+    loop {
+        let rows = state
+            .store
+            .list_folder(actor.account_id, folder, 100, offset)
+            .map_err(|error| aux::store_error("could not read the folder", error))?;
+        if rows.is_empty() {
+            break;
+        }
+        for row in rows {
+            let public_id = aux::message_public_id(row.id);
+            let stored = match aux::api_db()?.message_by_public_id(actor.account_id, &public_id) {
+                Ok(Some(stored)) => stored,
+                Ok(None) => {
+                    skipped += 1;
+                    continue;
+                }
+                Err(error) => return Err(aux::store_error("could not resolve a message", error)),
+            };
+            let aad = format!("account:{}:message:{}", actor.account_id, row.id);
+            let key = match stored.wrapped_key.as_ref() {
+                Some(wrapped) => match state.master_key.unwrap_content_key(wrapped, aad.as_bytes())
+                {
+                    Ok(key) => key,
+                    Err(error) => return Err(format!("could not unwrap the content key: {error}")),
+                },
+                None => {
+                    skipped += 1;
+                    continue;
+                }
+            };
+            let document = pigeon_crypto::open_content(&key, &stored.sealed_body, aad.as_bytes())
+                .map_err(|error| format!("could not open a message body: {error}"))?;
+            archive.push_str(&format!("From {} {}\n", row.from_addr, row.created_at));
+            archive.push_str(&pigeon_api::mime::mbox_escape(&String::from_utf8_lossy(
+                &document,
+            )));
+            if !archive.ends_with('\n') {
+                archive.push('\n');
+            }
+            archive.push('\n');
+            count += 1;
+        }
+        offset += 100;
+    }
+    aux::audit(
+        state,
+        "message.export",
+        &format!("folder={folder} count={count} skipped={skipped}"),
+    );
+    Ok(serde_json::json!({
+        "folder": folder.as_str(),
+        "format": "mbox",
+        "count": count,
+        "skipped": skipped,
+        "mbox": archive,
+    })
+    .to_string())
+}
+
 /// `move_message` — move one message to another folder.
 pub fn move_message(args: &serde_json::Value, state: &McpState) -> Result<String, String> {
     let actor = aux::actor(state)?;

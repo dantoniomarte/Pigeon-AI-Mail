@@ -101,7 +101,7 @@ roles, one account per organization, catch-all targets inside the routed domain)
 and writes the same audit log (`mcp:agent`). Scopes are the HTTP scopes; MCP adds
 no privilege the API does not have.
 
-### The 33 tools
+### The 35 tools
 
 | Group | Tools | What an agent does with them |
 |---|---|---|
@@ -179,7 +179,7 @@ Full guide: [docs/AGENTS.md](docs/AGENTS.md).
 | **Hermes** | [`config/hermes/mcp.yaml`](config/hermes/mcp.yaml) | copy to the Hermes config dir as `mcp.yaml` |
 | **Any MCP client** | [`config/generic/mcp-stdio.json`](config/generic/mcp-stdio.json) | stdio descriptor: `pigeon mcp` + `PIGEON_DB_PATH`, `PIGEON_MASTER_KEY_FILE` |
 | **Docker (remote host)** | [`config/docker/mcp-docker.json`](config/docker/mcp-docker.json) | stdio through `docker exec -i <container> pigeon mcp` — no key leaves the host |
-| **Remote over HTTPS** | [`config/remote/`](config/remote/) | `PIGEON_URL` + `PIGEON_API_KEY` (`pk_…`); REST equivalents of all 33 tools in [`api-examples.md`](config/remote/api-examples.md) |
+| **Remote over HTTPS** | [`config/remote/`](config/remote/) | `PIGEON_URL` + `PIGEON_API_KEY` (`pk_…`); REST equivalents of all 35 tools in [`api-examples.md`](config/remote/api-examples.md) |
 
 ```bash
 # copy a platform config and print its placement steps

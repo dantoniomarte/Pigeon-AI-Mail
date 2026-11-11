@@ -16,6 +16,8 @@ function setup(overrides: Partial<BulkBarProps> = {}): {
     canSpam: true,
     canTrash: true,
     canDelete: true,
+    canExport: true,
+    onExport: vi.fn(),
     onMarkRead: vi.fn(),
     onMove: vi.fn(),
     onDelete: vi.fn(),
@@ -79,5 +81,20 @@ describe('BulkBar', () => {
     expect(screen.queryByRole('button', { name: 'Delete' })).toBeNull();
     // Clearing the selection is always available.
     expect(screen.getByRole('button', { name: 'Clear selection' })).toBeInTheDocument();
+  });
+});
+
+describe('BulkBar export', () => {
+  it('offers the selection backup and forwards the click', async () => {
+    const user = userEvent.setup();
+    const onExport = vi.fn();
+    setup({ onExport });
+    await user.click(screen.getByRole('button', { name: 'Export selection (.mbox)' }));
+    expect(onExport).toHaveBeenCalledTimes(1);
+  });
+
+  it('hides the export affordance when the capability is off', () => {
+    setup({ canExport: false });
+    expect(screen.queryByRole('button', { name: 'Export selection (.mbox)' })).not.toBeInTheDocument();
   });
 });

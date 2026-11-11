@@ -680,6 +680,162 @@ fn split_parts(plaintext: &[u8]) -> (Option<String>, Option<String>) {
     }
 }
 
+/// Resolve either public id shape (`msg_` mailbox id or `eml_` sent id) to the
+/// stored message, without the write-path guards: exports are read-only.
+fn resolve_exportable(
+    state: &AppState,
+    account_id: i64,
+    id: &str,
+) -> Result<StoredMessage, Problem> {
+    if !ids::is_well_formed(id, ids::MSG) && !ids::is_well_formed(id, ids::EML) {
+        return Err(not_found(format!("{id:?} is not a message id")));
+    }
+    state
+        .db
+        .message_by_public_id(account_id, id)
+        .map_err(Problem::from)?
+        .ok_or_else(|| not_found(format!("message {id} not found")))
+}
+
+/// `GET /v1/messages/{id}/export` — the original RFC822 document as an
+/// attachment. One-message backup: the exact wire bytes the account received
+/// or sent, decrypted with the `full` scope like every other body read.
+pub async fn export_message(
+    State(state): State<AppState>,
+    Extension(context): Extension<ApiKeyContext>,
+    Path(id): Path<String>,
+) -> Response {
+    let result = blocking(move || {
+        if !context.has_scope(ApiKeyScope::Full) {
+            return Err(forbidden(
+                "backups expose decrypted content and require an API key with the `full` scope",
+            ));
+        }
+        let stored = resolve_exportable(&state, context.account_id, &id)?;
+        let document = open_body(&state, context.account_id, &stored)?;
+        Ok((stored.public_id, document))
+    })
+    .await;
+    match result {
+        Ok((public_id, document)) => {
+            let disposition = format!("attachment; filename=\"pigeon-{public_id}.eml\"");
+            (
+                StatusCode::OK,
+                [
+                    (
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("message/rfc822"),
+                    ),
+                    (
+                        header::CONTENT_DISPOSITION,
+                        HeaderValue::from_str(&disposition).expect("ascii header"),
+                    ),
+                ],
+                document,
+            )
+                .into_response()
+        }
+        Err(problem) => problem.into_response(),
+    }
+}
+
+/// `GET /v1/messages/export?folder=<f>` — the whole folder as one mbox
+/// archive (mboxrd). Pages through the folder listing and decrypts every
+/// stored document with the `full` scope; rows that cannot be opened — a
+/// missing lifecycle row or content key, which a crashed ingest can leave
+/// behind — are skipped and counted in `X-Export-Skipped` instead of
+/// failing the whole backup.
+pub async fn export_folder(
+    State(state): State<AppState>,
+    Extension(context): Extension<ApiKeyContext>,
+    Query(params): Query<Params>,
+) -> Response {
+    let result = blocking(move || {
+        if !context.has_scope(ApiKeyScope::Full) {
+            return Err(forbidden(
+                "backups expose decrypted content and require an API key with the `full` scope",
+            ));
+        }
+        let folder = parse_folder(params.get("folder").map(String::as_str).unwrap_or("inbox"))?;
+        let mut archive = String::new();
+        let mut offset = 0i64;
+        let mut skipped = 0usize;
+        loop {
+            let rows = state
+                .store
+                .list_folder(context.account_id, folder, 100, offset)
+                .map_err(Problem::from)?;
+            if rows.is_empty() {
+                break;
+            }
+            for row in rows {
+                let public_id = ids::derived(ids::MSG, row.id);
+                let Some(stored) = state
+                    .db
+                    .message_by_public_id(context.account_id, &public_id)
+                    .map_err(Problem::from)?
+                else {
+                    skipped += 1;
+                    continue;
+                };
+                // A row the ingest crashed between its two inserts (message
+                // row written, lifecycle row not yet) has no content key: it
+                // is skipped and counted, never allowed to abort the backup.
+                let document = match open_body(&state, context.account_id, &stored) {
+                    Ok(document) => document,
+                    Err(problem) if problem.status == StatusCode::CONFLICT => {
+                        skipped += 1;
+                        continue;
+                    }
+                    Err(problem) => return Err(problem),
+                };
+                let text = String::from_utf8_lossy(&document).into_owned();
+                archive.push_str(&format!(
+                    "From {} {}\n",
+                    stored.from_addr, stored.created_at
+                ));
+                archive.push_str(&crate::mime::mbox_escape(&text));
+                if !archive.ends_with('\n') {
+                    archive.push('\n');
+                }
+                archive.push('\n');
+            }
+            offset += 100;
+        }
+        Ok((folder, skipped, archive))
+    })
+    .await;
+    match result {
+        Ok((folder, skipped, archive)) => {
+            let disposition = format!(
+                "attachment; filename=\"pigeon-{}-{}.mbox\"",
+                folder.as_str(),
+                &crate::time::iso_now()[..10]
+            );
+            (
+                StatusCode::OK,
+                [
+                    (
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("application/mbox"),
+                    ),
+                    (
+                        header::CONTENT_DISPOSITION,
+                        HeaderValue::from_str(&disposition).expect("ascii header"),
+                    ),
+                    (
+                        axum::http::HeaderName::from_static("x-export-skipped"),
+                        HeaderValue::from(skipped),
+                    ),
+                ],
+                archive.into_bytes(),
+            )
+                .into_response()
+        }
+        Err(problem) => problem.into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

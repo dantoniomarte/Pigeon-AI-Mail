@@ -35,6 +35,34 @@ use crate::time::rfc5322_date;
 
 const CRLF: &str = "\r\n";
 
+/// Escape a stored document for mbox (mboxrd): every line that starts with
+/// any number of `>` followed by `From ` gains one `>` — both a bare `From `
+/// and a quoted `>From ` must survive a round-trip through a conformant mbox
+/// reader (which strips one `>` from `^>*From ` lines) without being
+/// mistaken for separators. Shared by the API and MCP export surfaces.
+pub fn mbox_escape(document: &str) -> String {
+    let mut out = String::with_capacity(document.len() + 16);
+    for line in document.split_inclusive('\n') {
+        let trimmed = line.strip_suffix('\n').unwrap_or(line);
+        let mut depth = 0usize;
+        for byte in trimmed.bytes() {
+            if byte == b'>' {
+                depth += 1;
+            } else {
+                break;
+            }
+        }
+        if trimmed[depth..].starts_with("From ") {
+            out.push('>');
+        }
+        out.push_str(line);
+        if !line.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    out
+}
+
 /// Render `send` as a complete MIME message, CRLF-terminated and ready to seal.
 pub fn build(send: &ValidatedSend, message_id: &str, created_unix: i64) -> Vec<u8> {
     let mut headers = envelope_headers(send, message_id, created_unix);
@@ -560,5 +588,29 @@ mod tests {
         let body = blocks.next().expect("body");
         assert!(!body.contains("Content-Transfer-Encoding"));
         assert!(blocks.next().is_none(), "one header/body boundary only");
+    }
+}
+
+#[cfg(test)]
+mod mbox_escape_tests {
+    use super::mbox_escape;
+
+    #[test]
+    fn mbox_escape_covers_bare_and_quoted_from_lines() {
+        // LF-only input keeps the assertions byte-exact (CRLF input would
+        // carry the \r through: mbox_escape touches only the \n suffix).
+        let doc = "From the top.\n>From the quoted reply.\n>>From nested.\nFrom: header untouched\nunterminated";
+        let escaped = mbox_escape(doc);
+        let lines: Vec<&str> = escaped.split('\n').collect();
+        assert_eq!(lines[0], ">From the top.");
+        assert_eq!(lines[1], ">>From the quoted reply.");
+        assert_eq!(lines[2], ">>>From nested.");
+        assert_eq!(lines[3], "From: header untouched");
+        assert_eq!(lines[4], "unterminated");
+        // A CRLF document keeps its \r: the escape only adds the '>'.
+        let crlf = "From the top.\r\n>From quoted.\r\n";
+        let escaped_crlf = mbox_escape(crlf);
+        assert!(escaped_crlf.contains(">From the top.\r\n"));
+        assert!(escaped_crlf.contains(">>From quoted.\r\n"));
     }
 }

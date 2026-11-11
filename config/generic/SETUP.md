@@ -32,7 +32,7 @@ already sends logs to stderr, so this is belt-and-braces.
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}' \
   | pigeon mcp
 
-# 2. tools/list — the 33 tools
+# 2. tools/list — the 35 tools
 printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
   | pigeon mcp | python3 -c "import json,sys;[print(len(json.loads(l)['result']['tools']),'tools') for l in sys.stdin if l.strip()]"
 

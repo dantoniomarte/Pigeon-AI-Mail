@@ -1,4 +1,12 @@
-import { CircleX, Mail, MailOpen, ShieldAlert, Trash2, X } from 'lucide-react';
+import {
+  Archive,
+  CircleX,
+  Mail,
+  MailOpen,
+  ShieldAlert,
+  Trash2,
+  X,
+} from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 export interface BulkBarProps {
@@ -12,9 +20,13 @@ export interface BulkBarProps {
   canSpam: boolean;
   canTrash: boolean;
   canDelete: boolean;
+  /** Offer the folder/selection backup download (eml/mbox). */
+  canExport: boolean;
   onMarkRead: (read: boolean) => void;
   onMove: (folder: 'spam' | 'trash') => void;
   onDelete: () => void;
+  /** Download one client-side mbox archive of the selected messages. */
+  onExport: () => void;
   onClear: () => void;
 }
 
@@ -30,9 +42,11 @@ export default function BulkBar({
   canSpam,
   canTrash,
   canDelete,
+  canExport,
   onMarkRead,
   onMove,
   onDelete,
+  onExport,
   onClear,
 }: BulkBarProps): JSX.Element {
   const { t } = useTranslation();
@@ -92,6 +106,19 @@ export default function BulkBar({
           >
             <Trash2 size={14} aria-hidden="true" />
             <span>{t('mail.trashBulk')}</span>
+          </button>
+        ) : null}
+        {canExport ? (
+          <button
+            type="button"
+            className="btn btn--ghost btn--small"
+            disabled={busy}
+            onClick={onExport}
+            aria-label={t('mail.exportSelection')}
+            title={t('mail.exportSelection')}
+          >
+            <Archive size={14} aria-hidden="true" />
+            <span>{t('mail.exportSelection')}</span>
           </button>
         ) : null}
         {canDelete ? (

@@ -20,7 +20,7 @@ PIGEON_API_KEY=pk_…
 Because the stdio server opens the database and master key locally, it cannot
 serve a remote host. A remote agent therefore calls the same audited HTTP API the
 stdio tools wrap: identical scopes, rate limits, sandbox keys and audit rows.
-[`api-examples.md`](api-examples.md) has the curl equivalents of the 33 tools.
+[`api-examples.md`](api-examples.md) has the curl equivalents of the 35 tools.
 
 ## 1. Create the key
 

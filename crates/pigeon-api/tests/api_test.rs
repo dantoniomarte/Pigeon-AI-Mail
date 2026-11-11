@@ -1435,6 +1435,252 @@ async fn received_mime_messages_read_as_text_not_wire() {
     assert!(!text.contains("Received:"), "trace header leaked: {text}");
 }
 
+/// A helper that seeds a complete inbound message (message row + lifecycle
+/// row with a wrapped content key) with an arbitrary RFC822 document — the
+/// shape the inbound SMTP path produces.
+fn seed_inbound_document(
+    app: &TestApp,
+    account_id: i64,
+    subject: &str,
+    document: &str,
+) -> (i64, String) {
+    let reserved = app.state.store.reserve_message_id().expect("reserve id");
+    let aad = format!("account:{account_id}:message:{reserved}");
+    let content_key = pigeon_crypto::generate_content_key();
+    let wrapped_key = app
+        .state
+        .master_key
+        .wrap_content_key(&content_key, aad.as_bytes())
+        .expect("wrap key");
+    let sealed = pigeon_crypto::seal_content(&content_key, document.as_bytes(), aad.as_bytes())
+        .expect("seal body");
+    app.state
+        .store
+        .insert_message(
+            NewMessage {
+                account_id,
+                direction: Direction::In,
+                from_addr: EmailAddress::parse("friend@example.org").expect("sender"),
+                to_addrs: vec![EmailAddress::parse("owner@example.com").expect("recipient")],
+                subject: subject.to_string(),
+                sealed_body: sealed,
+                idempotency_key: None,
+                delivered_for: None,
+            },
+            reserved,
+        )
+        .expect("insert message");
+    app.state
+        .db
+        .insert_email(&pigeon_api::db::NewEmail {
+            account_id,
+            message_id: reserved,
+            public_id: pigeon_api::ids::derived(pigeon_api::ids::MSG, reserved),
+            status: "received".to_string(),
+            to_addrs: vec!["owner@example.com".to_string()],
+            cc_addrs: Vec::new(),
+            tags: Vec::new(),
+            sandbox: false,
+            e2e: "tls_only".to_string(),
+            wrapped_key,
+        })
+        .expect("lifecycle row");
+    let public_id = pigeon_api::ids::derived(pigeon_api::ids::MSG, reserved);
+    (reserved, public_id)
+}
+
+/// Typical backups: a single message downloads as its original RFC822
+/// document, a folder downloads as an mbox archive, and both answers honor
+/// ownership and the `full` scope the way decrypted bodies do.
+#[tokio::test]
+async fn export_endpoints_deliver_eml_and_mbox_backups() {
+    let app = TestApp::new();
+
+    // Inbound doc with an mbox-risky line: "From " at a line start must come
+    // out escaped in the archive.
+    let (_, inbox_id) = seed_inbound_document(
+        &app,
+        app.account_id,
+        "backup me",
+        "Received: from mx.test by mail.example.com\r\n\
+         Subject: backup me\r\n\
+         Content-Type: text/plain; charset=utf-8\r\n\
+         \r\n\
+         From the top, this is stored mail.\r\n\
+         From the bottom too.\r\n",
+    );
+
+    // A sent message exports through its `eml_` id (the id the Sent UI
+    // holds).
+    let email_id = app.send(&app.full_key, valid_send()).await;
+    app.state
+        .db
+        .set_email_status(app.account_id, &email_id, "sent")
+        .expect("mark sent");
+
+    let eml = app
+        .get(
+            &format!("/v1/messages/{email_id}/export"),
+            Some(&app.full_key),
+        )
+        .await;
+    assert_eq!(eml.status, StatusCode::OK, "{:?}", eml.body);
+    assert_eq!(
+        eml.headers
+            .get("content-type")
+            .expect("content type")
+            .to_str()
+            .expect("value"),
+        "message/rfc822"
+    );
+    let mime = String::from_utf8(eml.raw).expect("mime");
+    assert!(
+        mime.contains("Subject: Invoice #2041 paid"),
+        "wire doc: {mime}"
+    );
+
+    let single = app
+        .get(
+            &format!("/v1/messages/{inbox_id}/export"),
+            Some(&app.full_key),
+        )
+        .await;
+    assert_eq!(single.status, StatusCode::OK, "{:?}", single.body);
+    let doc = String::from_utf8(single.raw).expect("doc");
+    assert!(doc.contains("From the top, this is stored mail."));
+
+    let mbox = app
+        .get("/v1/messages/export?folder=inbox", Some(&app.full_key))
+        .await;
+    assert_eq!(mbox.status, StatusCode::OK, "{:?}", mbox.body);
+    let archive = String::from_utf8(mbox.raw).expect("archive");
+    assert!(archive.starts_with("From "), "mbox From_ separator");
+    assert!(archive.contains("Subject: backup me"));
+    // mboxrd escaping: every line-initial "From " gains one ">".
+    assert!(archive.contains(">From the top, this is stored mail."));
+    assert!(archive.contains(">From the bottom too."));
+    assert!(
+        !archive.contains("\nFrom the top"),
+        "unescaped From_ in body"
+    );
+
+    // Ownership: another account cannot export by id or list by folder.
+    let (_, foreign_id) = seed_inbound_document(
+        &app,
+        app.account_id,
+        "mine only",
+        "Content-Type: text/plain\r\n\r\nforeign body\r\n",
+    );
+    let (_, other_key) = app.account_with_key("thief@example.com");
+    let stolen = app
+        .get(
+            &format!("/v1/messages/{foreign_id}/export"),
+            Some(&other_key),
+        )
+        .await;
+    stolen.assert_problem(StatusCode::NOT_FOUND, "not-found");
+
+    // Scope: decrypted-content exports require the `full` scope.
+    let read_only = app.key_with(&[ApiKeyScope::Read], false);
+    let refused = app
+        .get("/v1/messages/export?folder=inbox", Some(&read_only))
+        .await;
+    refused.assert_problem(StatusCode::FORBIDDEN, "forbidden");
+}
+
+/// The doc-comment and header promise: rows the ingest crashed between its
+/// two inserts (message row present, lifecycle row missing — no content key)
+/// are skipped and counted, never allowed to abort the whole folder backup.
+#[tokio::test]
+async fn export_folder_skips_orphan_rows_without_content_keys() {
+    let app = TestApp::new();
+    let (_, good_id) = seed_inbound_document(
+        &app,
+        app.account_id,
+        "good row",
+        "Content-Type: text/plain\r\nSubject: good row\r\n\r\nreadable body\r\n",
+    );
+    // An orphan: message row WITHOUT its lifecycle row (no wrapped key).
+    let orphan_reserved = app.state.store.reserve_message_id().expect("reserve id");
+    let orphan_aad = format!("account:{}:message:{}", app.account_id, orphan_reserved);
+    let orphan_sealed = pigeon_crypto::seal_content(
+        &pigeon_crypto::generate_content_key(),
+        b"Content-Type: text/plain\r\n\r\nunreachable body\r\n",
+        orphan_aad.as_bytes(),
+    )
+    .expect("seal body");
+    app.state
+        .store
+        .insert_message(
+            NewMessage {
+                account_id: app.account_id,
+                direction: Direction::In,
+                from_addr: EmailAddress::parse("ghost@example.org").expect("sender"),
+                to_addrs: vec![EmailAddress::parse("owner@example.com").expect("recipient")],
+                subject: "orphan".to_string(),
+                sealed_body: orphan_sealed,
+                idempotency_key: None,
+                delivered_for: None,
+            },
+            orphan_reserved,
+        )
+        .expect("insert orphan");
+
+    let mbox = app
+        .get("/v1/messages/export?folder=inbox", Some(&app.full_key))
+        .await;
+    assert_eq!(mbox.status, StatusCode::OK, "{:?}", mbox.body);
+    assert_eq!(
+        mbox.headers
+            .get("x-export-skipped")
+            .expect("skipped header")
+            .to_str()
+            .expect("value"),
+        "1",
+        "exactly the orphan is skipped"
+    );
+    let archive = String::from_utf8(mbox.raw).expect("archive");
+    assert!(archive.contains("Subject: good row"), "{archive}");
+    assert!(!archive.contains("unreachable body"), "{archive}");
+
+    // The healthy message still exports by id.
+    let single = app
+        .get(
+            &format!("/v1/messages/{good_id}/export"),
+            Some(&app.full_key),
+        )
+        .await;
+    assert_eq!(single.status, StatusCode::OK);
+}
+
+/// mboxrd escaping covers quoted depth: every line starting with any number
+/// of `>` followed by `From ` gains one `>`, so a conformant reader's import
+/// (which strips one `>` from such lines) round-trips the content.
+#[tokio::test]
+async fn export_folder_escapes_quoted_from_lines_too() {
+    let app = TestApp::new();
+    seed_inbound_document(
+        &app,
+        app.account_id,
+        "quoted from lines",
+        "Content-Type: text/plain\r\nSubject: quoted from lines\r\n\r\n\
+         >From the quoted reply.\r\n\
+         >>From the nested one.\r\n",
+    );
+
+    let mbox = app
+        .get("/v1/messages/export?folder=inbox", Some(&app.full_key))
+        .await;
+    assert_eq!(mbox.status, StatusCode::OK, "{:?}", mbox.body);
+    let archive = String::from_utf8(mbox.raw).expect("archive");
+    assert!(archive.contains(">>From the quoted reply."), "{archive}");
+    assert!(archive.contains(">>>From the nested one."), "{archive}");
+    // No unescaped quoted From_ survives: the original one-`>` form must not
+    // appear at a line start (its escaped form is two `>`).
+    assert!(!archive.contains("\n>From the quoted reply."), "{archive}");
+    assert!(archive.contains(">>From the quoted reply."), "{archive}");
+}
+
 /// The sidebar badges are the server's to answer: every folder reports its size
 /// *and* how much of it is still unread, so a client showing "Sent" cannot make
 /// the inbox badge claim the sent page's size.

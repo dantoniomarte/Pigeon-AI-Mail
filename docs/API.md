@@ -151,6 +151,10 @@ Two views (oneOf):
 - **Default (`?sealed=true`)** — `SealedMessageView`: metadata + auth verdicts + `sealed_body` ciphertext, **plus the attachment list** (`id`, `filename`, `size`). A `read` key can therefore see that a message carries `receipt.pdf` and how large it is, while the attachment content stays sealed until the caller holds scope `full`. No plaintext leaves the server.
 - **`?sealed=false`** — `DecryptedMessageView` (text/html + attachments): **requires scope `full`** (`read` keys get `403 forbidden`). This is the credential/scope rule for plaintext.
 
+### `GET /v1/messages/{id}/export` — the original RFC822 document of one message as a `message/rfc822` attachment (`200`, `Content-Disposition: attachment; filename="pigeon-<id>.eml"`). `{id}` accepts the `msg_` mailbox id or the `eml_` sent id; requires scope `full` (decrypted content); unknown/foreign id → `404`.
+
+### `GET /v1/messages/export?folder=<inbox|sent|spam|trash>` — the whole folder as one mbox archive (mboxrd, `application/mbox`, `Content-Disposition: attachment; filename="pigeon-<folder>-<date>.mbox"`). Requires scope `full`; rows without a lifecycle content key are skipped and counted in `X-Export-Skipped`. Unknown folder → `422 validation`.
+
 ### `GET /v1/messages/{id}/attachments/{aid}` — attachment bytes; sealed by default, decrypted with scope `full` (`?sealed=false`). `{id}` may be the `msg_` id of any owned message or the `eml_` id of an owned sent email, matching what the handler resolves.
 
 ## Templates
@@ -411,7 +415,7 @@ Same operations over the Model Context Protocol — same key, same scopes, same 
     "env": { "PIGEON_URL": "https://mail.example.com", "PIGEON_API_KEY": "pk_..." } } } }
 ```
 
-Tools (33 in total): `send_email`, `list_messages`, `get_message`, `create_template`, `manage_webhooks`; the organization group (`org_create`, `org_members`, `org_invite`, `org_create_member`); catch-all (`catchall_set`, `catchall_list`, `catchall_delete`, `catchall_pause`, `catchall_resume`); sender aliases (`alias_list`, `alias_create`, `alias_assign`, `alias_delete`); drafts, folders, domains, suppressions and API keys; plus `account_settings` and `set_trash_retention` so an agent can read and change the trash retention (`days: 0` keeps trashed mail forever) without going through the HTTP API.
+Tools (35 in total): `send_email`, `list_messages`, `get_message`, `export_message`, `export_folder`, `create_template`, `manage_webhooks`; the organization group (`org_create`, `org_members`, `org_invite`, `org_create_member`); catch-all (`catchall_set`, `catchall_list`, `catchall_delete`, `catchall_pause`, `catchall_resume`); sender aliases (`alias_list`, `alias_create`, `alias_assign`, `alias_delete`); drafts, folders, domains, suppressions and API keys; plus `account_settings` and `set_trash_retention` so an agent can read and change the trash retention (`days: 0` keeps trashed mail forever) without going through the HTTP API.
 
 The MCP actor is the deployment's bootstrap account, so `send_email`'s `from` follows the same rule as the HTTP send (`from-not-allowed` for anything that is neither that account nor one of its aliases), and `catchall_pause`/`catchall_resume` only ever touch the actor's own row.
 

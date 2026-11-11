@@ -565,6 +565,72 @@ paths:
           $ref: '#/components/responses/RateLimited'
       x-scopes:
       - send
+  /v1/messages/export:
+    get:
+      tags:
+      - receive
+      summary: Back up a whole folder as one mbox archive (mboxrd)
+      operationId: exportFolder
+      security:
+      - bearerKey: []
+      parameters:
+      - name: folder
+        in: query
+        required: false
+        schema:
+          type: string
+          enum: [inbox, sent, spam, trash]
+          default: inbox
+      responses:
+        '200':
+          description: The mbox archive
+          content:
+            application/mbox:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+      x-scopes:
+      - full
+  /v1/messages/{id}/export:
+    parameters:
+    - name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^(?:msg|eml)_[a-z0-9]{8,32}$
+    get:
+      tags:
+      - receive
+      summary: Back up one message as its original RFC822 document
+      operationId: exportMessage
+      security:
+      - bearerKey: []
+      responses:
+        '200':
+          description: The RFC822 document
+          content:
+            message/rfc822:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+      x-scopes:
+      - full
   /v1/messages/{id}/attachments/{aid}:
     parameters:
     - name: id

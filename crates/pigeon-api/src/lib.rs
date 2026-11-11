@@ -112,7 +112,9 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/emails", get(send::list_emails))
         .route("/v1/emails/{id}", get(send::get_email))
         .route("/v1/messages", get(messages::list_messages))
+        .route("/v1/messages/export", get(messages::export_folder))
         .route("/v1/messages/{id}", get(messages::get_message))
+        .route("/v1/messages/{id}/export", get(messages::export_message))
         .route(
             "/v1/messages/{id}/attachments/{aid}",
             get(messages::get_attachment),

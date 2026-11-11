@@ -20,6 +20,8 @@ import {
   patchMessage,
   deleteMessage,
   emptyTrash,
+  exportFolderMbox,
+  exportSelectionMbox,
   logout,
   type FolderCounts,
   getStoredFrom,
@@ -426,6 +428,41 @@ export default function App(): JSX.Element {
         notify('error', t('common.error'));
       });
   }, [demo, view, key, notify, refresh, t]);
+
+  const notifyExport = useCallback(
+    (promise: Promise<void>) => {
+      void promise
+        .then(() => notify('success', t('mail.exportDone')))
+        .catch((error: unknown) => {
+          if (error instanceof ApiError && error.status === 403) {
+            notify('error', t('mail.exportForbidden'));
+            return;
+          }
+          notify('error', t('common.error'));
+        });
+    },
+    [notify, t],
+  );
+
+  // Folder backup: the server builds the whole mbox archive.
+  const handleExportFolder = useCallback(() => {
+    notifyExport(exportFolderMbox(key, view === 'inbox' || view === 'sent' || view === 'spam' || view === 'trash' ? view : 'inbox'));
+  }, [key, notifyExport, view]);
+
+  // Selection backup: one client-side mbox archive containing exactly the
+  // selected messages' original documents (server escapes shared per file).
+  const handleExportSelection = useCallback(
+    (ids: string[]) => {
+      notifyExport(
+        exportSelectionMbox(key, ids).then((failed) => {
+          if (failed > 0) {
+            notify('info', t('mail.exportPartial', { failed }));
+          }
+        }),
+      );
+    },
+    [key, notifyExport, t],
+  );
 
   const handleEmptyTrash = useCallback(() => {
     void emptyTrash(key)
@@ -837,6 +874,8 @@ export default function App(): JSX.Element {
               onMarkReadBulk={handleMarkReadBulk}
               onMoveBulk={handleMoveBulk}
               onDeleteBulk={handleDeleteBulk}
+              onExportFolder={handleExportFolder}
+              onExportSelection={handleExportSelection}
               onEmptyTrash={handleEmptyTrash}
               onSelect={setSelectedId}
               onVisibleIds={handleVisibleIds}

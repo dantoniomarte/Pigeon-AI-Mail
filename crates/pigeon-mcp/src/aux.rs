@@ -290,8 +290,11 @@ pub fn message_public_id(row_id: i64) -> String {
 /// same row here.
 pub fn message_row_id(raw: &str) -> Result<i64, String> {
     let trimmed = raw.trim();
+    // Both id shapes resolve: the mailbox `msg_` form and the send surface's
+    // `eml_` form — the Sent UI and the export tools accept either.
     let suffix = trimmed
         .strip_prefix(pigeon_api::ids::MSG)
+        .or_else(|| trimmed.strip_prefix(pigeon_api::ids::EML))
         .unwrap_or(trimmed);
     if suffix.is_empty() {
         return Err(format!("{raw:?} is not a message id"));

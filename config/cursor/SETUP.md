@@ -43,7 +43,7 @@ read the server's files: use [`../remote/`](../remote/) with `PIGEON_URL` +
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | pigeon mcp
 ```
 
-Inside Cursor: **Settings → MCP → pigeon-mail → tools** (33 tools), or ask the
+Inside Cursor: **Settings → MCP → pigeon-mail → tools** (35 tools), or ask the
 agent *“use pigeon-mail to list my inbox”*.
 
 ## Troubleshooting

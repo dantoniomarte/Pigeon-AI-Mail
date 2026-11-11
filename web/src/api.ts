@@ -1390,6 +1390,103 @@ export async function emptyTrash(key: string | null): Promise<number> {
   return result.deleted;
 }
 
+/* Backups ---------------------------------------------------------- */
+
+/**
+ * Fetch one message's original RFC822 document (the export endpoint).
+ * Selection backups concatenate these client-side into one mbox archive.
+ */
+export async function fetchMessageEml(key: string | null, id: string): Promise<Uint8Array<ArrayBuffer>> {
+  const response = await fetch(`/v1/messages/${encodeURIComponent(id)}/export`, {
+    headers: key !== null && key.length > 0 ? { Authorization: `Bearer ${key}` } : {},
+  });
+  if (!response.ok) {
+    throw new ApiError('export failed', response.status, 'http-error');
+  }
+  return new Uint8Array(await response.arrayBuffer()) as Uint8Array<ArrayBuffer>;
+}
+
+/** Hand bytes to the browser as a file download. */
+function downloadBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  // The anchor click keeps a reference in most browsers even after revoke;
+  // deferring it avoids the race where the download aborts mid-start.
+  window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+
+/**
+ * Download one message as an `.eml` backup (the original RFC822 document).
+ * Reads through a `full`-scope session/key exactly like the decrypted body
+ * view, then hands the bytes to the browser as a file.
+ */
+export async function exportMessageEml(key: string | null, id: string): Promise<void> {
+  const bytes = await fetchMessageEml(key, id);
+  downloadBlob(new Blob([bytes], { type: 'message/rfc822' }), `pigeon-${id}.eml`);
+}
+
+/**
+ * Download a whole folder as an `.mbox` backup (mboxrd archive from the
+ * export endpoint).
+ */
+export async function exportFolderMbox(
+  key: string | null,
+  folder: MailFolder,
+): Promise<void> {
+  const response = await fetch(`/v1/messages/export?folder=${folder}`, {
+    headers: key !== null && key.length > 0 ? { Authorization: `Bearer ${key}` } : {},
+  });
+  if (!response.ok) {
+    throw new ApiError('export failed', response.status, 'http-error');
+  }
+  const blob = await response.blob();
+  downloadBlob(blob, `pigeon-${folder}.mbox`);
+}
+
+/**
+ * Build one mbox archive client-side from the selected messages: their
+ * documents are fetched through the export endpoint and concatenated with
+ * `From ` separators — one file, like a folder backup, but exactly the
+ * selection.
+ */
+export async function exportSelectionMbox(
+  key: string | null,
+  ids: string[],
+): Promise<number> {
+  const documents = await Promise.allSettled(ids.map((id) => fetchMessageEml(key, id)));
+  const parts: string[] = [];
+  let failed = 0;
+  for (const result of documents) {
+    if (result.status === 'fulfilled') {
+      const text = new TextDecoder('utf-8', { fatal: false }).decode(result.value);
+      parts.push(`From backup@pigeon.local ${new Date().toUTCString()}\n`);
+      parts.push(
+        text
+          .split('\n')
+          .map((line) => (line.replace(/\r$/, '').startsWith('From ') ? `>${line}` : line))
+          .join('\n'),
+      );
+      const last = parts[parts.length - 1];
+      if (last !== undefined && !last.endsWith('\n')) {
+        parts.push('\n');
+      }
+      parts.push('\n');
+    } else {
+      failed += 1;
+    }
+  }
+  if (parts.length === 0) {
+    throw new ApiError('all exports failed', 500, 'http-error');
+  }
+  const blob = new Blob(parts, { type: 'application/mbox' });
+  const stamp = new Date().toISOString().slice(0, 10);
+  downloadBlob(blob, `pigeon-selection-${stamp}.mbox`);
+  return failed;
+}
+
 /* ------------------------------------------------------------------ */
 /* Account settings (server-side policy)                               */
 /* ------------------------------------------------------------------ */

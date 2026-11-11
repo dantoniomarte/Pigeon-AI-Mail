@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   AlertTriangle,
+  Archive,
   Lock,
   Mail,
   MailOpen,
@@ -58,6 +59,10 @@ export interface MailListProps {
   onMarkReadBulk?: (ids: string[], read: boolean) => Promise<BulkOutcome>;
   onMoveBulk?: (ids: string[], folder: 'inbox' | 'spam' | 'trash') => Promise<BulkOutcome>;
   onDeleteBulk?: (ids: string[]) => Promise<BulkOutcome>;
+  /** Backup the current folder as an mbox archive. */
+  onExportFolder?: () => void;
+  /** Backup the selected rows as .eml files. */
+  onExportSelection?: (ids: string[]) => void;
   onEmptyTrash?: () => void;
   onSelect: (id: string) => void;
   /** Reports the ids on screen, in display order, so the reader can walk the
@@ -130,6 +135,8 @@ export default function MailList({
   onMarkReadBulk,
   onMoveBulk,
   onDeleteBulk,
+  onExportFolder,
+  onExportSelection,
   onEmptyTrash,
   onSelect,
   onVisibleIds,
@@ -433,6 +440,17 @@ export default function MailList({
           </span>
         </div>
         <div className="mail-list__tools">
+          {onExportFolder ? (
+            <button
+              type="button"
+              className="icon-btn"
+              onClick={onExportFolder}
+              aria-label={t('mail.exportFolder')}
+              title={t('mail.exportFolder')}
+            >
+              <Archive size={16} />
+            </button>
+          ) : null}
           {view === 'trash' && onEmptyTrash ? (
             <button
               type="button"
@@ -494,6 +512,13 @@ export default function MailList({
                 return;
               }
               void runBulkAction((ids) => onMoveBulk(ids, folder));
+            }}
+            canExport={onExportSelection !== undefined}
+            onExport={() => {
+              if (onExportSelection === undefined) {
+                return;
+              }
+              onExportSelection([...activeIds]);
             }}
             onDelete={() => {
               // First click arms the confirmation, the second one really deletes.

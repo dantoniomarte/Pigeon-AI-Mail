@@ -86,6 +86,28 @@ fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "export_message",
+            description: "Back up one message: the original RFC822 document, decrypted, as EML text. Works for inbound and sent mail.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "required": ["id"],
+                "properties": {
+                    "id": { "type": "string", "description": "Message id (msg_... or eml_...)" }
+                }
+            }),
+        },
+        Tool {
+            name: "export_folder",
+            description: "Back up a whole folder as one mbox archive (mboxrd). Returns the archive text and a message count.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "required": ["folder"],
+                "properties": {
+                    "folder": { "type": "string", "enum": ["inbox", "sent", "spam", "trash"], "description": "Folder to archive" }
+                }
+            }),
+        },
+        Tool {
             name: "create_template",
             description: "Create an email template with {{variables}} for reuse.",
             input_schema: serde_json::json!({
@@ -434,6 +456,8 @@ pub async fn dispatch(
         "send_email" => send_email(args, state).await,
         "list_messages" => list_messages(args, state).await,
         "get_message" => get_message(args, state).await,
+        "export_message" => mail::export_message(args, state),
+        "export_folder" => mail::export_folder(args, state),
         "create_template" => create_template(args, state).await,
         "manage_webhooks" => manage_webhooks(args, state).await,
         // organizations
