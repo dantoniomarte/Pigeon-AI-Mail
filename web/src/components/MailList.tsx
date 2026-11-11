@@ -146,7 +146,11 @@ export default function MailList({
   const masterRef = useRef<HTMLInputElement | null>(null);
   // Sent mail is metadata-only on /v1/emails: the PATCH/DELETE message routes
   // would 404 there, so bulk actions only exist for the mailbox folders.
-  const bulkEnabled = view !== 'sent' && (onMarkReadBulk !== undefined || onMoveBulk !== undefined || onDeleteBulk !== undefined);
+  // Sent mail participates in bulk deletion only (the backend accepts the eml_
+  // id on the delete route); read/spam/trash bulk actions stay mailbox-only.
+  const bulkEnabled =
+    (view !== 'sent' || onDeleteBulk !== undefined) &&
+    (onMarkReadBulk !== undefined || onMoveBulk !== undefined || onDeleteBulk !== undefined);
 
   const timeFormat = useMemo(
     () => new Intl.DateTimeFormat(i18n.language, { hour: '2-digit', minute: '2-digit' }),
@@ -465,9 +469,9 @@ export default function MailList({
             count={activeIds.length}
             busy={bulkBusy}
             confirmDelete={confirmDelete}
-            canMarkRead={onMarkReadBulk !== undefined}
-            canSpam={onMoveBulk !== undefined && view !== 'spam'}
-            canTrash={onMoveBulk !== undefined && view !== 'trash'}
+            canMarkRead={onMarkReadBulk !== undefined && view !== 'sent'}
+            canSpam={onMoveBulk !== undefined && view !== 'sent' && view !== 'spam'}
+            canTrash={onMoveBulk !== undefined && view !== 'sent' && view !== 'trash'}
             canDelete={onDeleteBulk !== undefined}
             onMarkRead={(read) => {
               if (onMarkReadBulk === undefined) {
@@ -629,9 +633,9 @@ export default function MailList({
                             </span>
                           </span>
                         </button>
-                        {(onMarkRead || onMove || onDelete) && view !== 'sent' ? (
+                        {(view !== 'sent' && (onMarkRead || onMove || onDelete)) || (view === 'sent' && onDelete) ? (
                           <span className="mail-row__actions">
-                            {onMarkRead ? (
+                            {onMarkRead && view !== 'sent' ? (
                               <button
                                 type="button"
                                 tabIndex={selected ? 0 : -1}
@@ -646,7 +650,7 @@ export default function MailList({
                                 {item.unread ? <MailOpen size={14} /> : <Mail size={14} />}
                               </button>
                             ) : null}
-                            {onMove && view !== 'spam' ? (
+                            {onMove && view !== 'sent' && view !== 'spam' ? (
                               <button
                                 type="button"
                                 tabIndex={selected ? 0 : -1}
@@ -661,7 +665,7 @@ export default function MailList({
                                 <ShieldAlert size={14} />
                               </button>
                             ) : null}
-                            {onMove && view !== 'trash' ? (
+                            {onMove && view !== 'sent' && view !== 'trash' ? (
                               <button
                                 type="button"
                                 tabIndex={selected ? 0 : -1}

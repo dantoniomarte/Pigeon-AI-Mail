@@ -27,11 +27,13 @@ use crate::handlers::{
     blocking, bool_param, enum_param, int_param, opt_param, Params, ProblemJson,
 };
 use crate::models::{
-    AuthVerdict, DecryptedMessageView, DeliveredForCount, EmptyTrashResult, FolderCounts,
-    MessageAttachmentView, MessagePage, MessagePatch, MessageSummary, PurgeTrashResult,
-    SealedMessageView,
+    AuthVerdict, DecryptedMessageView, DeliveredForCount, EmailStatus, EmptyTrashResult,
+    FolderCounts, MessageAttachmentView, MessagePage, MessagePatch, MessageSummary,
+    PurgeTrashResult, SealedMessageView,
 };
-use crate::problem::{forbidden, internal, not_found, validation, FieldError, Problem};
+use crate::problem::{
+    forbidden, internal, not_found, validation, FieldError, Problem, ProblemType,
+};
 use crate::state::AppState;
 use crate::{aad, ids};
 
@@ -178,13 +180,15 @@ pub async fn patch_message(
 
 /// `DELETE /v1/messages/{id}` — permanent delete of the row and its lifecycle
 /// metadata. Ordinary "remove from the inbox" is a folder move to `trash`.
+/// The id may be the mailbox `msg_` id or the `eml_` id of an owned sent email
+/// ([`resolve_deletable`]); queued mail is refused and must be cancelled.
 pub async fn delete_message(
     State(state): State<AppState>,
     Extension(context): Extension<ApiKeyContext>,
     Path(id): Path<String>,
 ) -> Response {
     let result = blocking(move || {
-        let message_id = resolve(&state, context.account_id, &id)?;
+        let message_id = resolve_deletable(&state, context.account_id, &id)?;
         // The message row goes first: `DELETE` on a row that is not there is the
         // only failure mode worth reporting, and doing it first means a 404
         // leaves every other table untouched.
@@ -303,6 +307,44 @@ fn resolve(state: &AppState, account_id: i64, id: &str) -> Result<i64, Problem> 
         .message_id_by_public_id(account_id, id)
         .map_err(Problem::from)?
         .ok_or_else(|| not_found(format!("message {id} not found")))
+}
+
+/// Resolve the id of `DELETE /v1/messages/{id}`.
+///
+/// Both id shapes a caller can hold for an owned row are accepted: the mailbox
+/// `msg_` id and — for an outbound copy listed on `/v1/emails` — the `eml_` id,
+/// which is the only id the webmail holds for the Sent folder. An `eml_` id
+/// resolves through the lifecycle row with the same account scoping as the send
+/// surface, so a foreign id is the same `404` as an unknown one. A still-queued
+/// email must be cancelled instead of deleted, so the delete is refused with
+/// `409 not-cancellable` pointing at the cancel route; anything past that
+/// deletes permanently, lifecycle row included.
+fn resolve_deletable(state: &AppState, account_id: i64, id: &str) -> Result<i64, Problem> {
+    if ids::is_well_formed(id, ids::MSG) {
+        return resolve(state, account_id, id);
+    }
+    if !ids::is_well_formed(id, ids::EML) {
+        return Err(not_found(format!("{id:?} is not a msg_ or eml_ id")));
+    }
+    let Some(row) = state
+        .db
+        .email_by_public_id(account_id, id)
+        .map_err(Problem::from)?
+    else {
+        return Err(not_found(format!("message {id} not found")));
+    };
+    let status = EmailStatus::parse(&row.status).unwrap_or_default();
+    if status.is_cancellable() {
+        return Err(Problem::new(
+            StatusCode::CONFLICT,
+            ProblemType::NotCancellable,
+            format!(
+                "email {id} is `{}` and may still be delivered; cancel it with DELETE /v1/emails/{id} instead",
+                status.as_str()
+            ),
+        ));
+    }
+    Ok(row.message_id)
 }
 
 /// Metadata view of one stored row.

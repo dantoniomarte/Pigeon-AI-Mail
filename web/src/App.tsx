@@ -398,6 +398,14 @@ export default function App(): JSX.Element {
   }, [key, notify, refresh, t]);
 
   const handleDelete = useCallback((id: string) => {
+    // Demo sent rows exist only in this state: the delete is local, a real id
+    // still goes through the API.
+    if (demo && view === 'sent') {
+      setSent((current) => current.filter((message) => message.id !== id));
+      setSelectedId(null);
+      notify('success', t('mail.deleted'));
+      return;
+    }
     void deleteMessage(key, id)
       .then(() => {
         setSelectedId(null);
@@ -405,7 +413,7 @@ export default function App(): JSX.Element {
         notify('success', t('mail.deleted'));
       })
       .catch(() => notify('error', t('common.error')));
-  }, [key, notify, refresh, t]);
+  }, [demo, view, key, notify, refresh, t]);
 
   const handleEmptyTrash = useCallback(() => {
     void emptyTrash(key)

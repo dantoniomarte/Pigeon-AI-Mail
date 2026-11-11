@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   AlertTriangle,
@@ -119,6 +119,12 @@ export default function MailView({
 }: MailViewProps): JSX.Element {
   const { t, i18n } = useTranslation();
   const isSent = mode === 'sent';
+  // The sent reader's delete is permanent and irreversible, so the first click
+  // only arms the confirmation; a different message disarms it again.
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  useEffect(() => {
+    setConfirmDelete(false);
+  }, [message?.id]);
 
   // J/K and the arrow keys walk the list the reader was opened from, as long as
   // the user is not typing somewhere and no other handler took the key first.
@@ -303,7 +309,27 @@ export default function MailView({
           </div>
         ) : null}
 
-        {isSent ? null : (
+        {isSent && onDelete !== undefined && message !== null ? (
+          <div className="reader__actions">
+            <button
+              type="button"
+              className={`btn ${confirmDelete ? 'btn--danger' : 'btn--ghost'} reader__delete`}
+              onClick={() => {
+                if (!confirmDelete) {
+                  setConfirmDelete(true);
+                  return;
+                }
+                setConfirmDelete(false);
+                onDelete(message.id);
+              }}
+              aria-label={confirmDelete ? t('mail.confirmDelete') : t('mail.deleteForever')}
+              title={confirmDelete ? t('mail.confirmDelete') : t('mail.deleteForever')}
+            >
+              <Trash2 size={16} aria-hidden="true" />
+              <span>{confirmDelete ? t('mail.confirmDelete') : t('mail.deleteForever')}</span>
+            </button>
+          </div>
+        ) : !isSent ? (
           <div className="reader__actions">
             <button type="button" className="btn btn--primary" onClick={() => onReply(message)}>
               <Reply size={16} aria-hidden="true" />
@@ -358,7 +384,7 @@ export default function MailView({
               </button>
             ) : null}
           </div>
-        )}
+        ) : null}
       </div>
     );
   };

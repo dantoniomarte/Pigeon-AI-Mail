@@ -124,6 +124,7 @@
     "toSpam": "Report spam",
     "toTrash": "Move to trash",
     "deleteForever": "Delete permanently",
+    "confirmDelete": "Confirm",
     "emptyTrash": "Empty trash",
     "movedSpam": "Moved to spam",
     "movedTrash": "Moved to trash",

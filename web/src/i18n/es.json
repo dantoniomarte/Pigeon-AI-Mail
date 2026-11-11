@@ -124,6 +124,7 @@
     "toSpam": "Marcar como spam",
     "toTrash": "Mover a la papelera",
     "deleteForever": "Eliminar definitivamente",
+    "confirmDelete": "Confirmar",
     "emptyTrash": "Vaciar papelera",
     "movedSpam": "Movido a spam",
     "movedTrash": "Movido a la papelera",

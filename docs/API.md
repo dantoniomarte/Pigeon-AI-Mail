@@ -134,7 +134,7 @@ Lifecycle: `queued → scheduled → sending → sent | deferred {next_attempt_a
 
 ### `PATCH /v1/messages/{id}` — `{folder?: inbox|sent|spam|trash, read?: bool}`, at least one member. Moves the message and/or flips read state and returns the updated metadata (`200`). Unknown id → `404`, unknown folder → `422 validation`.
 
-### `DELETE /v1/messages/{id}` — permanent delete of the message and its lifecycle metadata (`204`). Moving to `trash` is a `PATCH`, not a delete.
+### `DELETE /v1/messages/{id}` — permanent delete of the message and its lifecycle metadata (`204`). Accepts the `msg_` id of any owned message or the `eml_` id of an owned sent email (the id `GET /v1/emails` hands out). An email still `queued`/`scheduled` is refused with `409 not-cancellable` and points at `DELETE /v1/emails/{id}` (cancel) instead — deliverability is still a live decision. Deleting a sent email is **permanent and irreversible**: outbound mail has no trash round-trip. Moving to `trash` is a `PATCH`, not a delete.
 
 ### `POST /v1/messages/empty-trash` — purges the caller's trash, `200 {deleted: N}` (idempotent: an already-empty trash reports `0`).
 

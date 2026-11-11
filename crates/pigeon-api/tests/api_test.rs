@@ -553,6 +553,91 @@ async fn cancel_is_202_while_queued_and_409_once_sent() {
 }
 
 #[tokio::test]
+async fn delete_sent_email_via_eml_id_is_permanent() {
+    let app = TestApp::new();
+    let email_id = app.send(&app.full_key, valid_send()).await;
+    app.state
+        .db
+        .set_email_status(app.account_id, &email_id, "sent")
+        .expect("mark sent");
+
+    // A delivered sent email is deleted through its `eml_` id on the mailbox
+    // surface: permanent, no trash round-trip.
+    let deleted = app
+        .delete(&format!("/v1/messages/{email_id}"), Some(&app.full_key))
+        .await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{:?}", deleted.body);
+
+    // The sent listing and the lifecycle row are both gone.
+    let sent = app
+        .get("/v1/messages?folder=sent", Some(&app.full_key))
+        .await;
+    assert!(sent.body["items"].as_array().expect("items").is_empty());
+    assert_eq!(sent.body["counts"]["sent"], 0, "{:?}", sent.body);
+    assert!(app
+        .state
+        .db
+        .email_by_public_id(app.account_id, &email_id)
+        .expect("lookup")
+        .is_none());
+    let twice = app
+        .delete(&format!("/v1/messages/{email_id}"), Some(&app.full_key))
+        .await;
+    twice.assert_problem(StatusCode::NOT_FOUND, "not-found");
+}
+
+#[tokio::test]
+async fn delete_sent_email_guards_ownership_and_queued_state() {
+    let app = TestApp::new();
+    let email_id = app.send(&app.full_key, valid_send()).await;
+    let (_, other_key) = app.account_with_key("other@example.com");
+
+    // Another account's `eml_` id is a plain 404, and the row survives.
+    let foreign = app
+        .delete(&format!("/v1/messages/{email_id}"), Some(&other_key))
+        .await;
+    foreign.assert_problem(StatusCode::NOT_FOUND, "not-found");
+    let sent = app
+        .get("/v1/messages?folder=sent", Some(&app.full_key))
+        .await;
+    assert_eq!(sent.body["counts"]["sent"], 1, "{:?}", sent.body);
+
+    // A queued email is not deletable: cancel it through the send surface.
+    let refused = app
+        .delete(&format!("/v1/messages/{email_id}"), Some(&app.full_key))
+        .await;
+    refused.assert_problem(StatusCode::CONFLICT, "not-cancellable");
+    assert!(
+        refused.body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("/v1/emails"),
+        "the 409 must point at the cancel route: {:?}",
+        refused.body
+    );
+
+    // PATCH keeps speaking `msg_` only: an `eml_` id stays a 404 there.
+    let patched = app
+        .patch(
+            &format!("/v1/messages/{email_id}"),
+            Some(&app.full_key),
+            json!({ "read": true }),
+        )
+        .await;
+    patched.assert_problem(StatusCode::NOT_FOUND, "not-found");
+
+    // Once delivered, the same id deletes permanently.
+    app.state
+        .db
+        .set_email_status(app.account_id, &email_id, "sent")
+        .expect("mark sent");
+    let deleted = app
+        .delete(&format!("/v1/messages/{email_id}"), Some(&app.full_key))
+        .await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{:?}", deleted.body);
+}
+
+#[tokio::test]
 async fn raw_mime_is_sandbox_only() {
     let app = TestApp::new();
     let sandbox_key = app.key_with(&[ApiKeyScope::Full], true);

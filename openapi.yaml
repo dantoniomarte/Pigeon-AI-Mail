@@ -534,9 +534,22 @@ paths:
       tags:
       - receive
       summary: Permanently delete a message and its lifecycle metadata (trash follows the same route)
+      description: "Accepts the msg_ id of any owned message, or the eml_ id of an owned outbound
+        email (the id GET /v1/emails hands out for sent mail). An email that is still queued or
+        scheduled is refused with 409 not-cancellable, pointing at DELETE /v1/emails/{id} (cancel)
+        instead. Deleting a sent email is permanent and irreversible: there is no trash round-trip
+        for outbound mail.\n"
       operationId: deleteMessage
       security:
       - bearerKey: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: ^(?:msg|eml)_[a-z0-9]{8,32}$
+        description: msg_ id of an owned message, or eml_ id of an owned sent email
       responses:
         '204':
           description: Deleted
@@ -545,6 +558,8 @@ paths:
         '403':
           $ref: '#/components/responses/Problem'
         '404':
+          $ref: '#/components/responses/Problem'
+        '409':
           $ref: '#/components/responses/Problem'
         '429':
           $ref: '#/components/responses/RateLimited'
