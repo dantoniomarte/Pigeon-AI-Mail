@@ -3461,10 +3461,10 @@ fn catchall_assignments_are_multi_assignee_and_pausable() {
 #[test]
 fn sender_aliases_can_have_several_holders_and_never_shadow_a_mailbox() {
     let fixture = fixture();
-    let sales = fixture
+    let holder = fixture
         .storage
-        .create_account(&addr("sales@example.com"))
-        .expect("sales account");
+        .create_account(&addr("founder@example.com"))
+        .expect("holder account");
     let second = fixture
         .storage
         .create_account(&addr("second@example.com"))
@@ -3472,7 +3472,7 @@ fn sender_aliases_can_have_several_holders_and_never_shadow_a_mailbox() {
 
     let alias = fixture
         .storage
-        .create_alias(&addr("sales@example.com"), sales)
+        .create_alias(&addr("sales@example.com"), holder)
         .expect("alias");
     let stored = fixture
         .storage
@@ -3481,7 +3481,7 @@ fn sender_aliases_can_have_several_holders_and_never_shadow_a_mailbox() {
         .expect("alias exists");
     assert_eq!(stored.address, "sales@example.com");
     assert_eq!(stored.domain, "example.com");
-    assert_eq!(stored.created_by, sales);
+    assert_eq!(stored.created_by, holder);
     assert_eq!(fixture.storage.list_aliases().expect("list").len(), 1);
     assert_eq!(
         fixture
@@ -3497,20 +3497,21 @@ fn sender_aliases_can_have_several_holders_and_never_shadow_a_mailbox() {
     assert!(matches!(
         fixture
             .storage
-            .create_alias(&addr("sales@example.com"), sales),
+            .create_alias(&addr("sales@example.com"), holder),
         Err(StoreError::Conflict)
     ));
+    // An alias over an account's own mailbox would shadow it.
     assert!(matches!(
         fixture
             .storage
-            .create_alias(&addr("sales@example.com"), sales),
+            .create_alias(&addr("founder@example.com"), holder),
         Err(StoreError::InvalidArgument(_))
     ));
     // An alias on a domain this deployment does not serve could never work.
     assert!(matches!(
         fixture
             .storage
-            .create_alias(&addr("sales@elsewhere.example"), sales),
+            .create_alias(&addr("sales@elsewhere.example"), holder),
         Err(StoreError::InvalidArgument(_))
     ));
     assert!(fixture
@@ -3529,14 +3530,14 @@ fn sender_aliases_can_have_several_holders_and_never_shadow_a_mailbox() {
     // Several holders, each receiving a copy; assigning twice is a conflict.
     fixture
         .storage
-        .assign_alias(alias, sales, sales)
-        .expect("assign sales");
+        .assign_alias(alias, holder, holder)
+        .expect("assign holder");
     fixture
         .storage
-        .assign_alias(alias, second, sales)
+        .assign_alias(alias, second, holder)
         .expect("assign second");
     assert!(matches!(
-        fixture.storage.assign_alias(alias, second, sales),
+        fixture.storage.assign_alias(alias, second, holder),
         Err(StoreError::Conflict)
     ));
     assert_eq!(
@@ -3544,7 +3545,7 @@ fn sender_aliases_can_have_several_holders_and_never_shadow_a_mailbox() {
             .storage
             .accounts_for_alias("sales@example.com")
             .expect("holders"),
-        vec![sales, second]
+        vec![holder, second]
     );
     assert_eq!(
         fixture
@@ -3568,16 +3569,16 @@ fn sender_aliases_can_have_several_holders_and_never_shadow_a_mailbox() {
     // A user may hold several aliases.
     let marketing = fixture
         .storage
-        .create_alias(&addr("marketing@example.com"), sales)
+        .create_alias(&addr("marketing@example.com"), holder)
         .expect("second alias");
     fixture
         .storage
-        .assign_alias(marketing, sales, sales)
+        .assign_alias(marketing, holder, holder)
         .expect("assign marketing");
     assert_eq!(
         fixture
             .storage
-            .aliases_for_account(sales)
+            .aliases_for_account(holder)
             .expect("own aliases")
             .len(),
         2
@@ -3593,7 +3594,7 @@ fn sender_aliases_can_have_several_holders_and_never_shadow_a_mailbox() {
             .storage
             .accounts_for_alias("sales@example.com")
             .expect("holders"),
-        vec![sales]
+        vec![holder]
     );
     assert!(matches!(
         fixture.storage.unassign_alias(alias, second),
