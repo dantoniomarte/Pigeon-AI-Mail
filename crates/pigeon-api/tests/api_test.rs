@@ -607,13 +607,12 @@ async fn delete_sent_email_guards_ownership_and_queued_state() {
         .delete(&format!("/v1/messages/{email_id}"), Some(&app.full_key))
         .await;
     refused.assert_problem(StatusCode::CONFLICT, "not-cancellable");
+    // The cancel route speaks eml_: the named id must be that shape.
+    let detail = refused.body["detail"].as_str().unwrap_or_default();
+    assert!(detail.contains("/v1/emails"), "{detail}");
     assert!(
-        refused.body["detail"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("/v1/emails"),
-        "the 409 must point at the cancel route: {:?}",
-        refused.body
+        detail.contains("DELETE /v1/emails/eml_"),
+        "the hint must name an eml_ id: {detail}"
     );
 
     // PATCH keeps speaking `msg_` only: an `eml_` id stays a 404 there.
@@ -635,6 +634,44 @@ async fn delete_sent_email_guards_ownership_and_queued_state() {
         .delete(&format!("/v1/messages/{email_id}"), Some(&app.full_key))
         .await;
     assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{:?}", deleted.body);
+}
+
+/// The queued guard must hold on every id shape a caller can hold: the
+/// derived `msg_` id of a queued outbound email (handed out by
+/// GET /v1/messages?folder=sent) refuses with the same 409 as the `eml_`
+/// form — deliverability is a live decision, whichever surface names it.
+#[tokio::test]
+async fn delete_queued_outbound_email_is_refused_on_its_msg_id_too() {
+    let app = TestApp::new();
+    let _email_id = app.send(&app.full_key, valid_send()).await;
+
+    let sent = app
+        .get("/v1/messages?folder=sent", Some(&app.full_key))
+        .await;
+    let msg_id = sent.body["items"][0]["id"]
+        .as_str()
+        .expect("derived msg_ id")
+        .to_string();
+    assert!(msg_id.starts_with("msg_"), "{msg_id}");
+
+    let refused = app
+        .delete(&format!("/v1/messages/{msg_id}"), Some(&app.full_key))
+        .await;
+    refused.assert_problem(StatusCode::CONFLICT, "not-cancellable");
+    assert!(
+        refused.body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("/v1/emails"),
+        "the 409 must point at the cancel route: {:?}",
+        refused.body
+    );
+
+    // The queued row is untouched by the refusal.
+    let still = app
+        .get("/v1/messages?folder=sent", Some(&app.full_key))
+        .await;
+    assert_eq!(still.body["counts"]["sent"], 1, "{:?}", still.body);
 }
 
 #[tokio::test]

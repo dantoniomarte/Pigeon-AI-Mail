@@ -11,6 +11,7 @@ import {
   type Theme,
   deleteDraft,
   demoEnrichment,
+  isDemoSentId,
   emailAddress,
   fetchDrafts,
   fetchFolder,
@@ -399,8 +400,10 @@ export default function App(): JSX.Element {
 
   const handleDelete = useCallback((id: string) => {
     // Demo sent rows exist only in this state: the delete is local, a real id
-    // still goes through the API.
-    if (demo && view === 'sent') {
+    // still goes through the API. The prefix gate keeps a real sent message
+    // from being "deleted" locally while the mixed-state demo flag is on —
+    // the server row must own that decision.
+    if (demo && view === 'sent' && isDemoSentId(id)) {
       setSent((current) => current.filter((message) => message.id !== id));
       setSelectedId(null);
       notify('success', t('mail.deleted'));
@@ -412,7 +415,16 @@ export default function App(): JSX.Element {
         refresh();
         notify('success', t('mail.deleted'));
       })
-      .catch(() => notify('error', t('common.error')));
+      .catch((error: unknown) => {
+        // A queued/scheduled email refuses with 409 and an actionable hint
+        // ("cancel it with DELETE /v1/emails/{id}"): surface the detail,
+        // not the generic error.
+        if (error instanceof ApiError && error.status === 409) {
+          notify('error', error.message);
+          return;
+        }
+        notify('error', t('common.error'));
+      });
   }, [demo, view, key, notify, refresh, t]);
 
   const handleEmptyTrash = useCallback(() => {

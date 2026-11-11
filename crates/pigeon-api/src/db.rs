@@ -390,6 +390,25 @@ impl ApiDb {
         Ok(updated > 0)
     }
 
+    /// Lifecycle status and current folder of one message's row, if a
+    /// lifecycle row exists (`None` when the message has none — SMTP-inbound
+    /// rows without one, or the row already went with a hard delete).
+    pub fn email_status_and_folder_for_message(
+        &self,
+        message_id: i64,
+    ) -> store::Result<Option<(String, String)>> {
+        let conn = self.lock();
+        Ok(conn
+            .query_row(
+                "SELECT a.status, m.folder FROM api_messages a
+                  JOIN messages m ON m.id = a.message_id
+                  WHERE m.id = ?1",
+                [message_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?)
+    }
+
     /// Number of outbound emails queued today (UTC), for the daily quota.
     pub fn daily_outbound_count(&self, account_id: i64) -> store::Result<i64> {
         let conn = self.lock();

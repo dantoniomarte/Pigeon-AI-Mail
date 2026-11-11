@@ -143,6 +143,8 @@ export default function MailList({
   const [bulkBusy, setBulkBusy] = useState(false);
   // Two-step confirm, like the drafts list: a bulk delete is irreversible.
   const [confirmDelete, setConfirmDelete] = useState(false);
+  // A sent row's delete is permanent too: the first click arms only that row.
+  const [armedDeleteId, setArmedDeleteId] = useState<string | null>(null);
   const masterRef = useRef<HTMLInputElement | null>(null);
   // Sent mail is metadata-only on /v1/emails: the PATCH/DELETE message routes
   // would 404 there, so bulk actions only exist for the mailbox folders.
@@ -199,7 +201,15 @@ export default function MailList({
   useEffect(() => {
     setSelectedIds((current) => (current.size === 0 ? current : new Set<string>()));
     setConfirmDelete(false);
+    setArmedDeleteId(null);
   }, [view, filter, deliveredFilter]);
+
+  // An armed row that left the list (deleted, filtered out) disarms again.
+  useEffect(() => {
+    if (armedDeleteId !== null && !visibleIds.includes(armedDeleteId)) {
+      setArmedDeleteId(null);
+    }
+  }, [visibleIds, armedDeleteId]);
 
   // `indeterminate` is a DOM property only, so it needs a ref.
   useEffect(() => {
@@ -687,10 +697,29 @@ export default function MailList({
                                 className="row-action row-action--danger"
                                 onClick={(event) => {
                                   event.stopPropagation();
+                                  // Sent rows arm a confirmation first: the
+                                  // delete is permanent (no trash) and a
+                                  // single mis-click must not destroy mail.
+                                  // The inbox row keeps its single-click
+                                  // pattern, which already routed through
+                                  // the trash flow.
+                                  if (view === 'sent' && armedDeleteId !== item.id) {
+                                    setArmedDeleteId(item.id);
+                                    return;
+                                  }
+                                  setArmedDeleteId(null);
                                   onDelete(item.id);
                                 }}
-                                aria-label={t('mail.deleteForever')}
-                                title={t('mail.deleteForever')}
+                                aria-label={
+                                  view === 'sent' && armedDeleteId === item.id
+                                    ? t('mail.confirmDelete')
+                                    : t('mail.deleteForever')
+                                }
+                                title={
+                                  view === 'sent' && armedDeleteId === item.id
+                                    ? t('mail.confirmDelete')
+                                    : t('mail.deleteForever')
+                                }
                               >
                                 <X size={14} />
                               </button>

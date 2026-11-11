@@ -52,9 +52,26 @@ describe('sent folder deletion', () => {
     expect(screen.queryByRole('button', { name: 'Trash' })).not.toBeInTheDocument();
   });
 
-  it('keeps a delete button on the sent row itself', () => {
-    render(<MailList {...mailListProps('sent')} />);
-    expect(screen.getByRole('button', { name: 'Delete permanently' })).toBeInTheDocument();
+  it('keeps a delete button on the sent row itself', async () => {
+    const user = userEvent.setup();
+    const onDelete = vi.fn();
+    render(<MailList {...mailListProps('sent')} onDelete={onDelete} />);
+    const button = screen.getByRole('button', { name: 'Delete permanently' });
+
+    // Two steps on sent rows: the first click arms the confirmation.
+    await user.click(button);
+    expect(onDelete).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Confirm' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Confirm' }));
+    expect(onDelete).toHaveBeenCalledWith('row-1');
+  });
+
+  it('keeps inbox row actions single-click and untouched', async () => {
+    const user = userEvent.setup();
+    const onDelete = vi.fn();
+    render(<MailList {...mailListProps('inbox')} onDelete={onDelete} />);
+    await user.click(screen.getByRole('button', { name: 'Delete permanently' }));
+    expect(onDelete).toHaveBeenCalledWith('row-1');
   });
 
   it('keeps the full inbox row actions untouched', () => {

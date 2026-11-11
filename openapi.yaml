@@ -572,7 +572,8 @@ paths:
       required: true
       schema:
         type: string
-        pattern: ^msg_[a-z0-9]{8,32}$
+        pattern: ^(?:msg|eml)_[a-z0-9]{8,32}$
+      description: msg_ id of an owned message, or eml_ id of an owned sent email (the handler resolves both)
     - name: aid
       in: path
       required: true

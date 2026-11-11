@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { demoEnrichment, fetchFolder, fetchSent } from './api';
+import { demoEnrichment, fetchFolder, fetchSent, isDemoSentId } from './api';
 
 /**
  * Demo mode has no server to count for it, so the offline counts are derived from
@@ -46,5 +46,13 @@ describe('demo folder counts', () => {
     // Outbound copies are never unread, so the contract has no member for it:
     // a client must not be able to render an unread Sent badge.
     expect(Object.keys(sent.counts ?? {})).not.toContain('unread_sent');
+  });
+});
+
+describe('isDemoSentId', () => {
+  it('gates the demo delete branch by id shape, not the global demo flag', () => {
+    expect(isDemoSentId('eml_demo3f7c1a20')).toBe(true);
+    expect(isDemoSentId('eml_6df88cf040747e6d')).toBe(false);
+    expect(isDemoSentId('msg_0000000c')).toBe(false);
   });
 });

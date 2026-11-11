@@ -664,6 +664,15 @@ export interface DemoEnrichment {
   unread: boolean;
 }
 
+/**
+ * A demo sent row's id shape. Deleting demo mail is a local state change; a
+ * real sent message must always go through the API even while demo data is
+ * showing (mixed state: offline inbox + reachable send surface).
+ */
+export function isDemoSentId(id: string): boolean {
+  return id.startsWith('eml_demo');
+}
+
 /** Demo-only metadata for list rows (real metadata comes from the API). */
 export function demoEnrichment(id: string): DemoEnrichment | null {
   const message = DEMO_BY_ID.get(id);

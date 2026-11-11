@@ -321,7 +321,40 @@ fn resolve(state: &AppState, account_id: i64, id: &str) -> Result<i64, Problem> 
 /// deletes permanently, lifecycle row included.
 fn resolve_deletable(state: &AppState, account_id: i64, id: &str) -> Result<i64, Problem> {
     if ids::is_well_formed(id, ids::MSG) {
-        return resolve(state, account_id, id);
+        let message_id = resolve(state, account_id, id)?;
+        // The queued guard holds on every id shape a caller can hold — but
+        // only while the email still lives in `sent`: the derived `msg_` id is
+        // what GET /v1/messages?folder=sent hands out, and an email already
+        // moved out of sent (trash purge flows) keeps its pinned hard-delete
+        // semantics.
+        if let Some((status, folder)) = state
+            .db
+            .email_status_and_folder_for_message(message_id)
+            .map_err(Problem::from)?
+        {
+            let status = EmailStatus::parse(&status).unwrap_or_default();
+            if folder == "sent" && status.is_cancellable() {
+                // The cancel route speaks `eml_`: name the id the caller (or
+                // the lifecycle row) actually holds for this message.
+                let cancel_id = state
+                    .db
+                    .public_id_for_message(message_id)
+                    .map_err(Problem::from)?
+                    // The guard only fires when the lifecycle row exists, so
+                    // the stored id is always there; the derived eml_ fallback
+                    // keeps the named cancel id in the route's id shape.
+                    .unwrap_or_else(|| crate::ids::derived(crate::ids::EML, message_id));
+                return Err(Problem::new(
+                    StatusCode::CONFLICT,
+                    ProblemType::NotCancellable,
+                    format!(
+                        "email {cancel_id} is `{}` and may still be delivered; cancel it with DELETE /v1/emails/{cancel_id} instead",
+                        status.as_str()
+                    ),
+                ));
+            }
+        }
+        return Ok(message_id);
     }
     if !ids::is_well_formed(id, ids::EML) {
         return Err(not_found(format!("{id:?} is not a msg_ or eml_ id")));

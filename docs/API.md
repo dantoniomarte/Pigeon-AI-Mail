@@ -134,7 +134,7 @@ Lifecycle: `queued → scheduled → sending → sent | deferred {next_attempt_a
 
 ### `PATCH /v1/messages/{id}` — `{folder?: inbox|sent|spam|trash, read?: bool}`, at least one member. Moves the message and/or flips read state and returns the updated metadata (`200`). Unknown id → `404`, unknown folder → `422 validation`.
 
-### `DELETE /v1/messages/{id}` — permanent delete of the message and its lifecycle metadata (`204`). Accepts the `msg_` id of any owned message or the `eml_` id of an owned sent email (the id `GET /v1/emails` hands out). An email still `queued`/`scheduled` is refused with `409 not-cancellable` and points at `DELETE /v1/emails/{id}` (cancel) instead — deliverability is still a live decision. Deleting a sent email is **permanent and irreversible**: outbound mail has no trash round-trip. Moving to `trash` is a `PATCH`, not a delete.
+### `DELETE /v1/messages/{id}` — permanent delete of the message and its lifecycle metadata (`204`). Accepts the `msg_` id of any owned message or the `eml_` id of an owned sent email (the id `GET /v1/emails` hands out). An email still `queued`/`scheduled` is refused with `409 not-cancellable` and points at `DELETE /v1/emails/{id}` (cancel) instead — deliverability is still a live decision, on either id shape. An email already moved out of `sent` hard-deletes when **named by its `msg_` id** (the queued guard on this id shape is scoped to `sent`; the move itself does not stop delivery — cancel with `DELETE /v1/emails/{id}` if it must not go out). Its `eml_` id still refuses with `409` until the send pipeline settles it. Deleting a sent email is **permanent and irreversible**: outbound mail has no trash round-trip. Moving to `trash` is a `PATCH`, not a delete.
 
 ### `POST /v1/messages/empty-trash` — purges the caller's trash, `200 {deleted: N}` (idempotent: an already-empty trash reports `0`).
 
@@ -151,7 +151,7 @@ Two views (oneOf):
 - **Default (`?sealed=true`)** — `SealedMessageView`: metadata + auth verdicts + `sealed_body` ciphertext, **plus the attachment list** (`id`, `filename`, `size`). A `read` key can therefore see that a message carries `receipt.pdf` and how large it is, while the attachment content stays sealed until the caller holds scope `full`. No plaintext leaves the server.
 - **`?sealed=false`** — `DecryptedMessageView` (text/html + attachments): **requires scope `full`** (`read` keys get `403 forbidden`). This is the credential/scope rule for plaintext.
 
-### `GET /v1/messages/{id}/attachments/{aid}` — attachment bytes; sealed by default, decrypted with scope `full` (`?sealed=false`).
+### `GET /v1/messages/{id}/attachments/{aid}` — attachment bytes; sealed by default, decrypted with scope `full` (`?sealed=false`). `{id}` may be the `msg_` id of any owned message or the `eml_` id of an owned sent email, matching what the handler resolves.
 
 ## Templates
 
