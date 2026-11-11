@@ -1457,23 +1457,23 @@ export async function exportSelectionMbox(
   ids: string[],
 ): Promise<number> {
   const documents = await Promise.allSettled(ids.map((id) => fetchMessageEml(key, id)));
-  const parts: string[] = [];
+  // Byte parts all the way: the stored documents' exact bytes are concatenated
+  // with From_ separators and mboxrd-escaped at the byte level, so 8-bit mail
+  // round-trips identically (no lossy text decode on this path).
+  const parts: Uint8Array<ArrayBuffer>[] = [];
   let failed = 0;
+  const encoder = new TextEncoder();
+  const fromLine = encoder.encode(`From backup@pigeon.local ${new Date().toUTCString()}\n`);
+  const newline = encoder.encode('\n');
   for (const result of documents) {
     if (result.status === 'fulfilled') {
-      const text = new TextDecoder('utf-8', { fatal: false }).decode(result.value);
-      parts.push(`From backup@pigeon.local ${new Date().toUTCString()}\n`);
-      parts.push(
-        text
-          .split('\n')
-          .map((line) => (line.replace(/\r$/, '').startsWith('From ') ? `>${line}` : line))
-          .join('\n'),
-      );
+      parts.push(fromLine);
+      parts.push(mboxEscapeBytes(result.value));
       const last = parts[parts.length - 1];
-      if (last !== undefined && !last.endsWith('\n')) {
-        parts.push('\n');
+      if (last !== undefined && last[last.length - 1] !== 0x0a) {
+        parts.push(newline);
       }
-      parts.push('\n');
+      parts.push(newline);
     } else {
       failed += 1;
     }
@@ -1485,6 +1485,50 @@ export async function exportSelectionMbox(
   const stamp = new Date().toISOString().slice(0, 10);
   downloadBlob(blob, `pigeon-selection-${stamp}.mbox`);
   return failed;
+}
+
+/** mboxrd escape on bytes (client twin of the server's mbox_escape_bytes). */
+export function mboxEscapeBytes(
+  document: Uint8Array,
+): Uint8Array<ArrayBuffer> {
+  // Empty input adds nothing, matching the server's guard (mime.rs).
+  if (document.length === 0) {
+    return new Uint8Array(0) as Uint8Array<ArrayBuffer>;
+  }
+  const out: number[] = [];
+  let lineStart = 0;
+  for (let index = 0; index <= document.length; index += 1) {
+    const atEnd = index === document.length;
+    if (atEnd || document[index] === 0x0a) {
+      const line = document.subarray(lineStart, index);
+      let depth = 0;
+      while (depth < line.length && line[depth] === 0x3e) {
+        depth += 1;
+      }
+      const rest = line.subarray(depth);
+      const isFrom =
+        rest.length >= 5 &&
+        rest[0] === 0x46 &&
+        rest[1] === 0x72 &&
+        rest[2] === 0x6f &&
+        rest[3] === 0x6d &&
+        rest[4] === 0x20;
+      if (isFrom) {
+        out.push(0x3e);
+      }
+      for (const byte of line) {
+        out.push(byte);
+      }
+      if (atEnd && out[out.length - 1] !== 0x0a) {
+        out.push(0x0a);
+      }
+      if (!atEnd) {
+        out.push(0x0a);
+      }
+      lineStart = index + 1;
+    }
+  }
+  return new Uint8Array(out) as Uint8Array<ArrayBuffer>;
 }
 
 /* ------------------------------------------------------------------ */

@@ -40,6 +40,41 @@ const CRLF: &str = "\r\n";
 /// and a quoted `>From ` must survive a round-trip through a conformant mbox
 /// reader (which strips one `>` from `^>*From ` lines) without being
 /// mistaken for separators. Shared by the API and MCP export surfaces.
+/// Byte-level mboxrd escape with the same depth-scan semantics as
+/// [`mbox_escape`], for archives built directly from stored bytes (8-bit
+/// bodies round-trip unchanged).
+pub fn mbox_escape_bytes(document: &[u8]) -> Vec<u8> {
+    // An empty document adds nothing (the str version's split_inclusive also
+    // yields nothing): the caller's own From_ separator is the only line.
+    if document.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(document.len() + 16);
+    let mut line_start = 0usize;
+    for index in 0..=document.len() {
+        let at_end = index == document.len();
+        if at_end || document[index] == b'\n' {
+            let line = &document[line_start..index];
+            let mut depth = 0usize;
+            while depth < line.len() && line[depth] == b'>' {
+                depth += 1;
+            }
+            if line[depth..].starts_with(b"From ") {
+                out.push(b'>');
+            }
+            out.extend_from_slice(line);
+            if at_end && out.last().copied() != Some(b'\n') {
+                out.push(b'\n');
+            }
+            if !at_end {
+                out.push(b'\n');
+            }
+            line_start = index + 1;
+        }
+    }
+    out
+}
+
 pub fn mbox_escape(document: &str) -> String {
     let mut out = String::with_capacity(document.len() + 16);
     for line in document.split_inclusive('\n') {

@@ -313,6 +313,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn eml_ids_resolve_to_the_same_row() {
+        // The Sent surface hands out eml_ ids; the export tools accept them
+        // and resolve to the same row id as their msg_ alias.
+        let row = 0x0000_0042i64;
+        assert_eq!(message_row_id(&message_public_id(row)).expect("msg_"), row);
+        assert_eq!(
+            message_row_id(&format!("eml_{row:08x}")).expect("eml_"),
+            row
+        );
+    }
+
+    #[test]
     fn message_ids_round_trip_through_the_api_form() {
         for row_id in [1_i64, 10, 4096, 0x00ff_ffff] {
             let public = message_public_id(row_id);

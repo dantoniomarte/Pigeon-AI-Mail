@@ -9,6 +9,7 @@
 //! prove ownership first: an id from another mailbox must fail here, because the
 //! store's `set_message_folder`/`set_message_read` take a bare row id.
 
+use base64::Engine as _;
 use pigeon_core::types::MessageFolder;
 use store::{DraftRow, MessageRow, NewDraft, Storage, StoreError};
 
@@ -207,7 +208,7 @@ pub fn export_folder(args: &serde_json::Value, state: &McpState) -> Result<Strin
     let folder = MessageFolder::parse(raw_folder).ok_or_else(|| {
         format!("`folder` must be one of inbox|sent|spam|trash, got {raw_folder:?}")
     })?;
-    let mut archive = String::new();
+    let mut archive: Vec<u8> = Vec::new();
     let mut count = 0usize;
     let mut skipped = 0usize;
     let mut offset = 0i64;
@@ -243,14 +244,16 @@ pub fn export_folder(args: &serde_json::Value, state: &McpState) -> Result<Strin
             };
             let document = pigeon_crypto::open_content(&key, &stored.sealed_body, aad.as_bytes())
                 .map_err(|error| format!("could not open a message body: {error}"))?;
-            archive.push_str(&format!("From {} {}\n", row.from_addr, row.created_at));
-            archive.push_str(&pigeon_api::mime::mbox_escape(&String::from_utf8_lossy(
-                &document,
-            )));
-            if !archive.ends_with('\n') {
-                archive.push('\n');
+            // Byte-faithful: escape at the byte level so 8-bit bodies
+            // round-trip; the archive travels base64-encoded.
+            archive.extend_from_slice(
+                format!("From {} {}\n", row.from_addr, row.created_at).as_bytes(),
+            );
+            archive.extend_from_slice(&pigeon_api::mime::mbox_escape_bytes(&document));
+            if archive.last().copied().is_some_and(|b| b != b'\n') {
+                archive.push(b'\n');
             }
-            archive.push('\n');
+            archive.push(b'\n');
             count += 1;
         }
         offset += 100;
@@ -263,9 +266,11 @@ pub fn export_folder(args: &serde_json::Value, state: &McpState) -> Result<Strin
     Ok(serde_json::json!({
         "folder": folder.as_str(),
         "format": "mbox",
+        "encoding": "base64",
         "count": count,
         "skipped": skipped,
-        "mbox": archive,
+        "bytes": archive.len(),
+        "mbox": base64::engine::general_purpose::STANDARD.encode(archive.as_slice()),
     })
     .to_string())
 }

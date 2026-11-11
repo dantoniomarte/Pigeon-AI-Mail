@@ -1588,9 +1588,10 @@ async fn export_endpoints_deliver_eml_and_mbox_backups() {
     refused.assert_problem(StatusCode::FORBIDDEN, "forbidden");
 }
 
-/// The doc-comment and header promise: rows the ingest crashed between its
-/// two inserts (message row present, lifecycle row missing — no content key)
-/// are skipped and counted, never allowed to abort the whole folder backup.
+/// The doc-comment promise: rows the ingest crashed between its two inserts
+/// (message row present, lifecycle row missing — no content key) are skipped,
+/// never allowed to abort the whole folder backup; with a streamed body the
+/// archive's own From_ structure is the record of what was archived.
 #[tokio::test]
 async fn export_folder_skips_orphan_rows_without_content_keys() {
     let app = TestApp::new();
@@ -1630,14 +1631,16 @@ async fn export_folder_skips_orphan_rows_without_content_keys() {
         .get("/v1/messages/export?folder=inbox", Some(&app.full_key))
         .await;
     assert_eq!(mbox.status, StatusCode::OK, "{:?}", mbox.body);
+    // The orphan never reaches the archive (it had no readable body); the
+    // healthy row appears exactly once — the streamed body carries no count
+    // header, so the archive itself is the record.
     assert_eq!(
-        mbox.headers
-            .get("x-export-skipped")
-            .expect("skipped header")
-            .to_str()
-            .expect("value"),
-        "1",
-        "exactly the orphan is skipped"
+        String::from_utf8_lossy(&mbox.raw)
+            .lines()
+            .filter(|line| line.starts_with("From "))
+            .count(),
+        1,
+        "only the readable row is archived"
     );
     let archive = String::from_utf8(mbox.raw).expect("archive");
     assert!(archive.contains("Subject: good row"), "{archive}");
@@ -1679,6 +1682,101 @@ async fn export_folder_escapes_quoted_from_lines_too() {
     // appear at a line start (its escaped form is two `>`).
     assert!(!archive.contains("\n>From the quoted reply."), "{archive}");
     assert!(archive.contains(">>From the quoted reply."), "{archive}");
+}
+
+/// Byte fidelity: a non-UTF-8 stored document (latin-1 8-bit bytes) must
+/// round-trip through the folder mbox byte-identically — no U+FFFD
+/// substitution anywhere in the archive bytes (PR #7 r1 finding 7).
+#[tokio::test]
+async fn export_folder_archive_is_byte_faithful_for_non_utf8_mail() {
+    let app = TestApp::new();
+    // Latin-1 body: "español año" encoded in iso-8859-1 (0xF1 = ñ, 0xB0 = °).
+    let latin1 = b"Subject: latin-1 body\r\n\
+         Content-Type: text/plain; charset=iso-8859-1\r\n\
+         Content-Transfer-Encoding: 8bit\r\n\
+         \r\n\
+         espa\xF1ol a\xB0, c\xE1lido\r\n";
+    let reserved = app.state.store.reserve_message_id().expect("reserve id");
+    let aad = format!("account:{}:message:{}", app.account_id, reserved);
+    let content_key = pigeon_crypto::generate_content_key();
+    let wrapped_key = app
+        .state
+        .master_key
+        .wrap_content_key(&content_key, aad.as_bytes())
+        .expect("wrap key");
+    let sealed =
+        pigeon_crypto::seal_content(&content_key, latin1, aad.as_bytes()).expect("seal body");
+    app.state
+        .store
+        .insert_message(
+            NewMessage {
+                account_id: app.account_id,
+                direction: Direction::In,
+                from_addr: EmailAddress::parse("friend@example.org").expect("sender"),
+                to_addrs: vec![EmailAddress::parse("owner@example.com").expect("recipient")],
+                subject: "latin-1 body".to_string(),
+                sealed_body: sealed,
+                idempotency_key: None,
+                delivered_for: None,
+            },
+            reserved,
+        )
+        .expect("insert message");
+    app.state
+        .db
+        .insert_email(&pigeon_api::db::NewEmail {
+            account_id: app.account_id,
+            message_id: reserved,
+            public_id: pigeon_api::ids::derived(pigeon_api::ids::MSG, reserved),
+            status: "received".to_string(),
+            to_addrs: vec!["owner@example.com".to_string()],
+            cc_addrs: Vec::new(),
+            tags: Vec::new(),
+            sandbox: false,
+            e2e: "tls_only".to_string(),
+            wrapped_key,
+        })
+        .expect("lifecycle row");
+
+    let mbox = app
+        .get("/v1/messages/export?folder=inbox", Some(&app.full_key))
+        .await;
+    assert_eq!(mbox.status, StatusCode::OK, "{:?}", mbox.body);
+    let archive = &mbox.raw;
+    // The exact 8-bit sequence survives byte-for-byte.
+    let needle: &[u8] = b"espa\xF1ol a\xB0, c\xE1lido";
+    assert!(
+        archive.windows(needle.len()).any(|window| window == needle),
+        "8-bit bytes must survive: {:?}",
+        String::from_utf8_lossy(archive)
+    );
+    // And no replacement character ever appears.
+    assert!(!archive.windows(3).any(|w| w == b"\xEF\xBF\xBD"));
+}
+
+/// Paging termination without truncation: a folder bigger than one page
+/// (100) exports every row — the loop keeps walking until the empty page
+/// (PR #7 r1 finding 10).
+#[tokio::test]
+async fn export_folder_walks_past_the_first_page() {
+    let app = TestApp::new();
+    for index in 0..120 {
+        seed_inbound_document(
+            &app,
+            app.account_id,
+            &format!("page walk {index}"),
+            "Content-Type: text/plain\r\nSubject: page walk\r\n\r\nbody\r\n",
+        );
+    }
+    let mbox = app
+        .get("/v1/messages/export?folder=inbox", Some(&app.full_key))
+        .await;
+    assert_eq!(mbox.status, StatusCode::OK, "{:?}", mbox.body);
+    let from_lines = String::from_utf8_lossy(&mbox.raw)
+        .lines()
+        .filter(|line| line.starts_with("From "))
+        .count();
+    assert_eq!(from_lines, 120, "every row archived exactly once");
 }
 
 /// The sidebar badges are the server's to answer: every folder reports its size

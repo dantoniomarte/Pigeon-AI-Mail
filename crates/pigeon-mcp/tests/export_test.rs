@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+use base64::Engine as _;
 use pigeon_core::Direction;
 use pigeon_core::EmailAddress;
 use pigeon_crypto::MasterKey;
@@ -115,9 +116,17 @@ async fn an_agent_exports_one_message_as_eml_and_a_folder_as_mbox() {
     assert!(eml.contains("From the top, this is stored mail."), "{eml}");
 
     // The whole folder: an mbox archive with mboxrd escaping (bare and quoted
-    // From_ lines both gain one '>').
+    // From_ lines both gain one '>'). The archive is byte-faithful, so it
+    // travels base64-encoded with its byte size (8-bit mail round-trips).
     let folder = call(&state, "export_folder", json!({ "folder": "inbox" })).await;
-    let mbox = folder["mbox"].as_str().expect("mbox text");
+    assert_eq!(folder["encoding"], "base64", "{folder}");
+    assert!(folder["bytes"].as_u64().expect("byte size") > 0);
+    let mbox = String::from_utf8(
+        base64::engine::general_purpose::STANDARD
+            .decode(folder["mbox"].as_str().expect("mbox b64"))
+            .expect("base64"),
+    )
+    .expect("archive");
     assert!(mbox.starts_with("From "), "mbox separator: {mbox}");
     assert!(mbox.contains("Subject: keep me"));
     assert!(
@@ -126,6 +135,8 @@ async fn an_agent_exports_one_message_as_eml_and_a_folder_as_mbox() {
     );
     assert!(mbox.contains(">>From the quoted reply."), "{mbox}");
     assert!(folder["count"].as_u64().expect("count") >= 1);
+    // The latin-1 test below proves the bytes themselves survive; here the
+    // decoded archive must be byte-identical to what the API endpoint ships.
 
     // The export tool accepts both id shapes (the sent UI holds eml_ ids).
     let sent_row = seed_message(
@@ -138,6 +149,62 @@ async fn an_agent_exports_one_message_as_eml_and_a_folder_as_mbox() {
     assert!(
         by_eml["eml"].as_str().expect("eml").contains("sent body"),
         "{by_eml}"
+    );
+
+    // Byte fidelity: a latin-1 stored document round-trips byte-identically
+    // through the base64 archive (no lossy decode anywhere).
+    // Latin-1 bytes via a byte string (\xF1 is invalid in a str escape).
+    let latin1_doc: &[u8] = b"Subject: latin-1 mcp\r\nContent-Type: text/plain; charset=iso-8859-1\r\n\r\nespa\xF1ol\r\n";
+    {
+        let store = &state.store;
+        let reserved = store.reserve_message_id().expect("reserve id");
+        let aad = format!("account:1:message:{reserved}");
+        let content_key = pigeon_crypto::generate_content_key();
+        let sealed = pigeon_crypto::seal_content(&content_key, latin1_doc, aad.as_bytes())
+            .expect("seal body");
+        let wrapped = state
+            .master_key
+            .wrap_content_key(&content_key, aad.as_bytes())
+            .expect("wrap key");
+        store
+            .insert_message(
+                NewMessage {
+                    account_id: 1,
+                    direction: Direction::In,
+                    from_addr: EmailAddress::parse("friend@example.org").expect("sender"),
+                    to_addrs: vec![EmailAddress::parse("admin@pigeon.local").expect("recipient")],
+                    subject: "latin-1 mcp".to_string(),
+                    sealed_body: sealed,
+                    idempotency_key: None,
+                    delivered_for: None,
+                },
+                reserved,
+            )
+            .expect("insert message");
+        pigeon_mcp::aux::api_db()
+            .expect("aux db")
+            .insert_email(&pigeon_api::db::NewEmail {
+                account_id: 1,
+                message_id: reserved,
+                public_id: pigeon_mcp::aux::message_public_id(reserved),
+                status: "received".to_string(),
+                to_addrs: vec!["admin@pigeon.local".to_string()],
+                cc_addrs: Vec::new(),
+                tags: Vec::new(),
+                sandbox: false,
+                e2e: "tls_only".to_string(),
+                wrapped_key: wrapped,
+            })
+            .expect("lifecycle row");
+    }
+    let folder = call(&state, "export_folder", json!({ "folder": "inbox" })).await;
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(folder["mbox"].as_str().expect("mbox b64"))
+        .expect("base64");
+    let needle: &[u8] = b"espa\xF1ol";
+    assert!(
+        raw.windows(needle.len()).any(|w| w == needle),
+        "8-bit bytes must survive the MCP archive"
     );
 
     // A foreign or unknown id is a clean error, never a leak.

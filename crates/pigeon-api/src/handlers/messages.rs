@@ -743,99 +743,136 @@ pub async fn export_message(
 /// archive (mboxrd). Pages through the folder listing and decrypts every
 /// stored document with the `full` scope; rows that cannot be opened — a
 /// missing lifecycle row or content key, which a crashed ingest can leave
-/// behind — are skipped and counted in `X-Export-Skipped` instead of
-/// failing the whole backup.
+/// behind — are skipped (observable by archive absence) instead of failing
+/// the whole backup.
 pub async fn export_folder(
     State(state): State<AppState>,
     Extension(context): Extension<ApiKeyContext>,
     Query(params): Query<Params>,
 ) -> Response {
-    let result = blocking(move || {
-        if !context.has_scope(ApiKeyScope::Full) {
-            return Err(forbidden(
-                "backups expose decrypted content and require an API key with the `full` scope",
-            ));
-        }
-        let folder = parse_folder(params.get("folder").map(String::as_str).unwrap_or("inbox"))?;
-        let mut archive = String::new();
-        let mut offset = 0i64;
-        let mut skipped = 0usize;
-        loop {
-            let rows = state
-                .store
-                .list_folder(context.account_id, folder, 100, offset)
-                .map_err(Problem::from)?;
-            if rows.is_empty() {
-                break;
-            }
-            for row in rows {
-                let public_id = ids::derived(ids::MSG, row.id);
-                let Some(stored) = state
-                    .db
-                    .message_by_public_id(context.account_id, &public_id)
-                    .map_err(Problem::from)?
-                else {
-                    skipped += 1;
-                    continue;
-                };
-                // A row the ingest crashed between its two inserts (message
-                // row written, lifecycle row not yet) has no content key: it
-                // is skipped and counted, never allowed to abort the backup.
-                let document = match open_body(&state, context.account_id, &stored) {
-                    Ok(document) => document,
-                    Err(problem) if problem.status == StatusCode::CONFLICT => {
+    // Auth and validation resolve synchronously so they keep their HTTP
+    // semantics (403/422 problem responses); everything after this point is
+    // a stream.
+    if !context.has_scope(ApiKeyScope::Full) {
+        return forbidden(
+            "backups expose decrypted content and require an API key with the `full` scope",
+        )
+        .into_response();
+    }
+    let folder = match parse_folder(params.get("folder").map(String::as_str).unwrap_or("inbox")) {
+        Ok(folder) => folder,
+        Err(problem) => return problem.into_response(),
+    };
+
+    // Bounded channel = real backpressure: the producer blocks (blocking_send
+    // from the blocking thread) whenever the client drains slower than the
+    // pages are built, so memory stays O(page) no matter how large the
+    // folder. The producer is spawned, not awaited: the response body starts
+    // streaming with the first page.
+    let (body_tx, body_rx) = tokio::sync::mpsc::channel::<Result<Vec<u8>, String>>(4);
+    let stream_state = state.clone();
+    let stream_context = context.clone();
+    // The producer runs detached: a `Problem` mid-loop is forwarded as a
+    // stream error (the client sees an aborted chunked body, never a partial
+    // archive with 200). A panic, by contrast, would drop the sender and end
+    // the body *cleanly* — the client gets a valid but shorter archive it
+    // cannot detect — so the audit above (open_body/derived/escape are
+    // error-mapping and bounds-safe; nothing reachable panics) is the actual
+    // containment.
+    std::thread::spawn(move || {
+        let send = |page: Vec<u8>| -> Result<(), Problem> {
+            // mpsc::Sender::blocking_send parks the caller until the consumer
+            // drains a slot — the backpressure that bounds memory.
+            body_tx
+                .blocking_send(Ok(page))
+                .map_err(|_| internal("backup stream closed early"))
+        };
+        let result = (|| -> Result<(), Problem> {
+            let mut offset = 0i64;
+            let mut skipped = 0usize;
+            let mut archived = 0usize;
+            loop {
+                let rows = stream_state
+                    .store
+                    .list_folder(stream_context.account_id, folder, 100, offset)
+                    .map_err(Problem::from)?;
+                if rows.is_empty() {
+                    break;
+                }
+                let mut page: Vec<u8> = Vec::new();
+                for row in rows {
+                    let public_id = ids::derived(ids::MSG, row.id);
+                    let Some(stored) = stream_state
+                        .db
+                        .message_by_public_id(stream_context.account_id, &public_id)
+                        .map_err(Problem::from)?
+                    else {
                         skipped += 1;
                         continue;
+                    };
+                    // A row the ingest crashed between its two inserts (message
+                    // row written, lifecycle row not yet) has no content key:
+                    // skipped and counted, never allowed to abort the backup.
+                    let document =
+                        match open_body(&stream_state, stream_context.account_id, &stored) {
+                            Ok(document) => document,
+                            Err(problem) if problem.status == StatusCode::CONFLICT => {
+                                skipped += 1;
+                                continue;
+                            }
+                            Err(problem) => return Err(problem),
+                        };
+                    // Byte-faithful: the stored bytes go into the archive
+                    // unchanged (mboxrd-escaped on bytes), so 8-bit bodies
+                    // round-trip exactly; no lossy UTF-8 re-decode.
+                    page.extend_from_slice(
+                        format!("From {} {}\n", stored.from_addr, stored.created_at).as_bytes(),
+                    );
+                    page.extend_from_slice(&crate::mime::mbox_escape_bytes(&document));
+                    if page.last().copied().is_some_and(|b| b != b'\n') {
+                        page.push(b'\n');
                     }
-                    Err(problem) => return Err(problem),
-                };
-                let text = String::from_utf8_lossy(&document).into_owned();
-                archive.push_str(&format!(
-                    "From {} {}\n",
-                    stored.from_addr, stored.created_at
-                ));
-                archive.push_str(&crate::mime::mbox_escape(&text));
-                if !archive.ends_with('\n') {
-                    archive.push('\n');
+                    page.push(b'\n');
+                    archived += 1;
                 }
-                archive.push('\n');
+                offset += 100;
+                send(std::mem::take(&mut page))?;
             }
-            offset += 100;
-        }
-        Ok((folder, skipped, archive))
-    })
-    .await;
-    match result {
-        Ok((folder, skipped, archive)) => {
-            let disposition = format!(
-                "attachment; filename=\"pigeon-{}-{}.mbox\"",
-                folder.as_str(),
-                &crate::time::iso_now()[..10]
+            tracing::debug!(
+                folder = folder.as_str(),
+                archived,
+                skipped,
+                "folder backup streamed"
             );
-            (
-                StatusCode::OK,
-                [
-                    (
-                        header::CONTENT_TYPE,
-                        HeaderValue::from_static("application/mbox"),
-                    ),
-                    (
-                        header::CONTENT_DISPOSITION,
-                        HeaderValue::from_str(&disposition).expect("ascii header"),
-                    ),
-                    (
-                        axum::http::HeaderName::from_static("x-export-skipped"),
-                        HeaderValue::from(skipped),
-                    ),
-                ],
-                archive.into_bytes(),
-            )
-                .into_response()
+            Ok(())
+        })();
+        if let Err(problem) = result {
+            let _ = body_tx.blocking_send(Err(format!("backup failed: {}", problem.detail)));
         }
-        Err(problem) => problem.into_response(),
-    }
-}
+        drop(body_tx);
+    });
 
+    let disposition = format!(
+        "attachment; filename=\"pigeon-{}-{}.mbox\"",
+        folder.as_str(),
+        &crate::time::iso_now()[..10]
+    );
+    // Totals cannot ride in headers with a streamed body; the trailing blank
+    // line and the From_ separators are the archive's own structure.
+    let headers = [
+        (
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/mbox"),
+        ),
+        (
+            header::CONTENT_DISPOSITION,
+            HeaderValue::from_str(&disposition).expect("ascii header"),
+        ),
+    ];
+    let streamed =
+        axum::body::Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(body_rx));
+    (StatusCode::OK, headers, streamed).into_response()
+}
 #[cfg(test)]
 mod tests {
     use super::*;

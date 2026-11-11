@@ -17,8 +17,8 @@ use store::{NewMessage, SqliteStorage, Storage};
 /// The tool surface: 5 messaging + 28 administration tools.
 ///
 /// `catchall_pause`/`catchall_resume` and the four `alias_*` tools joined the
-/// surface with sender aliases + the multi-assignee catch-all: 27 + 6 = 33.
-const TOOL_COUNT: usize = 33;
+/// surface with sender aliases + the multi-assignee catch-all: the two backup export tools bring the catalog to 35.
+const TOOL_COUNT: usize = 35;
 
 /// The bootstrap account the tools act as.
 const ACTOR_EMAIL: &str = "admin@pigeon.local";
@@ -168,7 +168,7 @@ fn mcp_initialize_and_protocol() {
     assert_eq!(
         tools.len(),
         TOOL_COUNT,
-        "5 messaging + 28 administration tools"
+        "5 messaging + 30 administration tools"
     );
     for name in [
         // messaging

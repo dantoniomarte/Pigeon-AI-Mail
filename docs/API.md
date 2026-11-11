@@ -153,7 +153,7 @@ Two views (oneOf):
 
 ### `GET /v1/messages/{id}/export` — the original RFC822 document of one message as a `message/rfc822` attachment (`200`, `Content-Disposition: attachment; filename="pigeon-<id>.eml"`). `{id}` accepts the `msg_` mailbox id or the `eml_` sent id; requires scope `full` (decrypted content); unknown/foreign id → `404`.
 
-### `GET /v1/messages/export?folder=<inbox|sent|spam|trash>` — the whole folder as one mbox archive (mboxrd, `application/mbox`, `Content-Disposition: attachment; filename="pigeon-<folder>-<date>.mbox"`). Requires scope `full`; rows without a lifecycle content key are skipped and counted in `X-Export-Skipped`. Unknown folder → `422 validation`.
+### `GET /v1/messages/export?folder=<inbox|sent|spam|trash>` — the whole folder as one mbox archive (mboxrd, `application/mbox`, `Content-Disposition: attachment; filename="pigeon-<folder>-<date>.mbox"`). Requires scope `full`; rows without a lifecycle content key are skipped (observable by archive absence). Unknown folder → `422 validation`.
 
 ### `GET /v1/messages/{id}/attachments/{aid}` — attachment bytes; sealed by default, decrypted with scope `full` (`?sealed=false`). `{id}` may be the `msg_` id of any owned message or the `eml_` id of an owned sent email, matching what the handler resolves.
 
