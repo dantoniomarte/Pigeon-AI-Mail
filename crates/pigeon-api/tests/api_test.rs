@@ -1303,6 +1303,101 @@ async fn empty_inbox_pages_and_decryption_requires_the_full_scope() {
     refused.assert_problem(StatusCode::FORBIDDEN, "forbidden");
 }
 
+/// A received email must read as a message, not as wire format: the inbound
+/// SMTP path stores the whole RFC822 document (trace headers, boundaries,
+/// encoded parts), and the reader extracts the text/html parts instead of
+/// exposing the raw bytes a mail client would never show.
+#[tokio::test]
+async fn received_mime_messages_read_as_text_not_wire() {
+    let app = TestApp::new();
+    let reserved = app.state.store.reserve_message_id().expect("reserve id");
+    let aad = format!("account:{}:message:{}", app.account_id, reserved);
+    // The content key is what decrypts the body; the master key only wraps it
+    // in the lifecycle row — the same split the inbound SMTP path performs.
+    let content_key = pigeon_crypto::generate_content_key();
+    let wrapped_key = app
+        .state
+        .master_key
+        .wrap_content_key(&content_key, aad.as_bytes())
+        .expect("wrap key");
+    let text_encoded = base64::engine::general_purpose::STANDARD.encode("Hola de la prueba");
+    let raw = format!(
+        "Received: from mail.example.org by mail.example.com\r\n\
+         DKIM-Signature: v=1; a=rsa-sha256; d=example.org; b=abc\r\n\
+         Content-Type: multipart/alternative;\r\n \n        boundary=\"b-123\"\r\n\
+         \r\n\
+         --b-123\r\n\
+         Content-Type: text/plain; charset=utf-8\r\n\
+         Content-Transfer-Encoding: base64\r\n\
+         \r\n\
+         {text_encoded}\r\n\
+         --b-123\r\n\
+         Content-Type: text/html; charset=utf-8\r\n\
+         Content-Transfer-Encoding: quoted-printable\r\n\
+         \r\n\
+         <p>Hola=2C qu=C3=A9 tal</p>\r\n\
+         --b-123--\r\n"
+    );
+    let sealed = pigeon_crypto::seal_content(&content_key, raw.as_bytes(), aad.as_bytes())
+        .expect("seal body");
+    app.state
+        .store
+        .insert_message(
+            NewMessage {
+                account_id: app.account_id,
+                direction: Direction::In,
+                from_addr: EmailAddress::parse("friend@example.org").expect("sender"),
+                to_addrs: vec![EmailAddress::parse("owner@example.com").expect("recipient")],
+                subject: "real inbound mail".to_string(),
+                sealed_body: sealed,
+                idempotency_key: None,
+                delivered_for: None,
+            },
+            reserved,
+        )
+        .expect("insert message");
+    // The read path opens bodies through the lifecycle row's wrapped content
+    // key, exactly as the inbound SMTP path stores them.
+    app.state
+        .db
+        .insert_email(&pigeon_api::db::NewEmail {
+            account_id: app.account_id,
+            message_id: reserved,
+            public_id: pigeon_api::ids::derived(pigeon_api::ids::MSG, reserved),
+            status: "received".to_string(),
+            to_addrs: vec!["owner@example.com".to_string()],
+            cc_addrs: Vec::new(),
+            tags: Vec::new(),
+            sandbox: false,
+            e2e: "tls_only".to_string(),
+            wrapped_key,
+        })
+        .expect("lifecycle row");
+
+    let id = format!("msg_{reserved:08x}");
+    let view = app
+        .get(
+            &format!("/v1/messages/{id}?sealed=false"),
+            Some(&app.full_key),
+        )
+        .await;
+    assert_eq!(view.status, StatusCode::OK, "{:?}", view.body);
+    assert_eq!(
+        view.body["body_text"], "Hola de la prueba",
+        "{:?}",
+        view.body
+    );
+    assert_eq!(
+        view.body["body_html"], "<p>Hola, qué tal</p>",
+        "{:?}",
+        view.body
+    );
+    let text = view.body["body_text"].as_str().expect("text");
+    assert!(!text.contains("Content-Type:"), "raw MIME leaked: {text}");
+    assert!(!text.contains("--b-123"), "boundary leaked: {text}");
+    assert!(!text.contains("Received:"), "trace header leaked: {text}");
+}
+
 /// The sidebar badges are the server's to answer: every folder reports its size
 /// *and* how much of it is still unread, so a client showing "Sent" cannot make
 /// the inbox badge claim the sent page's size.

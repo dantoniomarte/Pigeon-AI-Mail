@@ -617,10 +617,13 @@ fn open_body(
 
 /// Split plaintext into the `body_text` / `body_html` pair.
 ///
-/// The inbound MIME parser ships with the SMTP service. Until then the sealed
-/// payload is either the JSON part pair this API writes
-/// (`{"text": …, "html": …}`) or an opaque blob, which is exposed verbatim as
-/// `body_text` rather than silently truncated.
+/// Every stored body is a complete RFC822 document — the inbound SMTP path
+/// seals the received bytes with our trace header on top, and the send path
+/// seals [`crate::mime::build`] output. Clients read a message, not the wire:
+/// [`crate::mime_read`] walks the document and extracts the text/html parts.
+/// The JSON part pair (`{"text": …, "html": …}`) is kept as the first
+/// branch for historical payloads, and a document with no readable text part
+/// (PGP armor, binary bodies) is exposed verbatim rather than truncated.
 fn split_parts(plaintext: &[u8]) -> (Option<String>, Option<String>) {
     #[derive(serde::Deserialize)]
     struct Parts {
@@ -631,7 +634,16 @@ fn split_parts(plaintext: &[u8]) -> (Option<String>, Option<String>) {
     }
     match serde_json::from_slice::<Parts>(plaintext) {
         Ok(parts) => (parts.text, parts.html),
-        Err(_) => (Some(String::from_utf8_lossy(plaintext).into_owned()), None),
+        Err(_) => {
+            let (text, html) = crate::mime_read::extract_parts(plaintext);
+            if text.is_none() && html.is_none() {
+                // Nothing readable in the document (PGP armor, opaque binary
+                // parts): expose it as-is instead of silently truncating.
+                (Some(String::from_utf8_lossy(plaintext).into_owned()), None)
+            } else {
+                (text, html)
+            }
+        }
     }
 }
 
@@ -673,9 +685,38 @@ mod tests {
     }
 
     #[test]
-    fn opaque_payloads_are_exposed_as_text_instead_of_being_lost() {
+    fn simple_documents_read_as_their_body_not_their_headers() {
+        // The stored document carries trace/transport headers a reader never
+        // asked for; only the body is the message.
         let (text, html) = split_parts(b"Subject: hi\r\n\r\nbody");
-        assert_eq!(text.as_deref(), Some("Subject: hi\r\n\r\nbody"));
+        assert_eq!(text.as_deref(), Some("body"));
+        assert!(html.is_none());
+    }
+
+    #[test]
+    fn opaque_payloads_without_readable_parts_are_exposed_verbatim() {
+        // A document whose parts are all non-text (PGP/MIME armor) routes to
+        // the verbatim fallback: deleting that arm must fail this test.
+        let (text, html) = split_parts(
+            b"Content-Type: multipart/encrypted; boundary=\"pgp\"\r\n\
+              \r\n\
+              --pgp\r\n\
+              Content-Type: application/pgp-encrypted\r\n\
+              \r\n\
+              Version: 1\r\n\
+              --pgp\r\n\
+              Content-Type: application/octet-stream\r\n\
+              \r\n\
+              -----BEGIN PGP MESSAGE-----\r\n\
+              hQEMA\r\n\
+              --pgp--\r\n",
+        );
+        assert!(
+            text.as_deref()
+                .unwrap_or_default()
+                .contains("BEGIN PGP MESSAGE"),
+            "the armor must surface verbatim, got {text:?}"
+        );
         assert!(html.is_none());
     }
 

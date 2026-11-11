@@ -41,6 +41,7 @@ pub mod handlers;
 pub mod ids;
 pub mod keys;
 pub mod mime;
+pub(crate) mod mime_read;
 pub mod models;
 pub mod pgp;
 pub mod problem;
