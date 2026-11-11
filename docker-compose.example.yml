@@ -2,7 +2,7 @@
 # Place behind a TLS reverse proxy (Caddy/nginx) for HTTPS access
 services:
   pigeon:
-    image: pigeon-mail:v0.1.0
+    image: pigeon-mail:v0.1.2
     container_name: pigeon-mail
     restart: unless-stopped
     network_mode: host  # required for SMTP :25 + direct DNS resolution

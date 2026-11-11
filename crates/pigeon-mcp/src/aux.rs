@@ -6,11 +6,9 @@
 //! SQL connection, which is the layer that owns the `api_*` tables and the
 //! domain/suppression/key listings (`pigeon_api::db::ApiDb`).
 //!
-//! That connection is opened lazily, once, against the same file the store
-//! opened (`PIGEON_DB_PATH`), exactly like the HTTP server's `AppState` does:
-//! one database file, two connections, no second copy of the schema and no new
-//! environment variable. It is opened on the first administration call, so a
-//! deployment that only sends mail never pays for it.
+//! That connection is opened eagerly by the binary against `PIGEON_DB_PATH`
+//! and carried in [`McpState`] (tests open it against a tempdir database), so
+//! no tool depends on process-global environment state.
 //!
 //! # One actor
 //!
@@ -26,7 +24,7 @@
 //! be a mailbox of the routed domain; a draft id must belong to the actor).
 //! MCP is a second transport, not a second policy.
 
-use std::sync::OnceLock;
+use std::sync::Arc;
 
 use pigeon_api::db::ApiDb;
 use pigeon_core::types::OrgRole;
@@ -44,22 +42,46 @@ pub const DEFAULT_ACCOUNT_ID: i64 = 1;
 /// rows say plainly that an agent made the change.
 pub const ACTOR: &str = "mcp:agent";
 
-/// Lazily opened auxiliary connection to the database the store opened.
-static API_DB: OnceLock<Result<ApiDb, String>> = OnceLock::new();
+/// The pipeline state for tools that delegate to the API's own path
+/// (`send_email`, `draft_send`): new connections to the same database file,
+/// default tuning knobs, same master key. Built per call — see the function.
+pub fn app_state(state: &McpState) -> Result<pigeon_api::AppState, String> {
+    // The pipeline state: new connections to the SAME database file the state
+    // already opened (SqliteStorage/ApiDb are not Clone), default tuning
+    // knobs, same master key. Built per call — two SQLite opens is
+    // microseconds against a send — and deliberately NOT process-global: a
+    // cached state would pin the first database path it saw and route a
+    // second `McpState`'s mail into the wrong database.
+    let path = state.db_path.clone();
+    let store = store::SqliteStorage::open(&path)
+        .map_err(|error| format!("could not open the store at {}: {error}", path.display()))?;
+    let db = pigeon_api::db::ApiDb::open(&path)
+        .map_err(|error| format!("could not open the database at {}: {error}", path.display()))?;
+    Ok(pigeon_api::AppState::new(
+        store,
+        (*state.master_key).clone(),
+        db,
+        pigeon_api::state::ApiConfig::default(),
+    ))
+}
 
-/// The API's auxiliary SQL connection, opened on first use.
-pub fn api_db() -> Result<&'static ApiDb, String> {
-    API_DB
-        .get_or_init(|| {
-            let config = pigeon_core::Config::from_env()
-                .map_err(|error| format!("could not read the server configuration: {error}"))?;
-            let path = config.db_path.display().to_string();
-            ApiDb::open(&config.db_path).map_err(|error| {
-                format!("could not open the database at {path} (PIGEON_DB_PATH): {error}")
-            })
-        })
-        .as_ref()
-        .map_err(|error| error.clone())
+/// The synthesized acting context for pipeline delegation: the bootstrap
+/// account with the `full` scope (the operator's voice).
+pub fn pipeline_context(account_id: i64) -> pigeon_api::auth::ApiKeyContext {
+    pigeon_api::auth::ApiKeyContext {
+        account_id,
+        key_id: 0,
+        public_id: "mcp-agent".to_string(),
+        scopes: vec![pigeon_core::ApiKeyScope::Full],
+        sandbox: false,
+    }
+}
+
+/// The API's auxiliary SQL connection: the handle the binary opened against
+/// `PIGEON_DB_PATH` and carried in [`McpState`]. No tool depends on
+/// process-global environment state.
+pub fn api_db(state: &McpState) -> Result<Arc<ApiDb>, String> {
+    Ok(Arc::clone(&state.api_db))
 }
 
 /// The account the tools act as.

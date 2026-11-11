@@ -1,64 +1,81 @@
 # Architecture
 
-Pigeon Mail is a single Rust binary composed of independent services that can run **in one process (default)** or **split across nodes (Kubernetes-ready)**.
+Pigeon Mail is a single static Rust binary that runs an encrypted email
+server: an HTTP API, an ESMTP server, a queue-driven outbound delivery
+worker and an MCP agent server, sharing one SQLite database. A React
+webmail is compiled into the same binary and served when enabled.
 
-## Components
+## Crate map
 
 ```
-                       ┌────────────────────────────────────────────────┐
-  Inbound SMTP :25 ──▶ │ smtp-in  ──▶ parse/auth (SPF·DKIM·DMARC)       │
-                       │                 │                              │
-  HTTPS API /v1  ────▶ │ api      ───────┼──▶ store (SQLite, encrypted) │
-  MCP (stdio/HTTP) ──▶ │ mcp      ───────┤        │                     │
-                       │                 ▼        ▼                     │
-  Webmail (optional) ─▶│ web (static)   crypto   queue ──▶ smtp-out ──▶▶ remote MX
-                       └────────────────────────────────────────────────┘
+                     ┌──────────────────────────────────────────────┐
+  HTTP :8000 ───────▶│ pigeon-api (axum)                            │
+  MCP stdio ────────▶│ pigeon-mcp (JSON-RPC)                        │
+                     │        │  │                                  │
+  Inbound :25 ──────▶│ pigeon-smtp ───▶ queue ──▶ outbound worker ──▶ MX
+                     │        │         │                           │
+                     │ store (SQLite WAL, Storage trait seam)         │
+                     │        │                                       │
+                     │ pigeon-crypto (XChaCha20 at-rest seal, TOTP,   │
+                     │            Argon2id API keys)                  │
+                     │ pigeon-dkim (DKIM rsa-sha256 signing)          │
+                     │ pigeon-core (strict types, 12-factor config)   │
+                     └──────────────────────────────────────────────┘
+                              pigeon (binary: serve / keygen / mcp /
+                                      unpin-peer-key; webmail bundle)
 ```
 
-| Crate | Role | Notes |
-|---|---|---|
-| `pigeon-core` | config (env), error taxonomy, domain types (Address, Message, QueueItem) | no I/O |
-| `store` | `Storage` trait + SQLite engine + at-rest sealing | ADR 0002 |
-| `crypto` | master-key handling, content sealing (XChaCha20), OpenPGP (rpgp), TOTP (RFC 6238) | ADR 0003 |
-| `smtp-in` | ESMTP server: EHLO/STARTTLS/AUTH, size & rate limits, SPF/DKIM/DMARC | port 25, also submission 587 with AUTH |
-| `smtp-out` | MX resolution, STARTTLS-required delivery, retries with exponential backoff + jitter, DSN/bounce parsing | worker-driven |
-| `api` | axum REST: Resend-compatible `/v1/emails`, keys, templates, webhooks, admin | probes: `/healthz` (liveness), `/readyz` (readiness: store reachable, key present) |
-| `mcp` | Model Context Protocol server exposing the same operations as `api`, JSON-RPC over stdio (and HTTP/SSE) | agent-first (ADR 0001) |
-| `web` | optional webmail static bundle served by `api` if installed | installer flag |
+| Crate | Responsibility |
+|---|---|
+| `pigeon-core` | Strict, injection-proof types (addresses, folders, scopes) and 12-factor configuration |
+| `pigeon-crypto` | XChaCha20-Poly1305 content sealing with domain-separated AAD, TOTP (RFC 6238), Argon2id API-key hashing, master-key wrapping of per-message content keys |
+| `pigeon-dkim` | DKIM signing, `rsa-sha256` with RSA-2048 keys today (Ed25519/RFC 8463 planned); per-domain keys live sealed in the `dkim_keys` table and are unsealed per delivery |
+| `store` | SQLite storage with WAL and an atomic id reservation; owns the `messages` schema and the `Storage` trait seam every other crate programs against |
+| `pigeon-api` | The HTTP API surface (axum): sends, mailbox reads, exports, keys, aliases, catch-all rules, organizations, sessions/2FA, WKD; opens its own `api_*` schema in the same database file |
+| `pigeon-smtp` | ESMTP server (inbound), opportunistic-STARTTLS outbound client, and the queue worker that claims jobs with a lease, retries with backoff and dead-letters |
+| `pigeon-mcp` | The agent server: JSON-RPC over stdio exposing the 35-tool catalog; send/backup tools delegate to the same pipeline the HTTP API uses |
+| `pigeon` | The binary: `serve` (API + SMTP + worker + webmail bundle), `keygen`, `mcp`, `unpin-peer-key` |
 
-## Key flows
+Two schemas live in one database file: the `messages` schema (every stored
+mail, both directions, with sealed bodies) belongs to `store`, and the
+`api_*` schema (lifecycle rows with wrapped content keys, drafts, sender
+aliases, catch-all rules, webhooks, organizations, sessions, templates) is
+managed by `pigeon-api`'s auxiliary connection. Rows are linked by
+`message_id`; a crash between the two inserts leaves a row without a
+lifecycle record, which readers skip and backups count.
 
-**Send (API)**: `POST /v1/emails` with API key → validate + template render → content sealed (if E2E available) → queue row (idempotency key unique) → **`202 {id, status, e2e}`**. Workers pick the queue, deliver via `smtp-out`, record events (`queued → scheduled → sending → sent | deferred | bounced | failed | cancelled`) → webhook fan-out (HMAC-signed).
+## Request flows
 
-**Receive (SMTP)**: remote MX connects → ESMTP dialog with limits → SPF/DKIM/DMARC evaluated → parse MIME → seal body → store → inbound webhook event.
+**Send (HTTP or MCP)**: quota check → validation → identity (own address or
+an assigned sender alias) → idempotency → render MIME (`pigeon-api/src/mime`)
+→ decide payload protection → seal (layer 1 at-rest always; layer 3 OpenPGP
+E2E when recipients publish keys) → insert message + lifecycle row → enqueue.
 
-**Agent send (MCP)**: identical path to API — same key scopes, same audit rows. No elevated path exists for agents.
+**Deliver**: the worker claims a job (lease, backoff, dead-letter), groups
+recipients by MX, connects opportunistic STARTTLS, hands the MIME over, and
+records per-domain verdicts so a retry only targets outstanding domains.
 
-## Storage model (SQLite, WAL)
+**Receive**: a remote MX connects to `:25` → ESMTP dialog (size and rate
+limits, no open relay) → parse MIME → seal the body at rest → store →
+inbound webhook event. Auth verdicts are recorded as `none`; SPF/DKIM/DMARC
+evaluation is planned (see docs/ROADMAP.md).
 
-Tables: `accounts`, `api_keys` (Argon2id-hashed, scopes), `messages` (encrypted body blob + metadata), `attachments`, `queue` (claim tokens for multi-worker), `events` (delivery lifecycle), `webhooks`, `audit`, `totp_secrets` (wrapped), `templates`. Migrations are embedded and applied at boot.
+## Security layers
 
-## Multi-node (K8s-ready posture)
+Pigeon applies three independent layers, documented in
+[docs/e2ee-model.md](e2ee-model.md):
 
-- `api`/`mcp`/`web` are **stateless** → scale horizontally behind an LB. Health probes wired.
-- `smtp-in`/`smtp-out` are safe to run multi-replica: queue claims use tokens; SQLite shared on a PVC is the *single-node* case; the `Storage` trait seam is where a shared DB engine lands for true scale (ADR 0002).
-- Config is 12-factor: everything from env (`PIGEON_*`), no config file required. Secrets (master key, TOTP pepper) from mounted secret files.
-- Single Deployment = all services in one container (dev/small VPS); split Deployments = one per service (scale path). Manifests under `deploy/`.
+1. **At-rest sealing** (always): every stored body is XChaCha20-Poly1305
+   sealed with a per-message content key wrapped by the master key,
+   domain-separated by account and message.
+2. **Transport**: inbound STARTTLS advertised (plaintext accepted and
+   logged); outbound opportunistic STARTTLS (peer certificate validation is
+   planned).
+3. **End-to-end OpenPGP** (layer 3): when every recipient publishes a key
+   (WKD), the body part is sealed so only the keys can open it.
 
-## Configuration (principal env vars)
+## The webmail
 
-| Var | Default | Meaning |
-|---|---|---|
-| `PIGEON_MASTER_KEY_FILE` | `/etc/pigeon/master.key` | 32-byte master key (auto-generated by installer) |
-| `PIGEON_DB_PATH` | `/var/lib/pigeon/pigeon.db` | SQLite path (must be real disk) |
-| `PIGEON_HTTP_ADDR` | `:8000` | API listen address |
-| `PIGEON_SMTP_IN_ADDR` | `:25` | inbound SMTP |
-| `PIGEON_SMTP_OUT_STARTTLS` | `required` | `required` \| `opportunistic` |
-| `PIGEON_WEBMAIL` | `off` | serve bundled webmail |
-| `PIGEON_LOG` | `info` | tracing filter |
-
-Full reference lives with the installer PR.
-
-## API surface sketch (contract detailed when `api` lands)
-
-`POST /v1/emails` (Resend-compatible) · `GET /v1/emails/{id}` · `GET /v1/messages` (inbound) · `POST /v1/templates` · `POST /v1/webhooks` · `POST /v1/account/keys` · `POST /v1/account/2fa/enroll` (session realm — cookie auth, not a bearer key) · `/healthz`, `/readyz`. Errors: RFC 7807 problem+json. Auth: `Authorization: Bearer pk_…` (scopes: `send`, `read`, `full`), plus the `pigeon_session` cookie for dashboard/webmail and 2FA operations.
+A React SPA under `web/`, built by the `pigeon-webmail` Docker target and
+served by the binary. It speaks the same HTTP API, uses session cookies by
+default (API keys work as a fallback), and ships 5 locales.

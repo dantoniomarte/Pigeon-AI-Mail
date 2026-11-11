@@ -1,0 +1,9 @@
+b6bf31b341039a83e7333cc0c9a4385708e183d258b7647c69280ac05519a449  # blocked name #1
+cb5d055d3f1f085dd0e14fad7e07bbac1adbbb2f74e6def15f2f9bb9e0172914  # blocked name (bare root) #2b
+f0618e162d9ddf4b56396f5c445bd4131f461e3dd538fe4dde81450a540f43cf  # blocked name #2
+0840c9ee47e3aa23afbaeb4c1f739ca11182e344557a0bdc0428c34caafa8954  # blocked name #3
+147654bd5fc608d422fe3854dec3fe6530e30d08348056b2fe75aad75f3481e2  # blocked name #4
+a14dde3648b74d85a053f6baf3fee54ec8698f372343a653d4fdb9902b93e962  # blocked name #5
+# NOTE: private server path fragments (e.g. under a dot-directory) are covered
+# by the owner-local regex file; token-level digests cannot capture them
+# without false positives on public client names.

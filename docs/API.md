@@ -235,7 +235,7 @@ def verify_pigeon(raw_body: str, ts: str, sig: str, secret: str) -> bool:
     return hmac.compare_digest(expect, sig)
 ```
 
-Retries: 10 attempts, exponential 1 min → 6 h, then dropped. Replay endpoint: v0.2 candidate (was mislabeled v1 in FEATURES; fixed there too).
+Retries: 10 attempts, exponential 1 min → 6 h, then dropped. Replay endpoint: a v0.2 candidate.
 
 Payloads are the `Event` schema (openapi) — field names match the internal contract (`from_addr`, `to` arrays where multiple, `auth` object); Resend-style mapping: `from_addr → from`. Sandbox sends **never** emit delivery webhooks.
 

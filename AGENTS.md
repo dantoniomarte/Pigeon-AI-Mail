@@ -1,31 +1,60 @@
-# Agent instructions (template — applies to every project)
+# Agent instructions
 
-## Session isolation — MANDATORY
+Guidance for AI agents working on this repository.
 
-Before writing the first file of a new task:
+## What this project is
 
-1. If you are already in a worktree created for this task, continue there.
-2. Otherwise, create an isolated worktree on a new branch, always from a freshly
-   synced `origin/<default-branch>` — for example
-   `git worktree add ../<repo>-worktrees/<task> -b feat/<task> origin/main` — and
-   work exclusively there.
-3. Never work, commit, or switch branches in the main checkout or in worktrees
-   this session did not create. If `git status` shows files you did not create,
-   report them.
-4. Each session opens, merges, and deploys only the PRs it opened itself.
-5. After merging a PR, remove its worktree (`git worktree remove <path>`) to
-   clean up.
+Pigeon Mail: a self-hosted encrypted email server in Rust — HTTP API (axum),
+ESMTP inbound, queue-driven outbound delivery, an MCP agent server and a
+React webmail, sharing one SQLite database. AGPL-3.0. Public repo:
+`dantoniomarte/Pigeon-AI-Mail`.
 
-## Independent review before merge
+## Map
 
-Every PR carries a `## Independent review` section in its body, written by an
-agent other than the one that authored the change. Without that artifact, the
-PR is not ready to merge.
+| Path | What lives there |
+|---|---|
+| `crates/pigeon-core` | Strict types (addresses, folders, scopes) + 12-factor config |
+| `crates/pigeon-crypto` | XChaCha20 content sealing, TOTP, Argon2id API keys |
+| `crates/pigeon-dkim` | Ed25519 DKIM signing |
+| `crates/store` | SQLite WAL storage, `Storage` trait seam, `messages` schema |
+| `crates/pigeon-api` | axum HTTP API + `api_*` schema (drafts, aliases, webhooks, orgs, sessions) |
+| `crates/pigeon-smtp` | ESMTP inbound, outbound client, queue worker |
+| `crates/pigeon-mcp` | JSON-RPC stdio agent server (35 tools) |
+| `crates/pigeon` | Binary: `serve` / `keygen` / `mcp` / `unpin-peer-key` |
+| `web/` | React webmail (Vite + vitest), served by the binary |
+| `docs/` | API, architecture, deployment, security, e2ee model, roadmap |
+| `openapi.yaml` | The API contract (CI-linted) |
 
-## Workflow conventions
+## Rules
 
-- 1 task = 1 branch (cut from a fresh `origin/main`) = 1 PR.
-- Merge is squash (1 commit per PR); the branch is deleted afterward.
-- Tests first, with a mutation check to prove the test can fail.
-- If the project uses Postgres: every new SQL query is tested against Postgres
-  from day one.
+1. **Work in an isolated worktree on a new branch** cut from a freshly synced
+   `main` (`git worktree add ../<repo>-worktrees/<task> -b feat/<task> main`);
+   never work or commit in another session's worktree.
+2. **One task = one branch = one PR**, squash-merged; the branch is deleted
+   after merge.
+3. **Tests first**, and verify a new test with a mutation: if it stays green
+   with the code broken, the test is worthless. Run the FULL workspace suite
+   before declaring green — filtered runs mask cross-target breakage.
+4. **One SQLite dialect** (this project has no Postgres); new SQL is tested
+   against SQLite from day one.
+5. **Never commit secrets or private data**; the private-name gate
+   (`scripts/check_private_names.py`, run by `scripts/verify-clean.sh`) fails
+   any tracked file containing a blocked name.
+6. **Never verify destructive flows against production data**: synthesize
+   isolated data with per-step error handling, or verify in tests only.
+7. **PRs carry a complete body** (symptom, cause, change, verification) and
+   an independent review before merge.
+8. **Generated artifacts are in English** (code, comments, commit messages,
+   docs, tests).
+9. **Public claims must be verifiable**: every capability statement in
+   README/docs must be true of the current tree; planned features live in
+   docs/ROADMAP.md, not in feature tables.
+
+## Commands
+
+```sh
+cargo test --workspace          # full Rust suite
+cargo fmt && cargo clippy --all-targets
+cd web && npm ci && npx vitest run && npm run build
+scripts/verify-clean.sh          # secrets + private-name gate (pre-merge)
+```

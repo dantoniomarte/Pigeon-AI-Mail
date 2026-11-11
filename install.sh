@@ -461,6 +461,20 @@ install_from_release() {
             ;;
     esac
 
+    # Verify the release checksum before unpacking: the release publishes
+    # pigeon-${ARCH}.tar.gz.sha256 (sha256sum of the archive bytes).
+    checksum_url="${RELEASE_BASE_URL}/pigeon-${ARCH}.tar.gz.sha256"
+    checksum="$(mktemp)"
+    register_temp "$checksum"
+    if curl -fsSL --retry 2 --connect-timeout 10 -o "$checksum" "$checksum_url"; then
+        if ! (cd "$(dirname "$archive")" && sha256sum -c <(awk -v a="$(basename "$archive")" 'NR==1 {print $1 "  " a}' "$checksum") >/dev/null 2>&1); then
+            die "release checksum verification failed for ${url} — refusing to install"
+        fi
+        info "checksum verified"
+    else
+        die "checksum file not available (${checksum_url}) — refusing to install an unverified binary"
+    fi
+
     tar -xzf "$archive" -C "$extract_dir"
     extract_pigeon_binary "$extract_dir" "$url"
 }

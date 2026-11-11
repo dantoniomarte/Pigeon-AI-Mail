@@ -46,7 +46,8 @@ pub fn suppression_list(args: &serde_json::Value, state: &McpState) -> Result<St
         .unwrap_or(100)
         .clamp(1, MAX_SUPPRESSION_PAGE);
     let offset = aux::optional_i64(args, "offset")?.unwrap_or(0).max(0);
-    let (rows, total) = aux::api_db()?
+    let (rows, total) = aux::api_db(state)?
+        .as_ref()
         .suppression_page(actor.account_id, limit, offset)
         .map_err(|error| aux::store_error("could not list the suppressions", error))?;
     Ok(serde_json::json!({
@@ -83,7 +84,8 @@ pub fn suppression_add(args: &serde_json::Value, state: &McpState) -> Result<Str
             REASONS.join("|")
         ));
     }
-    let added = aux::api_db()?
+    let added = aux::api_db(state)?
+        .as_ref()
         .insert_suppressions(actor.account_id, &addresses, reason, Some(aux::ACTOR))
         .map_err(|error| aux::store_error("could not add the suppressions", error))?;
     aux::audit(
@@ -104,7 +106,8 @@ pub fn suppression_remove(args: &serde_json::Value, state: &McpState) -> Result<
     let actor = aux::actor(state)?;
     let address = aux::parse_email(aux::required_str(args, "address")?, "address")?;
     let normalized = address.normalized();
-    let removed = aux::api_db()?
+    let removed = aux::api_db(state)?
+        .as_ref()
         .delete_suppression(actor.account_id, &normalized)
         .map_err(|error| aux::store_error("could not remove the suppression", error))?;
     if !removed {
@@ -130,7 +133,7 @@ pub fn api_key_create(args: &serde_json::Value, state: &McpState) -> Result<Stri
     let sandbox = aux::optional_bool(args, "sandbox").unwrap_or(false);
     let (public_id, api_key) = pigeon_api::keys::issue(
         state.store.as_ref(),
-        aux::api_db()?,
+        aux::api_db(state)?.as_ref(),
         actor.account_id,
         name,
         &scopes,
@@ -152,7 +155,8 @@ pub fn api_key_create(args: &serde_json::Value, state: &McpState) -> Result<Stri
 /// `api_key_list` — key metadata, never key material.
 pub fn api_key_list(_args: &serde_json::Value, state: &McpState) -> Result<String, String> {
     let actor = aux::actor(state)?;
-    let rows = aux::api_db()?
+    let rows = aux::api_db(state)?
+        .as_ref()
         .list_keys(actor.account_id)
         .map_err(|error| aux::store_error("could not list the API keys", error))?;
     Ok(serde_json::json!({
@@ -181,7 +185,8 @@ pub fn api_key_revoke(args: &serde_json::Value, state: &McpState) -> Result<Stri
         revoked: Some(true),
         ..ApiKeyPatch::default()
     };
-    let revoked = aux::api_db()?
+    let revoked = aux::api_db(state)?
+        .as_ref()
         .patch_key(actor.account_id, key_id, &patch)
         .map_err(|error| aux::store_error("could not revoke the API key", error))?
         .ok_or_else(|| format!("API key {key_id} not found"))?;

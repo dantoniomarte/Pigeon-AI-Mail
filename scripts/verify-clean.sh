@@ -38,8 +38,15 @@ run_grep() {
   esac
 }
 
-# 1) Private project names / infrastructure — local patterns file only.
-#    Patterns are referred to by index so this script never echoes a literal.
+# 1) Private project names / infrastructure — enforced EVERYWHERE. The
+#    blocked names are committed only as salted digests, so this repository
+#    never carries the names themselves; the checker is a single fast
+#    python3 pass over the tracked files. A local (gitignored) patterns
+#    file may extend the list with live regexes.
+if ! python3 scripts/check_private_names.py; then
+  fail=1
+fi
+# 1b) Optional live regexes from the local (gitignored) patterns file.
 if [ -f "$patterns_file" ]; then
   pattern_index=0
   while IFS= read -r pattern || [ -n "$pattern" ]; do
@@ -50,8 +57,6 @@ if [ -f "$patterns_file" ]; then
       fail=1
     fi
   done < "$patterns_file"
-else
-  echo "… $patterns_file not present — private-name check skipped (expected on CI)"
 fi
 
 # 2) Template placeholders that must be gone before merge.

@@ -319,6 +319,17 @@ pub(crate) fn ensure_from_allowed(
 
 /// Validate, seal, store and queue one email. Shared by the single send, the
 /// batch endpoint and template test-sends.
+/// Run the send pipeline for a non-HTTP caller (the MCP server): the same
+/// quota, validation, identity, sealing and queueing path the HTTP handler
+/// uses, with no idempotency header.
+pub fn send_email_pipeline(
+    state: &AppState,
+    context: &ApiKeyContext,
+    request: &SendRequest,
+) -> Result<SendAccepted, Problem> {
+    accept(state, context, request, None)
+}
+
 pub(crate) fn accept(
     state: &AppState,
     context: &ApiKeyContext,

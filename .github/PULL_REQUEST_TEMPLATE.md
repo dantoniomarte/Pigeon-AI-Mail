@@ -14,7 +14,7 @@
 ## Independent review
 
 <!-- Required. Findings from a reviewer other than the author (human or agent). -->
-<!-- If this PR was reviewed by an agent, name the agent and summarize its findings. -->
+<!-- If a non-human reviewer (automation or an AI assistant) produced findings, name the reviewer and summarize them. -->
 
 - Reviewer:
 - Findings:

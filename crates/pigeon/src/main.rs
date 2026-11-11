@@ -169,7 +169,14 @@ async fn mcp(config: Config) -> Result<(), Box<dyn Error>> {
     use std::sync::Arc;
     let master_key = Arc::new(MasterKey::from_file(&config.master_key_file)?);
     let store = Arc::new(store::SqliteStorage::open(&config.db_path)?);
-    let state = pigeon_mcp::McpState { store, master_key };
+    let api_db = pigeon_api::db::ApiDb::open(&config.db_path)
+        .map_err(|error| format!("could not open the API database: {error}"))?;
+    let state = pigeon_mcp::McpState {
+        store,
+        master_key,
+        api_db: Arc::new(api_db),
+        db_path: config.db_path.clone(),
+    };
     pigeon_mcp::run_stdio(state).await?;
     Ok(())
 }

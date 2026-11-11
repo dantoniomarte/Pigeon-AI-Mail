@@ -523,25 +523,65 @@ async fn send_email(args: &serde_json::Value, state: &McpState) -> Result<String
         .get("subject")
         .and_then(|s| s.as_str())
         .ok_or("missing 'subject'")?;
-    let _text = args
+    let text = args
         .get("text")
         .and_then(|s| s.as_str())
         .ok_or("missing 'text'")?;
+    let html = args.get("html").and_then(|s| s.as_str()).map(String::from);
+    let tags: Vec<String> = args
+        .get("tags")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| s.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let cc: Vec<String> = args
+        .get("cc")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| s.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
 
-    // TODO: wire to the actual send pipeline (reserve id, seal, queue) when
-    // the MCP server is integrated with AppState in the binary PR. For now
-    // return a placeholder that proves the tool routing works.
-    let id = format!(
-        "eml_{}",
-        hex::encode(&pigeon_crypto::generate_content_key()[..8])
+    // The real pipeline: same quota, validation, sealing, queueing as
+    // POST /v1/emails. The MCP actor is the deployment's bootstrap account,
+    // so the synthesized context carries the `full` scope.
+    let app = aux::app_state(state)?;
+    let context = aux::pipeline_context(actor.account_id);
+    let request = pigeon_api::models::SendRequest {
+        from: from.to_string(),
+        to,
+        cc,
+        bcc: Vec::new(),
+        reply_to: None,
+        subject: Some(subject.to_string()),
+        html,
+        text: Some(text.to_string()),
+        headers: Default::default(),
+        attachments: Vec::new(),
+        tags,
+        template_id: None,
+        variables: Default::default(),
+        scheduled_at: None,
+        idempotency_key: None,
+    };
+    let accepted = pigeon_api::handlers::send_email_pipeline(&app, &context, &request)
+        .map_err(|problem| format!("send refused: {}", problem.detail))?;
+    aux::audit(
+        state,
+        "email.send",
+        &format!("{} to={:?}", accepted.id, request.to),
     );
     Ok(serde_json::json!({
-        "id": id,
-        "status": "queued",
-        "e2e": "tls_only",
-        "to": to,
+        "id": accepted.id,
+        "status": accepted.status.as_str(),
+        "e2e": accepted.e2e,
+        "to": request.to,
         "subject": subject,
-        "note": "MCP send pipeline wires with AppState in the binary integration"
     })
     .to_string())
 }
@@ -625,16 +665,66 @@ async fn create_template(args: &serde_json::Value, state: &McpState) -> Result<S
     Ok(serde_json::json!({ "created": name }).to_string())
 }
 
-async fn manage_webhooks(args: &serde_json::Value, _state: &McpState) -> Result<String, String> {
+async fn manage_webhooks(args: &serde_json::Value, state: &McpState) -> Result<String, String> {
+    let actor = aux::actor(state)?;
     let action = args
         .get("action")
         .and_then(|a| a.as_str())
         .ok_or("missing 'action'")?;
+    let db = aux::api_db(state)?;
     match action {
-        "list" => Ok(serde_json::json!({ "webhooks": [] }).to_string()),
-        "create" | "delete" => {
-            let url = args.get("url").and_then(|u| u.as_str()).unwrap_or("");
-            Ok(serde_json::json!({ "action": action, "url": url, "note": "webhook store integration in binary PR" }).to_string())
+        "list" => {
+            let hooks = db
+                .list_webhooks(actor.account_id)
+                .map_err(|error| aux::store_error("could not read webhooks", error))?;
+            let items: Vec<serde_json::Value> = hooks
+                .iter()
+                .map(|hook| {
+                    serde_json::json!({
+                        "id": hook.public_id,
+                        "url": hook.url,
+                        "events": hook.events,
+                        "created_at": hook.created_at,
+                    })
+                })
+                .collect();
+            Ok(serde_json::json!({ "webhooks": items }).to_string())
+        }
+        "create" => {
+            let url = aux::required_str(args, "url")?;
+            let events: Vec<String> = args
+                .get("events")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_else(|| vec!["delivered".to_string()]);
+            // The signing secret is generated server-side, like the HTTP path.
+            let secret = hex::encode(&pigeon_crypto::generate_content_key()[..16]);
+            let hook = db
+                .create_webhook(actor.account_id, url, &events, &secret)
+                .map_err(|error| aux::store_error("could not create the webhook", error))?;
+            aux::audit(state, "webhook.create", &hook.public_id);
+            Ok(serde_json::json!({
+                "status": "created",
+                "id": hook.public_id,
+                "url": hook.url,
+                "events": hook.events,
+            })
+            .to_string())
+        }
+        "delete" => {
+            let id = aux::required_str(args, "id")?;
+            let removed = db
+                .delete_webhook(actor.account_id, id)
+                .map_err(|error| aux::store_error("could not delete the webhook", error))?;
+            if !removed {
+                return Err(format!("webhook {id} not found"));
+            }
+            aux::audit(state, "webhook.delete", id);
+            Ok(serde_json::json!({ "status": "deleted", "id": id }).to_string())
         }
         _ => Err(format!("unknown action: {action}")),
     }

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Pigeon Mail API
-  version: 0.1.0
+  version: 0.1.2
   license:
     name: AGPL-3.0-or-later
     identifier: AGPL-3.0-or-later
@@ -9,7 +9,7 @@ info:
     kept in lockstep (CI lints this spec; docs/API.md is the prose mirror); CI lints this file''s YAML
     validity.
 
-    Resend compatibility (deliberate deviations, see docs/FEATURES.md): send endpoints return **202 Accepted**
+    Resend compatibility (deliberate deviations, see docs/API.md): send endpoints return **202 Accepted**
     (at-least-once pipeline; Resend returns 200), idempotent replays return **409 with the original id**
     (Resend returns 200), and `email.delivered`-style webhook field names are documented in the Event
     schemas below. Everything else follows the Resend send schema.

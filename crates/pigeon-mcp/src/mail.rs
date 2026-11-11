@@ -19,11 +19,6 @@ use crate::McpState;
 /// Largest page `draft_list` returns in one call.
 const MAX_DRAFT_PAGE: i64 = 100;
 
-/// Note returned by `draft_send` while the MCP transport does not own the send
-/// pipeline. Kept identical to the one `send_email` returns, so the two tools
-/// report the same limitation instead of two different ones.
-const PIPELINE_NOTE: &str = "MCP send pipeline wires with AppState in the binary integration";
-
 /// `draft_save` — create a draft, or update the one named by `draft_id`.
 pub fn draft_save(args: &serde_json::Value, state: &McpState) -> Result<String, String> {
     let actor = aux::actor(state)?;
@@ -124,12 +119,8 @@ pub fn draft_list(args: &serde_json::Value, state: &McpState) -> Result<String, 
 
 /// `draft_send` — hand a saved draft to the send pipeline.
 ///
-/// The delivery pipeline (`send::accept`: quota, validation, sealing, queueing) is
-/// `pub(crate)` in `pigeon-api` and needs the HTTP `AppState`, which this
-/// transport does not own yet. Until the binary wires that in, the tool answers
-/// with the accepted shape — an `eml_` id and `queued` — and says so in `note`,
-/// exactly like `send_email` already does. The draft is **kept**: dropping it
-/// would destroy mail that was never sent.
+/// The delivery pipeline is the same `send::accept` path the HTTP API uses;
+/// the draft is **kept**: dropping it would destroy mail that was never sent.
 pub fn draft_send(args: &serde_json::Value, state: &McpState) -> Result<String, String> {
     let actor = aux::actor(state)?;
     let draft_id = aux::required_str(args, "draft_id")?;
@@ -143,17 +134,38 @@ pub fn draft_send(args: &serde_json::Value, state: &McpState) -> Result<String, 
             "draft {draft_id} has no recipients: save it with `to` before sending"
         ));
     }
-    let email_id = format!(
-        "eml_{}",
-        hex::encode(&pigeon_crypto::generate_content_key()[..8])
-    );
+    // The real pipeline: the draft is handed to the same send path the HTTP
+    // API uses (quota, validation, sealing, queueing). The draft is **kept**:
+    // dropping it would destroy mail that was never sent.
+    let app = aux::app_state(state)?;
+    let context = aux::pipeline_context(actor.account_id);
+    let request = pigeon_api::models::SendRequest {
+        from: actor.email.to_string(),
+        to: draft.to_addrs.iter().map(ToString::to_string).collect(),
+        cc: draft.cc_addrs.iter().map(ToString::to_string).collect(),
+        bcc: Vec::new(),
+        reply_to: None,
+        subject: draft.subject.clone(),
+        html: draft.body_html.clone(),
+        text: draft.body_text.clone(),
+        headers: Default::default(),
+        attachments: Vec::new(),
+        tags: Vec::new(),
+        template_id: None,
+        variables: Default::default(),
+        scheduled_at: None,
+        idempotency_key: None,
+    };
+    let accepted = pigeon_api::handlers::send_email_pipeline(&app, &context, &request)
+        .map_err(|problem| format!("send refused: {}", problem.detail))?;
+    aux::audit(state, "draft.send", &accepted.id);
     Ok(serde_json::json!({
         "draft_id": draft_id,
-        "email_id": email_id,
-        "status": "queued",
+        "email_id": accepted.id,
+        "status": accepted.status.as_str(),
+        "e2e": accepted.e2e,
         "to": draft.to_addrs,
         "subject": draft.subject.unwrap_or_default(),
-        "note": PIPELINE_NOTE,
     })
     .to_string())
 }
@@ -167,7 +179,7 @@ pub fn export_message(args: &serde_json::Value, state: &McpState) -> Result<Stri
     let row_id = aux::message_row_id(aux::required_str(args, "id")?)?;
     let message = owned_message(state, &actor, row_id)?;
     let aad = format!("account:{}:message:{}", actor.account_id, message.id);
-    let stored = aux::api_db()?
+    let stored = aux::api_db(state)?
         .message_by_public_id(actor.account_id, &aux::message_public_id(row_id))
         .map_err(|error| aux::store_error("could not resolve the message", error))?
         .ok_or_else(|| {
@@ -222,7 +234,9 @@ pub fn export_folder(args: &serde_json::Value, state: &McpState) -> Result<Strin
         }
         for row in rows {
             let public_id = aux::message_public_id(row.id);
-            let stored = match aux::api_db()?.message_by_public_id(actor.account_id, &public_id) {
+            let stored = match aux::api_db(state)?
+                .message_by_public_id(actor.account_id, &public_id)
+            {
                 Ok(Some(stored)) => stored,
                 Ok(None) => {
                     skipped += 1;

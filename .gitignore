@@ -20,6 +20,10 @@ keys/
 .env
 .env.*
 !.env.example
+# Runtime secret material mounted by compose (keys live as *.key, covered
+# above; the directory itself is ignored so nothing inside can slip through).
+deploy-runtime/
+
 
 # OS / editor
 .DS_Store

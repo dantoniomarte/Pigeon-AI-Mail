@@ -21,8 +21,8 @@ Please include: affected component (SMTP / HTTP API / MCP / webmail / installer)
 - Dashboard/webmail accounts support TOTP second factor (RFC 6238); recovery codes are one-time.
 - Storage encryption at rest: XChaCha20-Poly1305 (master key from env/secret file; KMS integration planned).
 - End-to-end encryption follows the OpenPGP model described in [docs/e2ee-model.md](docs/e2ee-model.md) — including what it deliberately does **not** cover.
-- SMTP hardening: command size/line limits, rate limits per connection and per domain, no open relay by construction, rDNS/SPF/DKIM/DMARC evaluation on inbound.
+- SMTP hardening: command size/line limits, rate limits per connection, no open relay by construction. SPF/DKIM/DMARC evaluation on inbound is planned (tracked in docs/ROADMAP.md); outbound TLS is opportunistic STARTTLS (certificate validation is planned — see docs/ROADMAP.md).
 
 ## Deployment guidance
 
-Run behind a reverse proxy with TLS (Caddy/nginx) or terminate TLS at your load balancer. Never expose the master key env var to any other process. Set `PIGEON_MASTER_KEY` from a secret manager, not a shell profile.
+Run behind a reverse proxy with TLS (Caddy/nginx) or terminate TLS at your load balancer. Never expose the master key env var to any other process. Set `PIGEON_MASTER_KEY_FILE` from a secret manager, not a shell profile (the binary reads the master key from that file; there is no plain env key).

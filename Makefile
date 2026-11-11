@@ -2,19 +2,19 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build test lint fmt verify clean install-hooks
+.PHONY: help build test lint fmt verify clean run-local install-hooks
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 
-build: ## Build release binary (requires Rust >= 1.85)
-	@if [ -f Cargo.toml ]; then cargo build --release; else echo "backend not initialized yet — see docs/ROADMAP.md"; fi
+build: ## Build release binary
+	cargo build --release
 
-test: ## Run unit + integration tests
-	@if [ -f Cargo.toml ]; then cargo test --workspace; else echo "backend not initialized yet — see docs/ROADMAP.md"; fi
+test: ## Run unit + integration tests (Rust + webmail)
+	cargo test --workspace
 
 lint: ## clippy + fmt check
-	@if [ -f Cargo.toml ]; then cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --check; else echo "backend not initialized yet"; fi
+	cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --check
 
 fmt: ## Format code
 	@if [ -f Cargo.toml ]; then cargo fmt; fi

@@ -19,6 +19,7 @@ pub mod health;
 pub mod messages;
 pub mod org;
 pub mod send;
+pub use send::send_email_pipeline;
 pub mod sessions;
 pub mod suppressions;
 pub mod templates;

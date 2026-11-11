@@ -626,7 +626,7 @@ fn content_key(
         return Err(Problem::new(
             StatusCode::CONFLICT,
             crate::problem::ProblemType::Unavailable,
-            "this message has no wrapped content key yet; inbound decryption lands with the SMTP service",
+            "this message has no wrapped content key (its ingest was interrupted); it cannot be decrypted",
         ));
     };
     let message_aad = aad::message(account_id, stored.message_id);

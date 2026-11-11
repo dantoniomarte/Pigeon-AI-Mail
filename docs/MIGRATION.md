@@ -7,7 +7,7 @@ reference (November 2026).
 ## The two universal paths
 
 1. **SMTP** — every provider in this list offers SMTP, and Pigeon has a full
-   SMTP stack (`:587` submission with AUTH, `:25` MX). Most applications can
+   SMTP stack (`:25` MX; `:587` submission with AUTH is planned). Most applications can
    migrate by changing three settings: host, port, credentials. No code paths
    change.
 2. **Resend-style JSON** — Pigeon's HTTP API is Resend-compatible: flat JSON,

@@ -1,6 +1,6 @@
 # Deploying Pigeon Mail
 
-Pigeon is one Rust binary (`pigeon`) with two subcommands: `serve` (everything in
+Pigeon is one Rust binary (`pigeon`) with four subcommands: `serve` (everything in
 one process — API, MCP, web, SMTP in/out) and `mcp` (stdio MCP server). Pick the
 deployment style that matches your host:
 
@@ -55,7 +55,7 @@ docker run -d --name pigeon \
   -v "$PWD/secrets:/etc/pigeon:ro" \
   -e PIGEON_HTTP_ADDR=:8000 \
   -e PIGEON_SMTP_IN_ADDR=:25 \
-  -e PIGEON_LOG=info,json \
+  -e PIGEON_LOG=info \
   pigeon-mail:local
 ```
 
@@ -174,6 +174,13 @@ Full contract: [API.md](API.md#dashboardwebmail-session-realm).
 [deploy/k8s/README.md](../deploy/k8s/README.md) before applying. It documents the
 single-binary vs split posture, the PVC, hostPort-vs-LoadBalancer choice for
 `:25`, and when to move off SQLite (the `Storage` trait seam).
+
+## Publishing a release (for maintainers)
+
+Release assets are published as `pigeon-<arch>.tar.gz` plus a mandatory
+`pigeon-<arch>.tar.gz.sha256` sidecar (`sha256sum pigeon-<arch>.tar.gz >
+pigeon-<arch>.tar.gz.sha256`). `install.sh` refuses to install a binary whose
+checksum file is missing or does not match — always upload both files.
 
 ## DNS records
 
@@ -312,7 +319,7 @@ no recovery path and no support override:
 
 ## Placeholders in these files
 
-These values are guesses that the parallel PR will confirm; grep for them before
+These values are starting points; verify them against your cluster before
 trusting a deploy:
 
 - the webmail bundle path `/usr/local/share/pigeon/web` (Dockerfile,

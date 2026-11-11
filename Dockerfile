@@ -3,14 +3,6 @@
 # ---------------------------------------------------------------------------
 # Pigeon Mail — container image
 #
-# CONTRACT NOTE (why this build does not work today):
-# the image builds the single `pigeon` binary from a Cargo workspace that
-# declares a binary crate named `pigeon` with the subcommands `serve` and `mcp`
-# (`cargo build --release -p pigeon`). That crate is landing in a parallel PR;
-# the workspace checked out on this branch only contains library crates, so the
-# cargo step below fails until it lands. That is expected — this file is written
-# against the contract in docs/ARCHITECTURE.md, not against the current tree.
-#
 # Targets:
 #   pigeon            (default, last stage)  binary only — node is NEVER pulled
 #   pigeon-webmail                           binary + the optional webmail bundle
@@ -20,8 +12,9 @@
 #   WITH_WEBMAIL=1 docker compose build                    # same, via compose
 # ---------------------------------------------------------------------------
 
-# 1.99: the workspace Cargo.lock requires rustc >= 1.91-era crates; 1.85 fails
-# the build (dependency MSRV). CI uses `stable`, which currently satisfies it.
+# The workspace's dependency set requires a recent rustc (the 1.85 line fails
+# the build). CI builds on `stable`, which satisfies it; pin your builder to a
+# toolchain of the same era.
 ARG RUST_VERSION=1.99
 # 0 = binary only. Only the `pigeon-webmail` target consumes this value, and
 # that target is not in the default target's dependency graph, so the node

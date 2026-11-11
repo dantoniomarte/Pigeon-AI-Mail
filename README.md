@@ -1,6 +1,11 @@
 # Pigeon Mail
 
 <div align="center">
+  <p>
+    <a href="https://github.com/dantoniomarte/Pigeon-AI-Mail/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/dantoniomarte/Pigeon-AI-Mail/actions/workflows/ci.yml/badge.svg"></a>
+    <a href="LICENSE"><img alt="License: AGPL-3.0" src="https://img.shields.io/badge/license-AGPL--3.0-blue.svg"></a>
+    <a href="https://github.com/dantoniomarte/Pigeon-AI-Mail/releases"><img alt="Release" src="https://img.shields.io/github/v/release/dantoniomarte/Pigeon-AI-Mail"></a>
+  </p>
   <img src="assets/logo/pigeon.svg" alt="Pigeon Mail mascot — a carrier pigeon carrying an envelope" width="180">
   <p><strong>Self-hosted encrypted email infrastructure with an API-first soul.</strong><br>
   Send and receive email through a clean HTTP API (Resend-compatible), from any AI agent via MCP, or from an optional beautiful webmail. End-to-end encrypted where possible, always encrypted in transit and at rest.</p>
@@ -11,7 +16,7 @@
 
 ## Status
 
-**v0.1.0 — first release.** Everything below is implemented, tested (410+ tests) and running in production. See [docs/ROADMAP.md](docs/ROADMAP.md) for what's next.
+**v0.1.2.** Everything below is implemented and tested (569+ tests across the workspace). See [docs/ROADMAP.md](docs/ROADMAP.md) for what ships today versus what is planned.
 
 ## Why "Pigeon"
 
@@ -22,7 +27,7 @@ Carrier pigeons carried sealed letters across enemy lines for centuries — fast
 | Area | What you get |
 |---|---|
 | **Sending API** | Resend-compatible `POST /v1/emails`, idempotency keys, templates with variables, scheduled sends |
-| **Receiving** | Full inbound SMTP (port 25) with SPF, DKIM and DMARC verification, parsed and stored |
+| **Receiving** | Full inbound SMTP (port 25): ESMTP with STARTTLS, size and rate limits; mail is parsed and stored. SPF/DKIM/DMARC evaluation is planned — see [docs/ROADMAP.md](docs/ROADMAP.md) |
 | **Encryption** | TLS 1.2+/1.3 in transit; encrypted storage at rest; end-to-end (OpenPGP) delivery and WKD key publishing, modeled after Proton's architecture — see [docs/e2ee-model.md](docs/e2ee-model.md) |
 | **Agents first** | Built-in [MCP](https://modelcontextprotocol.io) server (`send_email`, `list_messages`, `get_message`, `manage_webhooks`…), so any AI harness can operate mail through the same audited API |
 | **Webmail (optional)** | A calm, fast web UI with light/dark themes, i18n and animations you can switch off — installed only if you ask for it |
@@ -32,12 +37,9 @@ Carrier pigeons carried sealed letters across enemy lines for centuries — fast
 
 ## Quick start
 
-## Quick start
-
-> **Private repositories:** the one-liners below download files over HTTPS and
-> only work while this repo is public. For a private clone, use the
-> [build-from-source](#build-from-source) path and run `install.sh --bin` from
-> your checkout.
+> **Air-gapped or private clones:** the one-liners below download files over
+> HTTPS. On a private clone, use the [build-from-source](#build-from-source)
+> path and run `install.sh --bin` from your checkout.
 
 ```bash
 # API server only (no webmail) — recommended for agents and CI
@@ -105,7 +107,7 @@ no privilege the API does not have.
 
 | Group | Tools | What an agent does with them |
 |---|---|---|
-| **Messaging** | `send_email`, `list_messages`, `get_message`, `create_template`, `manage_webhooks` | send mail, page the inbox, read one message, reuse a template, register webhooks |
+| **Messaging** | `send_email`, `list_messages`, `get_message`, `export_message`, `export_folder`, `create_template`, `manage_webhooks` | send mail, page the inbox, read one message, back one message up as EML, back a whole folder up as mbox, reuse a template, register webhooks |
 | **Organizations** | `org_create`, `org_members`, `org_invite`, `org_create_member` | stand up a team, list its mailboxes and roles, invite an existing account, create a member with a one-time bootstrap token |
 | **Catch-all** | `catchall_set`, `catchall_list`, `catchall_delete`, `catchall_pause`, `catchall_resume` | route unknown local parts of a domain into every assigned mailbox (or discard them), and pause/resume the agent's own copy |
 | **Sender aliases** | `alias_list`, `alias_create`, `alias_assign`, `alias_delete` | claim a shared address on a served domain, share it with mailboxes, remove it |
@@ -156,9 +158,9 @@ The one-time tokens (`bootstrap_token`, an invitation `token`) and the `pk_…` 
 are returned exactly once — only their hashes are stored, so a lost one is
 re-issued, never recovered.
 
-> `send_email` and `draft_send` accept and validate the message today; the handoff
-to the delivery queue lands with the binary integration that wires the HTTP send
-pipeline into the MCP server (see [docs/ROADMAP.md](docs/ROADMAP.md)).
+> `send_email` and `draft_send` go through the same delivery pipeline as the
+HTTP API: quota, sender identity, validation, sealing and queueing all apply,
+so an agent's message is queued exactly like an API send.
 
 ## Connect any agent
 

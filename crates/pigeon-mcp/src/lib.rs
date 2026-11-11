@@ -45,6 +45,13 @@ pub use protocol::Content;
 pub struct McpState {
     pub store: Arc<SqliteStorage>,
     pub master_key: Arc<MasterKey>,
+    /// The API's auxiliary connection to the same database file: lifecycle
+    /// rows, webhooks, drafts and the admin surface live there. Opened by the
+    /// binary against `PIGEON_DB_PATH` (or by tests against a tempdir), so no
+    /// tool depends on process-global environment state.
+    pub api_db: Arc<pigeon_api::db::ApiDb>,
+    /// The database file, for pipeline delegation connections.
+    pub db_path: std::path::PathBuf,
 }
 
 /// Run the MCP server loop over stdin/stdout.

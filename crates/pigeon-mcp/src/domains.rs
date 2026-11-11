@@ -34,7 +34,7 @@ const PUBLIC_IP_ENV: &str = "PIGEON_PUBLIC_IP";
 pub fn domain_add(args: &serde_json::Value, state: &McpState) -> Result<String, String> {
     let actor = aux::actor(state)?;
     let name = validate_hostname(aux::required_str(args, "name")?)?;
-    let db = aux::api_db()?;
+    let db = aux::api_db(state)?;
     // Idempotent: an existing row is reused, so a repeated add never rotates a
     // live signing key.
     let existing = db
@@ -57,7 +57,7 @@ pub fn domain_add(args: &serde_json::Value, state: &McpState) -> Result<String, 
 pub fn domain_dns(args: &serde_json::Value, state: &McpState) -> Result<String, String> {
     let actor = aux::actor(state)?;
     let name = validate_hostname(aux::required_str(args, "domain")?)?;
-    let db = aux::api_db()?;
+    let db = aux::api_db(state)?;
     let row = db
         .list_domains(actor.account_id)
         .map_err(|error| aux::store_error("could not list the managed domains", error))?

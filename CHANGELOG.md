@@ -1,26 +1,53 @@
 # Changelog
 
-All notable changes to Pigeon Mail are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
-
-## [v0.1.1] — 2026-11-07
-
-### Added
-- Mail folders (inbox/sent/spam/trash) with read/unread state, move, delete and empty-trash — backend endpoints and webmail UI.
-- Email drafts: save, list, continue editing, send-from-draft.
-- Multi-tenant organizations: members, invitations with one-time bootstrap tokens, catch-all routing (route/discard) in inbound SMTP.
-- Admin Console in the webmail (members, roles, invitations, catch-all rules).
-- 11 ready-to-use agent configs (`config/`) plus `install.sh --agent`.
-- `install.sh --public-ip` (DNS guidance no longer 503s) and a DNS reality check after install.
-- `GET /v1/auth/check` so the webmail can probe its HttpOnly session.
-
-### Security
-- Every login now requires a second factor (TOTP, recovery or bootstrap token) — the earlier email-only bootstrap issued sessions to anyone who knew the address.
-- Row-action tap targets no longer sit invisible over touch clicks; email HTML is sanitized at the compose sinks.
-
-### Fixed
-- Webmail: login screen first (API key is the fallback), session-cookie auth for all data fetches, i18n completeness across 5 locales.
+All notable changes to Pigeon Mail are documented here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
+[SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+- Full OpenPGP end-to-end sealing (WKD publish/discover, TOFU pinning, per-domain plaintext overrides)
+- Backup exports: one message as `.eml`, a whole folder or a selection as `.mbox` (API, webmail and MCP tools)
+- Byte-faithful streaming folder backups (page-sized chunks, backpressure)
+- MCP `send_email` and `manage_webhooks` connected to the real pipeline (quota, sealing, queueing, webhook store)
+- MCP `export_message` / `export_folder` tools (catalog now 35)
+- Webmail: bulk selection with delete/export, reader navigation, server-truth unread badges
+- Public-repo overhaul: owner infrastructure scrubbed, false capability claims corrected, private-name gate CI-enforced, docs reconciled with the code
+
+## [0.1.2] — 2026-11
+
 ### Added
-- Repository bootstrap: governance docs (SECURITY, CONTRIBUTING, CoC), hygiene gate (`make verify`) in CI, AGPL-3.0 license, CC BY 4.0 logo assets, roadmap and workflow docs.
+
+- Outbound delivery to external providers works end to end (per-recipient-domain MX groups, delivered-domain tracking across retries) (#69)
+- OpenPGP end-to-end sealing: WKD publish and discover, TOFU pinning, RFC 3156 seal-on-queue, e2e enum on the send surface (#70, #71)
+- MX routing fix: sender-domain MX resolution no longer self-loops external mail (#69)
+- Provider migration guide (Resend/Postmark/SendGrid/Mailgun/SES) (#68)
+- Workflow docs translated to English (#66)
+
+### Fixed
+
+- Queue duplicate mail on retry (delivered-domain bookkeeping) (#71)
+
+## [0.1.1] — 2026-11
+
+### Added
+
+- Sender aliases: a shared address several mailboxes send as and receive for (#65)
+- Multi-recipient pausable catch-all (#65)
+
+## [0.1.0] — 2026-11
+
+### Added
+
+- First public release: encrypted email server with agent-first controls
+- Rust core crates: strict anti-injection types, XChaCha20 at-rest sealing, TOTP (RFC 6238), Argon2id API keys, Ed25519 DKIM signing, SQLite WAL storage with a `Storage` trait seam
+- Full HTTP API (axum), ESMTP inbound (:25), outbound queue worker with lease/backoff/dead-letter
+- MCP server: JSON-RPC over stdio, agent-first tool catalog
+- React webmail: 5 languages, light/dark themes, session auth
+- Installer (`install.sh`), distroless Docker image, Kubernetes skeletons, deployment guide
+- Multi-agent compatibility configs for 11 platforms (#34)
+- Session-cookie webmail auth with mandatory code on login (#35, #36)
+
+### Fixed
+
+- Webmail sign-out reachable on every screen size (#74)

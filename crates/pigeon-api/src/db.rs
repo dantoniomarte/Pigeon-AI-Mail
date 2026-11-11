@@ -900,6 +900,28 @@ impl ApiDb {
             .optional()?)
     }
 
+    /// Test/ops debugging aid: raw queue rows, newest first.
+    pub fn queue_rows_debug(&self) -> store::Result<Vec<String>> {
+        let conn = self.lock();
+        let mut statement = conn.prepare(
+            "SELECT id, message_id, status, run_after, claim_token
+               FROM queue ORDER BY id DESC LIMIT 10",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(format!(
+                    "queue id={} message={} status={} run_after={} claim={}",
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     /// Delete a webhook; `false` when it did not exist.
     pub fn delete_webhook(&self, account_id: i64, public_id: &str) -> store::Result<bool> {
         let conn = self.lock();

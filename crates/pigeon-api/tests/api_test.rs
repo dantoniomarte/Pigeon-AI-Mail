@@ -3884,10 +3884,7 @@ async fn a_member_account_cannot_take_a_sender_alias_address() {
         .list_folder(app.account_id, pigeon_core::MessageFolder::Inbox, 10, 0)
         .expect("inbox");
     assert_eq!(inbox.len(), 1, "{inbox:?}");
-    assert_eq!(
-        inbox[0].delivered_for.as_deref(),
-        Some("sales@example.com")
-    );
+    assert_eq!(inbox[0].delivered_for.as_deref(), Some("sales@example.com"));
 
     // A genuine duplicate mailbox is still a `409`, with its own detail: the two
     // collisions are distinguishable for whoever has to fix them.

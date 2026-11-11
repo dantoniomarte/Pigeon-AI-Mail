@@ -31,7 +31,7 @@ Code: `crates/pigeon-crypto/src/seal.rs` (envelope + wrapping, domain-separated 
 |---|---|
 | HTTP API / MCP / webmail | TLS (installer provisions via reverse proxy; no HTTP listeners by default) |
 | Inbound SMTP | STARTTLS advertised; plaintext accepted (SMTP interop reality) but logged with a visible downgrade flag |
-| Outbound SMTP | **STARTTLS required**; per-domain `strict` mode (certificate pinning) available; plaintext only via explicit per-domain override |
+| Outbound SMTP | **opportunistic STARTTLS** (peer certificate validation is planned — see docs/ROADMAP.md); plaintext only via explicit per-domain override |
 | Pigeon↔Pigeon | STARTTLS **and** payload E2E (layer 3) — transport is only belt, not suspenders |
 
 **Outbound delivery is routed per recipient domain.** MX records belong to the *recipient's* domain, so a message with recipients on several domains is delivered with one SMTP transaction per domain, each carrying only that domain's recipients and the same `MAIL FROM`. A relay (`PIGEON_SMTP_OUT_ADDR`) replaces MX routing entirely and receives every recipient in one transaction.

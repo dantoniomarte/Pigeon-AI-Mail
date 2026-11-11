@@ -2,8 +2,8 @@
 
 These manifests are a **skeleton**, not a supported production deployment. They
 encode the shape from [docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md) so the
-"Kubernetes-ready" posture is visible and reviewable before the `pigeon` binary
-crate lands. Nothing here has been applied against a live cluster.
+"Kubernetes-ready" posture is visible and reviewable. Nothing here has been
+applied against a live cluster.
 
 Read this page before `kubectl apply`, and expect to edit values: image tag,
 ingress class, hosts, storage class, and the master-key Secret.

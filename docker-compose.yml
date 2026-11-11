@@ -51,7 +51,6 @@ services:
     ports:
       - "8000:8000" # HTTPS API + MCP over HTTP (terminate TLS in front)
       - "25:25"     # inbound SMTP from remote MX
-      - "587:587"   # submission with AUTH
 
     volumes:
       # SQLite lives on real disk (ADR 0002: not tmpfs).

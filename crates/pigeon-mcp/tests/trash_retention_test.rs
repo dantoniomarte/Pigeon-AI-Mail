@@ -26,9 +26,12 @@ fn state() -> (tempfile::TempDir, McpState, Arc<SqliteStorage>) {
     let account = EmailAddress::parse(ACTOR_EMAIL).expect("account address");
     let account_id = store.create_account(&account).expect("create account");
     assert_eq!(account_id, 1, "the bootstrap account is account 1");
+    let api_db = Arc::new(pigeon_api::db::ApiDb::open(&path).expect("test api db"));
     let state = McpState {
         store: Arc::clone(&store),
         master_key: Arc::new(MasterKey::parse(&[0xb7u8; 32]).expect("master key")),
+        api_db: Arc::clone(&api_db),
+        db_path: path.clone(),
     };
     (dir, state, store)
 }
