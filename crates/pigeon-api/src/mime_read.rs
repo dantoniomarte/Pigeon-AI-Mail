@@ -21,9 +21,14 @@
 /// payload verbatim rather than silently truncating it.
 pub(crate) fn extract_parts(document: &[u8]) -> (Option<String>, Option<String>) {
     let mut found = Found::default();
-    walk(split_entity(document), &mut found);
+    walk(split_entity(document), 0, &mut found);
     (found.text, found.html)
 }
+
+/// Hard cap on multipart/message nesting. Real mail nests a handful of levels;
+/// past the cap nothing is claimed as content and the caller's verbatim
+/// fallback keeps the bytes visible instead of risking unbounded recursion.
+const MAX_MIME_DEPTH: usize = 32;
 
 #[derive(Default)]
 struct Found {
@@ -58,26 +63,38 @@ fn split_entity(document: &[u8]) -> Entity<'_> {
     Entity { headers, body }
 }
 
-/// Locate the blank line that ends the header block, tolerating mixed CRLF/LF.
+/// Locate the blank line that ends the header block, tolerating mixed CRLF/LF
+/// in every combination (r1 finding 2: a block ending LF closed by CRLF).
 fn header_split(document: &[u8]) -> Option<(&[u8], &[u8])> {
     let mut i = 0;
     while i < document.len() {
-        if document[i] == b'\r' && document.get(i + 1) == Some(&b'\n') {
-            // CRLF followed by LF, or by a full CRLF: either blank line ends
-            // the headers (real senders mix both).
-            if document.get(i + 2) == Some(&b'\n') {
+        match document[i] {
+            b'\r' if document.get(i + 1) == Some(&b'\n') => {
+                // A CR LF followed by any lone CR or LF starts the body: that
+                // byte belongs to the sender's blank line, whatever ending it
+                // used. The body therefore begins after the full blank line.
+                match document.get(i + 2) {
+                    Some(b'\r') => {
+                        if document.get(i + 3) == Some(&b'\n') {
+                            return Some((&document[..i], &document[i + 4..]));
+                        }
+                        return Some((&document[..i], &document[i + 3..]));
+                    }
+                    Some(b'\n') => return Some((&document[..i], &document[i + 3..])),
+                    _ => {
+                        i += 2;
+                        continue;
+                    }
+                }
+            }
+            b'\n' if document.get(i + 1) == Some(&b'\n') => {
+                return Some((&document[..i], &document[i + 2..]));
+            }
+            b'\n' if document.get(i + 1) == Some(&b'\r') && document.get(i + 2) == Some(&b'\n') => {
                 return Some((&document[..i], &document[i + 3..]));
             }
-            if document.get(i + 2) == Some(&b'\r') && document.get(i + 3) == Some(&b'\n') {
-                return Some((&document[..i], &document[i + 4..]));
-            }
-            i += 2;
-            continue;
+            _ => i += 1,
         }
-        if document[i] == b'\n' && document.get(i + 1) == Some(&b'\n') {
-            return Some((&document[..i], &document[i + 2..]));
-        }
-        i += 1;
     }
     None
 }
@@ -208,24 +225,83 @@ fn hex_value(byte: u8) -> Option<u8> {
 
 /// Decode bytes with the part's charset when it is trivially decodable;
 /// anything else falls back to lossy UTF-8 rather than crashing a read.
-/// The trailing wire line break is transport noise a reader never asked for.
+/// Exactly one trailing wire line break is removed (r1 finding 8): the
+/// part's own trailing blank lines are content and must survive.
 fn charset_to_string(bytes: &[u8], charset: Option<&str>) -> String {
     let decoded = match charset.map(|value| value.trim().to_ascii_lowercase()) {
         Some(ref value) if value == "iso-8859-1" || value == "latin1" || value == "latin-1" => {
             bytes.iter().map(|byte| *byte as char).collect()
         }
-        // windows-1252 shares latin-1 for printable bytes; the C1 range
-        // renders as controls, which is acceptable for a text reader.
         Some(ref value) if value == "windows-1252" => {
-            bytes.iter().map(|byte| *byte as char).collect()
+            bytes.iter().map(|byte| CP1252[*byte as usize]).collect()
         }
         _ => String::from_utf8_lossy(bytes).into_owned(),
     };
-    decoded.trim_end_matches(['\n', '\r']).to_string()
+    trim_one_line_break(&decoded)
+}
+
+/// Remove exactly one trailing CRLF, LF or CR.
+fn trim_one_line_break(value: &str) -> String {
+    // Exactly one break: CRLF counts as one, so a lone-CR suffix must not
+    // cascade into a second removal (r2 finding 1: "keep\r\r" keeps one CR).
+    if let Some(rest) = value.strip_suffix("\r\n") {
+        rest.to_string()
+    } else if let Some(rest) = value.strip_suffix('\n') {
+        rest.to_string()
+    } else if let Some(rest) = value.strip_suffix('\r') {
+        rest.to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+/// windows-1252 maps 0x80-0x9F through the vendor table (€ “ ” œ …), not to
+/// C1 controls (r1 finding 7). 0x81, 0x8D, 0x8F, 0x90, 0x9D are undefined and
+/// stay controls.
+const CP1252: [char; 256] = build_cp1252();
+
+const fn build_cp1252() -> [char; 256] {
+    let mut table = ['\0'; 256];
+    let mut byte = 0usize;
+    while byte < 256 {
+        table[byte] = byte as u8 as char;
+        byte += 1;
+    }
+    table[0x80] = '\u{20AC}';
+    table[0x82] = '\u{201A}';
+    table[0x83] = '\u{0192}';
+    table[0x84] = '\u{201E}';
+    table[0x85] = '\u{2026}';
+    table[0x86] = '\u{2020}';
+    table[0x87] = '\u{2021}';
+    table[0x88] = '\u{02C6}';
+    table[0x89] = '\u{2030}';
+    table[0x8A] = '\u{0160}';
+    table[0x8B] = '\u{2039}';
+    table[0x8C] = '\u{0152}';
+    table[0x8E] = '\u{017D}';
+    table[0x91] = '\u{2018}';
+    table[0x92] = '\u{2019}';
+    table[0x93] = '\u{201C}';
+    table[0x94] = '\u{201D}';
+    table[0x95] = '\u{2022}';
+    table[0x96] = '\u{2013}';
+    table[0x97] = '\u{2014}';
+    table[0x98] = '\u{02DC}';
+    table[0x99] = '\u{2122}';
+    table[0x9A] = '\u{0161}';
+    table[0x9B] = '\u{203A}';
+    table[0x9C] = '\u{0153}';
+    table[0x9E] = '\u{017E}';
+    table[0x9F] = '\u{0178}';
+    table
 }
 
 /// Walk one entity, collecting the first text and the first html part.
-fn walk(entity: Entity<'_>, found: &mut Found) {
+fn walk(entity: Entity<'_>, depth: usize, found: &mut Found) {
+    if depth > MAX_MIME_DEPTH {
+        return;
+    }
     let content_type = header_value(&entity.headers, "Content-Type")
         .map(str::to_string)
         .unwrap_or_else(|| "text/plain".to_string());
@@ -234,7 +310,7 @@ fn walk(entity: Entity<'_>, found: &mut Found) {
     if ctype.starts_with("multipart/") {
         if let Some(boundary) = param(&params, "boundary") {
             for part in split_multipart(entity.body, boundary) {
-                walk(split_entity(part), found);
+                walk(split_entity(part), depth + 1, found);
             }
             return;
         }
@@ -242,7 +318,7 @@ fn walk(entity: Entity<'_>, found: &mut Found) {
         // the text branches so the caller's verbatim fallback keeps it.
     }
     if ctype == "message/rfc822" {
-        walk(split_entity(entity.body), found);
+        walk(split_entity(entity.body), depth + 1, found);
         return;
     }
     if ctype == "text/plain" && found.text.is_none() {
@@ -280,16 +356,28 @@ fn walk(entity: Entity<'_>, found: &mut Found) {
 /// each `--boundary` delimiter to the last content line before the next one.
 /// RFC 2046 allows trailing linear whitespace on the boundary delimiter and
 /// close-delimiter lines, and an epilogue may follow the close delimiter.
+/// Streaming: one forward scan holding only the current part's range — no
+/// per-line offset vector, so memory stays O(part) on any body size
+/// (r1 finding 3).
 fn split_multipart<'a>(body: &'a [u8], boundary: &str) -> Vec<&'a [u8]> {
     let delimiter = format!("--{boundary}");
     let closing = format!("{delimiter}--");
-    let line_starts = line_starts(body);
 
     let mut parts = Vec::new();
     let mut current: Option<(usize, usize)> = None;
-    for (index, start) in line_starts.iter().enumerate() {
-        let end = line_starts.get(index + 1).copied().unwrap_or(body.len());
-        let line = trim_line(&body[*start..end]);
+    let mut cursor = 0usize;
+    while cursor < body.len() {
+        let start = cursor;
+        let mut end = start;
+        while end < body.len() && body[end] != b'\n' {
+            end += 1;
+        }
+        cursor = if end < body.len() {
+            end + 1
+        } else {
+            body.len()
+        };
+        let line = trim_line(&body[start..end]);
         let delimiter_line = trim_trailing_space_tab(line);
         if delimiter_line == closing.as_bytes() {
             if let Some((part_start, part_end)) = current.take() {
@@ -301,19 +389,17 @@ fn split_multipart<'a>(body: &'a [u8], boundary: &str) -> Vec<&'a [u8]> {
             if let Some((part_start, part_end)) = current.take() {
                 parts.push(&body[part_start..part_end]);
             }
-            // The part begins after its delimiter line: starting the slice at
-            // the delimiter itself would leave an empty-bodied part with no
-            // blank line, which split_entity would read as a bare body — and
-            // a first-wins walk would expose the delimiter as the content.
-            let next = line_starts.get(index + 1).copied().unwrap_or(body.len());
-            current = Some((next, next));
+            // The part begins after its delimiter line, and the slice keeps
+            // the line terminators: an empty-bodied part must still parse as
+            // "headers + empty body", not as a bare body.
+            current = Some((cursor, cursor));
             continue;
         }
         if let Some((_, part_end)) = current.as_mut() {
-            // The part slice keeps its line terminators, including the blank
-            // line that ends its header block — an empty-bodied part must still
-            // parse as "headers + empty body", not as a bare body.
-            *part_end = end;
+            // Full line end including the terminator: part slices keep their
+            // line breaks (an empty-bodied part must still parse as headers +
+            // empty body), and the boundary's own CRLF is backed off on close.
+            *part_end = cursor;
         }
     }
     if let Some((part_start, part_end)) = current {
@@ -330,17 +416,6 @@ fn trim_trailing_space_tab(line: &[u8]) -> &[u8] {
         end -= 1;
     }
     &line[..end]
-}
-
-/// Byte offset where every line starts (a line ends at `\n`).
-fn line_starts(body: &[u8]) -> Vec<usize> {
-    let mut starts = vec![0];
-    for (index, byte) in body.iter().enumerate() {
-        if *byte == b'\n' && index + 1 < body.len() {
-            starts.push(index + 1);
-        }
-    }
-    starts
 }
 
 /// Strip a trailing CRLF/LF (and a lone CR) from one raw line.
@@ -504,8 +579,140 @@ mod tests {
             <p>x</p>\r\n\
             --b--\r\n";
         let (text, html) = extract_parts(document);
-        assert_eq!(text.as_deref(), Some("hello"));
+        // The content survives (the r2 regression lost it entirely). The
+        // trailing line break is the structural blank line before the next
+        // delimiter, minus the single wire break trim: a part's trailing
+        // blank lines are content under the one-break trim rule.
+        assert_eq!(text.as_deref(), Some("hello\r\n"));
         assert_eq!(html.as_deref(), Some("<p>x</p>"));
+    }
+
+    #[test]
+    fn header_block_ending_lf_crlf_still_splits() {
+        // Real senders mix line endings: a header block that ends with LF and
+        // is closed by a CRLF blank line must still split (r1 finding 2).
+        let document = b"Content-Type: text/plain\n\r\nbody\r\n";
+        let (text, _) = extract_parts(document);
+        assert_eq!(text.as_deref(), Some("body"));
+    }
+
+    #[test]
+    fn deeply_nested_multiparts_stop_at_the_depth_cap() {
+        // 64 nested multiparts exceed the walk cap: no overflow, no crash,
+        // and nothing superficial is claimed as content (r1 finding 9).
+        let mut document =
+            String::from("Content-Type: multipart/mixed; boundary=\"b0\"\r\n\r\n--b0\r\n");
+        for level in 1..64 {
+            document.push_str(&format!(
+                "Content-Type: multipart/mixed; boundary=\"b{level}\"\r\n\r\n--b{level}\r\n"
+            ));
+        }
+        document.push_str("Content-Type: text/plain\r\n\r\ncore\r\n");
+        for level in (0..64).rev() {
+            document.push_str(&format!("--b{level}--\r\n"));
+        }
+        let (text, html) = extract_parts(document.as_bytes());
+        assert!(text.is_none(), "deep core must not surface: {text:?}");
+        assert!(html.is_none());
+    }
+
+    #[test]
+    fn nested_multipart_inner_text_is_found() {
+        // Within the cap, nesting resolves to the inner text part.
+        let mut document =
+            String::from("Content-Type: multipart/mixed; boundary=\"o0\"\r\n\r\n--o0\r\n");
+        for level in 1..10 {
+            document.push_str(&format!(
+                "Content-Type: multipart/mixed; boundary=\"o{level}\"\r\n\r\n--o{level}\r\n"
+            ));
+        }
+        document.push_str("Content-Type: text/plain\r\n\r\ncore\r\n");
+        for level in (0..10).rev() {
+            document.push_str(&format!("--o{level}--\r\n"));
+        }
+        let (text, _) = extract_parts(document.as_bytes());
+        assert_eq!(text.as_deref(), Some("core"));
+    }
+
+    #[test]
+    fn message_rfc822_wrapper_yields_inner_parts() {
+        let document = b"Content-Type: multipart/mixed; boundary=\"m\"\r\n\
+            \r\n\
+            --m\r\n\
+            Content-Type: message/rfc822\r\n\
+            \r\n\
+            Content-Type: text/plain; charset=utf-8\r\n\
+            \r\n\
+            forwarded words\r\n\
+            --m\r\n\
+            Content-Type: text/html\r\n\
+            \r\n\
+            <p>wrapped</p>\r\n\
+            --m--\r\n";
+        let (text, html) = extract_parts(document);
+        assert_eq!(text.as_deref(), Some("forwarded words"));
+        assert_eq!(html.as_deref(), Some("<p>wrapped</p>"));
+    }
+
+    #[test]
+    fn missing_close_delimiter_keeps_the_last_part() {
+        let document = b"Content-Type: multipart/mixed; boundary=\"m\"\r\n\
+            \r\n\
+            --m\r\n\
+            Content-Type: text/plain\r\n\
+            \r\n\
+            dangling part\r\n";
+        let (text, _) = extract_parts(document);
+        assert_eq!(text.as_deref(), Some("dangling part"));
+    }
+
+    #[test]
+    fn corrupt_base64_falls_back_to_raw_bytes() {
+        let document = b"Content-Type: text/plain\r\n\
+            Content-Transfer-Encoding: base64\r\n\
+            \r\n\
+            !!!not base64!!!\r\n";
+        let (text, _) = extract_parts(document);
+        assert_eq!(text.as_deref(), Some("!!!not base64!!!"));
+    }
+
+    #[test]
+    fn windows_1252_specials_decode_via_the_table() {
+        // 0x80 = €, 0x93/0x94 = “ ”, 0x92 = ’ — the C1 range must map through
+        // the cp1252 table, not surface as controls (r1 finding 7).
+        let document = b"Content-Type: text/plain; charset=windows-1252\r\n\
+            \r\n\
+            premio \x80 100, \x93citado\x94 y o\x92clock\r\n";
+        let (text, _) = extract_parts(document);
+        assert_eq!(
+            text.as_deref(),
+            Some("premio \u{20ac} 100, \u{201c}citado\u{201d} y o\u{2019}clock")
+        );
+    }
+
+    #[test]
+    fn trailing_blank_lines_of_a_part_survive() {
+        // Only the final wire line break is trimmed: the part's own trailing
+        // blank lines are content (r1 finding 8).
+        let document = b"Content-Type: text/plain\r\n\
+            \r\n\
+            keep\r\n\
+            \r\n\
+            \r\n\
+            \r\n";
+        let (text, _) = extract_parts(document);
+        assert_eq!(text.as_deref(), Some("keep\r\n\r\n\r\n"));
+    }
+
+    #[test]
+    fn trailing_bare_carriage_returns_lose_exactly_one_break() {
+        // Lone-CR wire artifacts: exactly one trailing break is removed, so
+        // "keep\r\r" must keep its second CR (r2 finding 1).
+        let document = b"Content-Type: text/plain\r\n\
+            \r\n\
+            keep\r\r";
+        let (text, _) = extract_parts(document);
+        assert_eq!(text.as_deref(), Some("keep\r"));
     }
 
     #[test]

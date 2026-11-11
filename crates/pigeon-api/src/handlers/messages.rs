@@ -754,6 +754,31 @@ mod tests {
     }
 
     #[test]
+    fn deeply_nested_documents_fall_back_to_verbatim() {
+        // Beyond the walk cap the document is exposed verbatim (never lost)
+        // instead of crashing the read.
+        let mut document =
+            String::from("Content-Type: multipart/mixed; boundary=\"d0\"\r\n\r\n--d0\r\n");
+        for level in 1..64 {
+            document.push_str(&format!(
+                "Content-Type: multipart/mixed; boundary=\"d{level}\"\r\n\r\n--d{level}\r\n"
+            ));
+        }
+        document.push_str("Content-Type: text/plain\r\n\r\ncore\r\n");
+        for level in (0..64).rev() {
+            document.push_str(&format!("--d{level}--\r\n"));
+        }
+        let (text, html) = split_parts(document.as_bytes());
+        assert!(html.is_none());
+        let text = text.expect("verbatim text");
+        assert!(
+            text.contains("multipart/mixed"),
+            "verbatim exposes the wire"
+        );
+        assert!(text.contains("core"), "nothing is lost");
+    }
+
+    #[test]
     fn a_message_without_a_wrapped_key_is_reported_as_such() {
         let stored = StoredMessage {
             message_id: 1,
