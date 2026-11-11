@@ -192,7 +192,14 @@ async fn serve(config: Config, api_config: ApiConfig) -> Result<(), Box<dyn Erro
             Ok(meta) if meta.is_dir() => {
                 let serve_dir = tower_http::services::ServeDir::new(&dir)
                     .append_index_html_on_directories(true);
-                app = app.fallback_service(serve_dir);
+                // A stale cached index.html keeps serving an old bundle after
+                // every deploy: the entry point must never be cached, while
+                // hashed assets are safe to cache forever.
+                app = app.fallback_service(
+                    axum::Router::new()
+                        .fallback_service(serve_dir)
+                        .layer(axum::middleware::from_fn(webmail_cache_headers)),
+                );
                 tracing::info!(webmail_dir = %dir, "webmail UI enabled");
             }
             _ => {
@@ -562,9 +569,165 @@ async fn shutdown_signal() {
     }
 }
 
+/// Cache headers for the webmail fallback: `no-store` on the entry point and
+/// any non-hashed file, long-lived immutability on hashed `/assets/*` — a
+/// stale cached index.html keeps serving an old bundle after every deploy.
+async fn webmail_cache_headers(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let is_hashed_asset = request.uri().path().starts_with("/assets/");
+    let mut response = next.run(request).await;
+    // Only successful asset responses may be cached long-term: an error (a
+    // 404 for a hashed name that does not exist yet) must never outlive the
+    // deploy that fixes it.
+    let cache_control = if is_hashed_asset && response.status().is_success() {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-store"
+    };
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static(cache_control),
+    );
+    response
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn webmail_cache_headers_split_hashed_assets_from_the_entry_point() {
+        use axum::{http::StatusCode, routing::get};
+        use tower::ServiceExt;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let app = axum::Router::new()
+            .route("/assets/index-abc.js", get(|| async { "js" }))
+            .route("/", get(|| async { "html" }))
+            .layer(axum::middleware::from_fn(webmail_cache_headers));
+        runtime.block_on(async move {
+            let asset = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri("/assets/index-abc.js")
+                        .body(axum::body::Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("asset response");
+            assert_eq!(asset.status(), StatusCode::OK);
+            assert_eq!(
+                asset.headers()[axum::http::header::CACHE_CONTROL],
+                "public, max-age=31536000, immutable"
+            );
+            let index = app
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri("/")
+                        .body(axum::body::Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("index response");
+            assert_eq!(index.status(), StatusCode::OK);
+            assert_eq!(
+                index.headers()[axum::http::header::CACHE_CONTROL],
+                "no-store"
+            );
+        });
+    }
+
+    #[test]
+    fn failed_asset_lookups_are_never_cached_immutable() {
+        use axum::{http::StatusCode, routing::get};
+        use tower::ServiceExt;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let app = axum::Router::new()
+            .route("/assets/index-abc.js", get(|| async { "js" }))
+            .layer(axum::middleware::from_fn(webmail_cache_headers));
+        runtime.block_on(async move {
+            let missing = app
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri("/assets/nonexistent.js")
+                        .body(axum::body::Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("missing response");
+            assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+            // A 404 must never be stamped immutable: no error response may
+            // outlive the deploy that fixes it.
+            assert_eq!(
+                missing.headers()[axum::http::header::CACHE_CONTROL],
+                "no-store"
+            );
+        });
+    }
+
+    #[test]
+    fn api_responses_never_carry_webmail_cache_headers() {
+        use axum::{http::StatusCode, routing::get};
+        use tower::ServiceExt;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        // The production shape: matched API routes sit OUTSIDE the webmail
+        // wrapper, so the middleware must never stamp them (a regression that
+        // moved the layer onto the outer app would pass a middleware-only
+        // test).
+        let app = axum::Router::new()
+            .route(
+                "/v1/messages",
+                get(|| async { axum::Json(serde_json::json!({ "items": [] })) }),
+            )
+            .fallback_service(
+                axum::Router::new()
+                    .route("/", get(|| async { "html" }))
+                    .layer(axum::middleware::from_fn(webmail_cache_headers)),
+            );
+        runtime.block_on(async move {
+            let api = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri("/v1/messages")
+                        .body(axum::body::Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("api response");
+            assert_eq!(api.status(), StatusCode::OK);
+            assert!(
+                api.headers()
+                    .get(axum::http::header::CACHE_CONTROL)
+                    .is_none(),
+                "API responses must not be stamped by the webmail middleware"
+            );
+            let index = app
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri("/")
+                        .body(axum::body::Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("fallback response");
+            assert_eq!(
+                index.headers()[axum::http::header::CACHE_CONTROL],
+                "no-store"
+            );
+        });
+    }
 
     #[test]
     fn the_purge_sweep_visits_only_accounts_that_opted_in() {

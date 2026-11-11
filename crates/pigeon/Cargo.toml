@@ -28,6 +28,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+tower = { workspace = true, features = ["util"] }
 tempfile.workspace = true
 # The `unpin-peer-key` recovery writes an audit row, and `Storage` exposes no audit
 # reader: the CLI test reads the table directly to prove the operator action left a
