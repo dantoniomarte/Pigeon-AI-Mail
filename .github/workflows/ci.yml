@@ -135,6 +135,19 @@ jobs:
       - name: Format check
         run: cargo fmt --check
 
+  docker-image:
+    name: Docker image builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Build pigeon (binary only)
+        run: docker build --target pigeon -t pigeon-mail:ci-binary .
+      - name: Build pigeon-webmail (with the webmail bundle)
+        run: docker build --target pigeon-webmail --build-arg WITH_WEBMAIL=1 -t pigeon-mail:ci-webmail .
+
   webmail:
     name: Webmail build + tests
     runs-on: ubuntu-latest
@@ -157,7 +170,7 @@ jobs:
 
   deploy:
     name: Deploy gate
-    needs: [hygiene, rust, webmail]
+    needs: [hygiene, rust, webmail, docker-image]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5

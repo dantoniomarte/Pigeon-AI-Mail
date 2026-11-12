@@ -277,6 +277,19 @@ pub fn export_folder(args: &serde_json::Value, state: &McpState) -> Result<Strin
         "message.export",
         &format!("folder={folder} count={count} skipped={skipped}"),
     );
+    // Single-response guard: a folder whose archive would exceed this cap is
+    // refused with an actionable hint instead of shipping an OOM-sized tool
+    // response. The HTTP streaming export handles those sizes.
+    const MAX_ARCHIVE_BYTES: usize = 512 * 1024 * 1024;
+    if archive.len() > MAX_ARCHIVE_BYTES {
+        return Err(format!(
+            "folder {} backup is {} bytes, over the {} MiB single-response cap; use the HTTP streaming export (GET /v1/messages/export?folder={}) instead",
+            folder.as_str(),
+            archive.len(),
+            MAX_ARCHIVE_BYTES / (1024 * 1024),
+            folder.as_str()
+        ));
+    }
     Ok(serde_json::json!({
         "folder": folder.as_str(),
         "format": "mbox",

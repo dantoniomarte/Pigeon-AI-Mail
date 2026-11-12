@@ -98,7 +98,7 @@ fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "export_folder",
-            description: "Back up a whole folder as one mbox archive (mboxrd). Returns { folder, format, encoding: \"base64\", count, skipped, bytes, mbox } — the mbox field is the archive BASE64-ENCODED (byte-faithful for 8-bit mail); decode it before reading.",
+            description: "Back up a whole folder as one mbox archive (mboxrd). Returns { folder, format, encoding: \"base64\", count, skipped, bytes, mbox } — the mbox field is the archive BASE64-ENCODED (byte-faithful for 8-bit mail); decode it before reading. The archive is built whole in memory and returned in one response: for very large folders prefer the HTTP streaming endpoint (GET /v1/messages/export?folder=…).",
             input_schema: serde_json::json!({
                 "type": "object",
                 "required": ["folder"],
