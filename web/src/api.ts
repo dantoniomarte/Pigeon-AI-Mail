@@ -748,15 +748,98 @@ export function textToHtml(text: string): string {
 }
 
 /** Extract readable text from an HTML part without injecting it into the DOM. */
-export function htmlToText(html: string): string {
-  const parsed = new DOMParser().parseFromString(html, 'text/html');
-  parsed.querySelectorAll('br').forEach((node) => {
-    node.replaceWith('\n');
-  });
-  parsed.querySelectorAll('p, div, li, tr').forEach((node) => {
-    node.append('\n\n');
-  });
-  return (parsed.body.textContent ?? '').replace(/\n{3,}/g, '\n\n').trim();
+/** One piece of a plain-text paragraph: literal text or a detected URL. */
+export type TextToken =
+  | { kind: 'text'; value: string }
+  | { kind: 'link'; value: string; href: string };
+
+const URL_PATTERN = /https?:\/\/[^\s<>"')\]]+|www\.[^\s<>"')\]]+/gi;
+
+/** Detect http(s) and www. URLs in plain text, so long links stay clickable
+ *  and visibly separate instead of blurring into the sentence around them. */
+export function linkifyText(text: string): TextToken[] {
+  const tokens: TextToken[] = [];
+  let cursor = 0;
+  for (const match of text.matchAll(URL_PATTERN)) {
+    const start = match.index ?? 0;
+    // Sentence punctuation right after a URL belongs to the sentence, not to
+    // the address.
+    let url = match[0];
+    while (/[.,;:!?…']$/.test(url)) {
+      url = url.slice(0, -1);
+    }
+    if (url.length === 0) {
+      continue;
+    }
+    if (start > cursor) {
+      tokens.push({ kind: 'text', value: text.slice(cursor, start) });
+    }
+    tokens.push({
+      kind: 'link',
+      value: url,
+      href: url.toLowerCase().startsWith('www.') ? `https://${url}` : url,
+    });
+    cursor = start + url.length;
+  }
+  if (cursor < text.length) {
+    tokens.push({ kind: 'text', value: text.slice(cursor) });
+  }
+  return tokens;
+}
+
+const CSP_BASE = "default-src 'none'; style-src data: 'unsafe-inline';";
+/** Remote content stays opt-in: the frame starts with images/fonts/media
+ *  locked to inline data, and the reader can lift that per message. */
+const CSP_BLOCK_REMOTE = `${CSP_BASE} img-src data: blob:; font-src data:; media-src data: blob:`;
+const CSP_ALLOW_REMOTE = `${CSP_BASE} img-src https: http: data: blob:; font-src https: http: data:; media-src https: http: data: blob:`;
+
+/**
+ * Document rendered inside the reader's sandboxed `<iframe>` for an HTML
+ * email. The mail's markup is untrusted input, so the document gets:
+ *
+ * - a strict CSP (`default-src 'none'`, inline styles only) so scripts,
+ *   plugins and, by default, remote requests are dead;
+ * - `<base target="_blank">` so links open new tabs without navigation
+ *   scripts inside the frame;
+ * - a small base stylesheet the email's own styles can override.
+ *
+ * The iframe itself carries `sandbox` without `allow-scripts` or
+ * `allow-same-origin` (see `MailView`), so even a CSP escape has no scripts
+ * and no same-origin access to the app.
+ */
+/**
+ * Document rendered inside the reader's sandboxed `<iframe>` for an HTML
+ * email. The mail's markup is untrusted input, so the document gets:
+ *
+ * - a sanitization pass (`sanitizeEmailHtml`) removing `<script>`, the
+ *   embedding/plugin elements and every inline `on*` handler;
+ * - a strict CSP (`default-src 'none'`, inline styles only) so scripts,
+ *   plugins and, by default, remote requests are dead;
+ * - `<base target="_blank">` so links open new tabs without navigation
+ *   scripts inside the frame;
+ * - a small base stylesheet the email's own styles can override.
+ *
+ * The iframe itself carries `sandbox` without `allow-scripts` or
+ * `allow-same-origin` (see `MailView`), so even a sanitizer escape has no
+ * scripts and no same-origin access to the app.
+ */
+export function buildEmailFrame(bodyHtml: string, allowRemoteImages: boolean): string {
+  const csp = allowRemoteImages ? CSP_ALLOW_REMOTE : CSP_BLOCK_REMOTE;
+  return [
+    '<!doctype html>',
+    '<html><head>',
+    '<meta charset="utf-8">',
+    `<meta http-equiv="Content-Security-Policy" content="${csp}">`,
+    '<base target="_blank">',
+    // Emails usually assume a light canvas; their own styles override this.
+    // `overflow-wrap: anywhere` keeps unbreakable email URLs inside the frame,
+    // and the table/img rules scale fixed-width newsletter layouts down to
+    // the frame the way mainstream mail readers do.
+    '<style>html{background:#fff}body{margin:0;padding:12px 14px;color:#24292f;font:14px/1.5 system-ui,sans-serif;overflow-wrap:anywhere}table{max-width:100%}img{max-width:100%;height:auto}</style>',
+    '</head><body>',
+    sanitizeEmailHtml(bodyHtml),
+    '</body></html>',
+  ].join('');
 }
 
 /** `Name <address>` → readable name, falling back to the address. */

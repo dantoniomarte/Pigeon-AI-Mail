@@ -23,10 +23,11 @@ import {
   type AuthVerdict,
   type MessageDetail,
   avatarHue,
+  buildEmailFrame,
   displayName,
   emailAddress,
   formatSize,
-  htmlToText,
+  linkifyText,
   initials,
 } from '../api';
 import type { SentStatus } from '../api';
@@ -86,17 +87,32 @@ function VerdictChip({ name, value }: { name: string; value: string }): JSX.Elem
   );
 }
 
-function bodyOf(message: MessageDetail): { text: string; fromHtml: boolean } | null {
-  if (message.body_text !== undefined && message.body_text.trim().length > 0) {
-    return { text: message.body_text, fromHtml: false };
-  }
+function bodyOf(message: MessageDetail): { html: string } | { text: string } | null {
   if (message.body_html !== undefined && message.body_html.trim().length > 0) {
-    const extracted = htmlToText(message.body_html);
-    if (extracted.length > 0) {
-      return { text: extracted, fromHtml: true };
-    }
+    return { html: message.body_html };
+  }
+  if (message.body_text !== undefined && message.body_text.trim().length > 0) {
+    return { text: message.body_text };
   }
   return null;
+}
+
+/** Plain-text paragraph: URLs become real links so long addresses stop
+ *  deforming the layout or hiding inside the sentence. */
+function TextParagraph({ value }: { value: string }): JSX.Element {
+  return (
+    <p>
+      {linkifyText(value).map((token, index) =>
+        token.kind === 'link' ? (
+          <a key={index} href={token.href} target="_blank" rel="noreferrer">
+            {token.value}
+          </a>
+        ) : (
+          <span key={index}>{token.value}</span>
+        ),
+      )}
+    </p>
+  );
 }
 
 export default function MailView({
@@ -124,6 +140,12 @@ export default function MailView({
   const [confirmDelete, setConfirmDelete] = useState(false);
   useEffect(() => {
     setConfirmDelete(false);
+  }, [message?.id]);
+  // Remote content in HTML mail is opt-in per message, and the choice resets
+  // when another message is opened.
+  const [remoteImages, setRemoteImages] = useState(false);
+  useEffect(() => {
+    setRemoteImages(false);
   }, [message?.id]);
 
   // J/K and the arrow keys walk the list the reader was opened from, as long as
@@ -270,16 +292,35 @@ export default function MailView({
           ) : null}
         </div>
 
-        <div className="reader__body">
+        <div className={`reader__body${body !== null && 'html' in body ? ' reader__body--html' : ''}`}>
           {isSent ? (
             <p className="reader__note">{t('mail.sentNote')}</p>
-          ) : body !== null ? (
+          ) : body !== null && 'html' in body ? (
             <>
-              {body.fromHtml ? <p className="reader__note">{t('mail.htmlOnly')}</p> : null}
-              {body.text.split(/\n{2,}/).map((paragraph, index) => (
-                <p key={index}>{paragraph}</p>
-              ))}
+              <p className="reader__note reader__images-note">
+                <span>{remoteImages ? t('mail.remoteImagesOn') : t('mail.remoteImagesOff')}</span>
+                <button
+                  type="button"
+                  className="btn btn--ghost reader__images-toggle"
+                  onClick={() => setRemoteImages((value) => !value)}
+                >
+                  {remoteImages ? t('mail.blockImages') : t('mail.loadImages')}
+                </button>
+              </p>
+              {/* Scripts and same-origin are excluded on purpose: an email is
+                  untrusted input, and the CSP inside the frame is the second
+                  layer behind the sandbox. */}
+              <iframe
+                className="reader__frame"
+                title={t('mail.messageBody')}
+                sandbox="allow-popups allow-popups-to-escape-sandbox"
+                srcDoc={buildEmailFrame(body.html, remoteImages)}
+              />
             </>
+          ) : body !== null && 'text' in body ? (
+            body.text.split(/\n{2,}/).map((paragraph, index) => (
+              <TextParagraph key={index} value={paragraph} />
+            ))
           ) : message.sealed_body !== undefined ? (
             <p className="reader__note">{t('mail.sealedBody')}</p>
           ) : (

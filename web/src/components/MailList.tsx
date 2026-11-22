@@ -630,6 +630,13 @@ export default function MailList({
                           <span className="mail-row__content">
                             <span className="mail-row__top">
                               <span className="mail-row__from">{displayName(item.from)}</span>
+                              {item.unread ? (
+                                <span
+                                  className="mail-row__unread-dot"
+                                  role="img"
+                                  aria-label={t('mail.unreadDot')}
+                                />
+                              ) : null}
                               <span className="mail-row__time" title={fullStamp(item.createdAt)}>
                                 {stamp(item.createdAt)}
                               </span>
@@ -657,13 +664,6 @@ export default function MailList({
                                 >
                                   {t('mail.deliveredForShort', { address: item.deliveredFor })}
                                 </span>
-                              ) : null}
-                              {item.unread ? (
-                                <span
-                                  className="mail-row__unread-dot"
-                                  role="img"
-                                  aria-label={t('mail.unreadDot')}
-                                />
                               ) : null}
                             </span>
                           </span>

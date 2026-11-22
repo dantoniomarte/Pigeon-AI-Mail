@@ -752,6 +752,22 @@ body {
   background: var(--surface-2);
 }
 
+/* Unread rows: a tinted card plus an accent bar on the left edge, so an
+   unread email stands out beyond font weight alone. Placed before
+   `.is-selected` so selection keeps precedence when both apply. */
+.mail-row.is-unread {
+  background: var(--accent-soft);
+  box-shadow: inset 2px 0 0 0 var(--accent);
+}
+
+.mail-row.is-unread .mail-row__preview {
+  color: var(--text-soft);
+}
+
+.mail-row.is-unread .mail-row__time {
+  color: var(--accent);
+}
+
 .mail-row.is-selected {
   background: var(--accent-soft);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 20%, transparent);
@@ -857,8 +873,10 @@ body {
 }
 
 .mail-row__unread-dot {
-  width: 6px;
-  height: 6px;
+  flex: none;
+  align-self: center;
+  width: 8px;
+  height: 8px;
   margin-left: auto;
   border-radius: 50%;
   background: var(--accent);
@@ -1145,9 +1163,53 @@ body {
   line-height: 1.75;
 }
 
+/* Long URLs and code must wrap inside the reader instead of stretching it. */
+.reader__subject,
+.reader__addresses,
+.reader__body,
+.reader__body p,
+.attachment__name {
+  overflow-wrap: anywhere;
+}
+
 .reader__body p {
   margin: 0 0 14px;
   white-space: pre-wrap;
+}
+
+.reader__body a {
+  color: var(--accent);
+  text-underline-offset: 2px;
+}
+
+.reader__images-note {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.reader__images-toggle {
+  flex: none;
+  padding: 3px 10px;
+  font-size: 12px;
+}
+
+/* Sandboxed frame for HTML mail: the email scrolls inside its own document.
+   Graphic newsletters need more room than the 72ch text column. */
+.reader__body--html {
+  width: 100%;
+  max-width: 920px;
+}
+
+.reader__frame {
+  display: block;
+  width: 100%;
+  height: clamp(360px, 68vh, 720px);
+  margin-top: 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fff;
 }
 
 .reader__body p:last-child {
