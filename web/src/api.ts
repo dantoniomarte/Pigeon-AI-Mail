@@ -823,21 +823,50 @@ const CSP_ALLOW_REMOTE = `${CSP_BASE} img-src https: http: data: blob:; font-src
  * `allow-same-origin` (see `MailView`), so even a sanitizer escape has no
  * scripts and no same-origin access to the app.
  */
-export function buildEmailFrame(bodyHtml: string, allowRemoteImages: boolean): string {
+export function buildEmailFrame(
+  bodyHtml: string,
+  allowRemoteImages: boolean,
+  scheme: 'light' | 'dark' = 'light',
+): string {
   const csp = allowRemoteImages ? CSP_ALLOW_REMOTE : CSP_BLOCK_REMOTE;
+  // Keep the email's own <style> blocks (head or body): many providers style
+  // tables, code and callouts there. They are re-injected after our base
+  // stylesheet, so they override the base exactly as the sender intended, and
+  // the dark override (a cascade layer with !important) still wins over them
+  // when the app is dark.
+  const emailDocument = new DOMParser().parseFromString(bodyHtml, 'text/html');
+  const emailCss = Array.from(emailDocument.querySelectorAll('style'))
+    .map((node) => node.textContent ?? '')
+    .join('\n');
+  emailDocument.querySelectorAll('style').forEach((node) => node.remove());
+  const cleanedBody = sanitizeEmailHtml(emailDocument.body.innerHTML);
+  // Emails usually assume a light canvas; their own styles override this.
+  // `overflow-wrap: anywhere` keeps unbreakable email URLs inside the frame,
+  // and the table/img rules scale fixed-width newsletter layouts down to
+  // the frame the way mainstream mail readers do.
+  const lightBase =
+    'html{background:#fff}body{margin:0;padding:12px 14px;color:#24292f;font:14px/1.5 system-ui,sans-serif;overflow-wrap:anywhere}table{max-width:100%}img{max-width:100%;height:auto}';
+  // Dark scheme: the frame background is transparent so the app's dark
+  // surface shows through, and a layered override neutralizes light-styled
+  // mail — backgrounds/images reset, text lifted to the dark palette,
+  // borders dimmed — while every email's own stylesheet still wins for
+  // anything it declares without a background/border (links, spacing).
+  // Images, inline SVG fills, video and canvas are left untouched.
+  const darkBase =
+    'html{background:transparent;color-scheme:dark}body{margin:0;padding:12px 14px;color:#e6edf3;font:14px/1.5 system-ui,sans-serif;overflow-wrap:anywhere}table{max-width:100%}img{max-width:100%;height:auto}';
+  const darkOverride =
+    '@layer pigeon-dark-email{body{color:#e6edf3!important}*,:before,:after{background-color:transparent!important;background-image:none!important;border-color:rgba(255,255,255,.16)!important;color:inherit!important;text-decoration-color:inherit!important;box-shadow:none!important;text-shadow:none!important}a{color:#58a6ff!important}input,textarea,select{background:rgba(255,255,255,.06)!important;color:inherit!important}img,svg,video,canvas{background-color:transparent!important}}';
+  const styles = scheme === 'dark' ? darkBase + darkOverride : lightBase;
   return [
     '<!doctype html>',
     '<html><head>',
     '<meta charset="utf-8">',
     `<meta http-equiv="Content-Security-Policy" content="${csp}">`,
     '<base target="_blank">',
-    // Emails usually assume a light canvas; their own styles override this.
-    // `overflow-wrap: anywhere` keeps unbreakable email URLs inside the frame,
-    // and the table/img rules scale fixed-width newsletter layouts down to
-    // the frame the way mainstream mail readers do.
-    '<style>html{background:#fff}body{margin:0;padding:12px 14px;color:#24292f;font:14px/1.5 system-ui,sans-serif;overflow-wrap:anywhere}table{max-width:100%}img{max-width:100%;height:auto}</style>',
+    `<style>${styles}</style>`,
+    emailCss.length > 0 ? `<style>${emailCss}</style>` : '',
     '</head><body>',
-    sanitizeEmailHtml(bodyHtml),
+    cleanedBody,
     '</body></html>',
   ].join('');
 }
@@ -875,6 +904,126 @@ export function sanitizeEmailHtml(html: string): string {
     }
   });
   return parsed.body.innerHTML;
+}
+
+/** Best-effort RFC 2047 encoded-word decoder for display. Mail stored
+ *  before the server-side decoder exists (and any provider quirk it may
+ *  not cover) still shows readable subjects instead of `=?UTF-8?B?...?=`.
+ *  Mirrors the ingest-side decoder: B/Q payloads in UTF-8/ASCII/ISO-8859-1,
+ *  adjacent-word whitespace collapsed, unknown words verbatim. */
+export function decodeMimeWords(value: string): string {
+  let out = '';
+  let rest = value;
+  let pendingEncoded = false;
+  while (rest.includes('=?')) {
+    const start = rest.indexOf('=?');
+    const prose = rest.slice(0, start);
+    if (prose.length > 0 && !(pendingEncoded && /^\s+$/.test(prose))) {
+      out += prose;
+    }
+    pendingEncoded = false;
+    const word = decodeOneWord(rest.slice(start));
+    if (word === null) {
+      out += '=?';
+      rest = rest.slice(start + 2);
+      continue;
+    }
+    const [decoded, consumed] = word;
+    if (decoded !== null) {
+      out += decoded;
+      pendingEncoded = true;
+    } else {
+      out += rest.slice(start, start + consumed);
+    }
+    rest = rest.slice(start + consumed);
+  }
+  return out + rest;
+}
+
+function decodeOneWord(text: string): [string | null, number] | null {
+  if (!text.startsWith('=?')) {
+    return null;
+  }
+  const rest = text.slice(2);
+  const charsetEnd = rest.indexOf('?');
+  if (charsetEnd <= 0) {
+    return null;
+  }
+  const charset = rest.slice(0, charsetEnd);
+  if (charset.length > 50 || charset.includes(' ')) {
+    return null;
+  }
+  const encoding = rest[charsetEnd + 1]?.toLowerCase();
+  if (encoding !== 'b' && encoding !== 'q') {
+    return null;
+  }
+  if (rest[charsetEnd + 2] !== '?') {
+    return null;
+  }
+  const payloadStart = charsetEnd + 3;
+  const payloadEnd = rest.indexOf('?=', payloadStart);
+  if (payloadEnd < 0) {
+    return null;
+  }
+  const payload = rest.slice(payloadStart, payloadEnd);
+  // Consumed counts the full `=?charset?enc?payload?=` span, measured from
+  // `text` (which starts with `=?`), so the caller can slice `text` by it.
+  const consumed = 2 + charsetEnd + 1 + 1 + 1 + (payloadEnd - payloadStart) + 2;
+
+  let bytes: Uint8Array;
+  if (encoding === 'b') {
+    try {
+      bytes = Uint8Array.from(atob(payload), (character) => character.charCodeAt(0));
+    } catch {
+      return [null, consumed];
+    }
+  } else {
+    try {
+      bytes = decodeQPayload(payload);
+    } catch {
+      return [null, consumed];
+    }
+  }
+
+  const name = charset.toLowerCase();
+  if (name === 'utf-8' || name === 'utf8' || name === 'us-ascii' || name === 'ascii') {
+    try {
+      return [new TextDecoder('utf-8').decode(bytes), consumed];
+    } catch {
+      return [null, consumed];
+    }
+  }
+  if (name === 'iso-8859-1' || name === 'latin1' || name === 'windows-1252') {
+    return [
+      Array.from(bytes, (byte) => String.fromCharCode(byte)).join(''),
+      consumed,
+    ];
+  }
+  return [null, consumed];
+}
+
+function decodeQPayload(payload: string): Uint8Array {
+  const out = new Array<number>(payload.length);
+  let write = 0;
+  for (let read = 0; read < payload.length; ) {
+    const character = payload[read];
+    if (character === '_') {
+      out[write] = 32;
+      read += 1;
+    } else if (character === '=') {
+      const hex = payload.slice(read + 1, read + 3);
+      if (hex.length !== 2 || /[^0-9a-fA-F]/.test(hex)) {
+        throw new Error('bad q escape');
+      }
+      out[write] = Number.parseInt(hex, 16);
+      read += 3;
+    } else {
+      out[write] = payload.charCodeAt(read);
+      read += 1;
+    }
+    write += 1;
+  }
+  return Uint8Array.from(out.slice(0, write));
 }
 
 /**

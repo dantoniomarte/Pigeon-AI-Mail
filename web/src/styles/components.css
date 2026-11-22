@@ -768,9 +768,12 @@ body {
   color: var(--accent);
 }
 
+/* The row being read: neutral fill plus an accent ring, deliberately not the
+   unread tint (an open email is no longer unread). Overrides the unread
+   bar+box-shadow when a row is both, so the ring reads as the final state. */
 .mail-row.is-selected {
-  background: var(--accent-soft);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 20%, transparent);
+  background: var(--surface-2);
+  box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 45%, transparent);
 }
 
 .mail-row:focus-visible {

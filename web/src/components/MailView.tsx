@@ -24,6 +24,7 @@ import {
   type MessageDetail,
   avatarHue,
   buildEmailFrame,
+  decodeMimeWords,
   displayName,
   emailAddress,
   formatSize,
@@ -36,6 +37,8 @@ import { PigeonArt } from './MailList';
 
 export interface MailViewProps {
   mode: 'mail' | 'sent';
+  /** Active app theme: dark mail frames render with the dark scheme. */
+  scheme?: 'light' | 'dark';
   message: MessageDetail | null;
   state: LoadState;
   sentStatus?: SentStatus;
@@ -117,6 +120,7 @@ function TextParagraph({ value }: { value: string }): JSX.Element {
 
 export default function MailView({
   mode,
+  scheme = 'light',
   message,
   state,
   sentStatus,
@@ -254,7 +258,7 @@ export default function MailView({
           {isSent && sentStatus !== undefined ? (
             <span className={`badge badge--status is-${sentStatus}`}>{t(`mail.status.${sentStatus}`)}</span>
           ) : null}
-          <h1 className="reader__subject">{message.subject ?? t('mail.noSubject')}</h1>
+          <h1 className="reader__subject">{message.subject !== undefined ? decodeMimeWords(message.subject) : t('mail.noSubject')}</h1>
 
           <div className="reader__identity">
             <span className="avatar avatar--lg" style={{ '--avatar-hue': hue } as CSSProperties} aria-hidden="true">
@@ -314,7 +318,7 @@ export default function MailView({
                 className="reader__frame"
                 title={t('mail.messageBody')}
                 sandbox="allow-popups allow-popups-to-escape-sandbox"
-                srcDoc={buildEmailFrame(body.html, remoteImages)}
+                srcDoc={buildEmailFrame(body.html, remoteImages, scheme)}
               />
             </>
           ) : body !== null && 'text' in body ? (

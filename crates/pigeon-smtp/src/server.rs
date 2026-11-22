@@ -55,6 +55,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::Engine as _;
 use pigeon_api::db::ApiDb;
 use pigeon_api::time::{now_unix, rfc5322_date};
 use pigeon_core::types::CatchallAction;
@@ -881,7 +882,7 @@ fn ingest_message(
         .into_iter()
         .next()
         .unwrap_or_else(|| envelope.mail_from.clone());
-    let subject = parsed.header("Subject").unwrap_or_default().to_string();
+    let subject = decode_rfc2047(parsed.header("Subject").unwrap_or_default());
 
     // The stored document is the received bytes with our trace header on top, so
     // the copy a user reads shows how it arrived.
@@ -1033,6 +1034,112 @@ impl ParsedMessage {
             .flat_map(|(_, value)| addresses_in(value))
             .collect()
     }
+}
+
+/// Decode RFC 2047 encoded-words in an unstructured header value such as
+/// `Subject`: `=?charset?B|Q?payload?=`. Only UTF-8, ISO-8859-1 and US-ASCII
+/// payloads are decoded; anything else (unknown charset, malformed marker)
+/// passes through verbatim rather than being fabricated. Whitespace between
+/// adjacent encoded-words is ignored per RFC 2047 §6.2.
+pub(crate) fn decode_rfc2047(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    let mut pending_encoded = false;
+    while let Some(start) = rest.find("=?") {
+        let (prose, tail) = rest.split_at(start);
+        if !prose.is_empty() && !(pending_encoded && prose.chars().all(char::is_whitespace)) {
+            out.push_str(prose);
+        }
+        pending_encoded = false;
+        let Some((token, after)) = decode_one_word(tail) else {
+            out.push_str("=?");
+            rest = &tail[2..];
+            continue;
+        };
+        if let Some(decoded) = token {
+            out.push_str(&decoded);
+            pending_encoded = true;
+        } else {
+            out.push_str(&tail[..after]);
+        }
+        rest = &tail[after..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Decode one `=?charset?B|Q?payload?=` word starting at `text` (which begins
+/// with `=?`). Returns `Some((Some(decoded), consumed))` on success,
+/// `Some((None, consumed))` for a well-formed word that cannot be decoded,
+/// and `None` when `text` is not an encoded-word at all.
+fn decode_one_word(text: &str) -> Option<(Option<String>, usize)> {
+    let rest = text.strip_prefix("=?")?;
+    let charset_end = rest.find('?')?;
+    let charset = &rest[..charset_end];
+    if charset.is_empty() || charset.len() > 50 || charset.contains(' ') {
+        return None;
+    }
+    let after_charset = &rest[charset_end + 1..];
+    let encoding = after_charset.chars().next()?;
+    if !matches!(encoding.to_ascii_lowercase(), 'b' | 'q') {
+        return None;
+    }
+    let after_encoding = &after_charset[1..];
+    if !after_encoding.starts_with('?') {
+        return None;
+    }
+    let payload_end = after_encoding[1..].find("?=")?;
+    let payload = &after_encoding[1..1 + payload_end];
+    let consumed = text.len() - rest.len() + charset_end + 1 + 1 + 1 + payload_end + 2;
+
+    let bytes = match encoding.to_ascii_lowercase() {
+        'b' => base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .ok()?,
+        'q' => decode_q_payload(payload).ok()?,
+        _ => unreachable!(),
+    };
+
+    let decoded = match charset.to_ascii_lowercase().as_str() {
+        "utf-8" | "utf8" | "us-ascii" | "ascii" => String::from_utf8(bytes).ok()?,
+        "iso-8859-1" | "latin1" | "windows-1252" => {
+            bytes.iter().map(|byte| *byte as char).collect()
+        }
+        _ => return Some((None, consumed)),
+    };
+    Some((Some(decoded), consumed))
+}
+
+/// Q-encoding: `=XX` hex escapes, `_` means space, everything else literal.
+fn decode_q_payload(payload: &str) -> std::result::Result<Vec<u8>, ()> {
+    let bytes = payload.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'_' => {
+                out.push(b' ');
+                index += 1;
+            }
+            b'=' => {
+                if index + 3 > bytes.len() {
+                    return Err(());
+                }
+                let hex = &payload[index + 1..index + 3];
+                if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return Err(());
+                }
+                let value = u8::from_str_radix(hex, 16).map_err(|_| ())?;
+                out.push(value);
+                index += 3;
+            }
+            byte => {
+                out.push(byte);
+                index += 1;
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Split a raw message into unfolded headers and body.
@@ -1647,5 +1754,56 @@ mod tests {
         );
         assert!(header.contains("for <carol@example.com>;"), "{header}");
         assert!(header.ends_with("\r\n"));
+    }
+
+    #[test]
+    fn decode_rfc2047_decodes_b_and_q_words() {
+        assert_eq!(
+            decode_rfc2047("=?UTF-8?B?UHJvZHVjdCBwdWxzZSDigJQgRmVicnVhcnk=?="),
+            "Product pulse \u{2014} February"
+        );
+        assert_eq!(
+            decode_rfc2047("=?utf-8?Q?Caf=C3=A9_con_leche?="),
+            "Caf\u{e9} con leche"
+        );
+        assert_eq!(decode_rfc2047("=?utf-8?Q?Hola_mundo?="), "Hola mundo");
+        assert_eq!(decode_rfc2047("=?ISO-8859-1?B?Q2Fm6Q==?="), "Caf\u{e9}");
+    }
+
+    #[test]
+    fn decode_rfc2047_joins_adjacent_words_and_keeps_prose() {
+        assert_eq!(
+            decode_rfc2047("=?utf-8?Q?Bienvenido?= =?utf-8?Q?de_nuevo?="),
+            "Bienvenidode nuevo"
+        );
+        assert_eq!(
+            decode_rfc2047("Re: =?utf-8?Q?prueba?= del sistema"),
+            "Re: prueba del sistema"
+        );
+        assert_eq!(
+            decode_rfc2047("Asunto sin codificar"),
+            "Asunto sin codificar"
+        );
+        assert_eq!(decode_rfc2047(""), "");
+    }
+
+    #[test]
+    fn decode_rfc2047_passes_through_unknown_and_malformed() {
+        assert_eq!(
+            decode_rfc2047("=?koi8-r?B?/v7w8Q==?="),
+            "=?koi8-r?B?/v7w8Q==?="
+        );
+        assert_eq!(decode_rfc2047("=?utf-8?"), "=?utf-8?");
+        assert_eq!(decode_rfc2047("=?=?"), "=?=?");
+    }
+
+    #[test]
+    fn ingest_uses_the_decoded_subject() {
+        let raw = b"From: Dana <dana@example.org>\r\nTo: inbox@pigeon.test\r\nSubject: =?utf-8?B?UHJvZHVjdCBwdWxzZSDigJQgRmVicnVhcnk=?=\r\n\r\nbody line\r\n";
+        let parsed = parse_message(raw);
+        assert_eq!(
+            decode_rfc2047(parsed.header("Subject").unwrap_or_default()),
+            "Product pulse \u{2014} February"
+        );
     }
 }

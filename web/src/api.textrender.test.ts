@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildEmailFrame, linkifyText } from './api';
+import { buildEmailFrame, decodeMimeWords, linkifyText } from './api';
 
 describe('linkifyText', () => {
   it('splits text around an https url and keeps surrounding words', () => {
@@ -71,5 +71,59 @@ describe('buildEmailFrame', () => {
     expect(doc).not.toContain('<embed');
     expect(doc).not.toContain('onerror');
     expect(doc).toContain('<p>hi</p>');
+  });
+});
+
+describe('decodeMimeWords', () => {
+  it('decodes B and Q encoded words for legacy stored subjects', () => {
+    expect(decodeMimeWords('=?UTF-8?B?UHJvZHVjdCBwdWxzZSDigJQgRmVicnVhcnk=?=')).toBe('Product pulse — February');
+    expect(decodeMimeWords('=?utf-8?Q?Caf=C3=A9_con_leche?=')).toBe('Café con leche');
+    expect(decodeMimeWords('=?ISO-8859-1?B?Q2Fm6Q==?=')).toBe('Café');
+  });
+
+  it('joins adjacent words without the separating whitespace and keeps prose', () => {
+    expect(decodeMimeWords('=?utf-8?Q?Bienvenido?= =?utf-8?Q?de_nuevo?=')).toBe('Bienvenidode nuevo');
+    expect(decodeMimeWords('Re: =?utf-8?Q?prueba?= del sistema')).toBe('Re: prueba del sistema');
+    expect(decodeMimeWords('asunto normal')).toBe('asunto normal');
+    expect(decodeMimeWords('')).toBe('');
+  });
+
+  it('passes unknown charsets and malformed markers through verbatim', () => {
+    expect(decodeMimeWords('=?koi8-r?B?/v7w8Q==?=')).toBe('=?koi8-r?B?/v7w8Q==?=');
+    expect(decodeMimeWords('=?utf-8?')).toBe('=?utf-8?');
+  });
+});
+
+describe('buildEmailFrame dark scheme', () => {
+  const body = '<p>hello</p><table style="background:#ffffff"><tr><td>cell</td></tr></table>';
+
+  it('emits a dark override layer when the scheme is dark', () => {
+    const doc = buildEmailFrame(body, false, 'dark');
+    expect(doc).toContain('pigeon-dark-email');
+    expect(doc).toContain('color-scheme:dark');
+    expect(doc).not.toContain('html{background:#fff}');
+  });
+
+  it('keeps the light canvas when the scheme is light', () => {
+    const doc = buildEmailFrame(body, false, 'light');
+    expect(doc).toContain('html{background:#fff}');
+    expect(doc).not.toContain('pigeon-dark-email');
+  });
+
+  it('defaults to light for existing callers', () => {
+    expect(buildEmailFrame(body, false)).toContain('html{background:#fff}');
+  });
+});
+
+describe('buildEmailFrame style preservation', () => {
+  it('keeps the email own style block and injects it after the base', () => {
+    const doc = buildEmailFrame(
+      '<html><head><style>pre{background:#1e222e}</style></head><body><pre><code>x</code></pre></body></html>',
+      false,
+    );
+    const styles = doc.match(/<style>([^<]*)<\/style>/g) ?? [];
+    expect(styles.length).toBe(2);
+    expect(styles[0]).toContain('html{background:#fff}');
+    expect(styles[1]).toContain('pre{background:#1e222e}');
   });
 });

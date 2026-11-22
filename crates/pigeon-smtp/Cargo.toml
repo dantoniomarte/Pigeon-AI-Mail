@@ -7,6 +7,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+base64 = "0.22"
 pigeon-api.workspace = true
 pigeon-core.workspace = true
 pigeon-crypto.workspace = true

@@ -155,3 +155,63 @@ describe('plain-text message rendering', () => {
     expect(screen.getByText('Chau!')).toBeInTheDocument();
   });
 });
+
+describe('theme-aware email frame', () => {
+  it('renders the dark scheme inside the frame when the app is dark', () => {
+    const props = mailViewProps();
+    props.scheme = 'dark';
+    props.message = messageFixture({ body_html: '<p>styled by provider</p>' });
+    render(<MailView {...props} />);
+
+    const doc = screen.getByTitle('Message body').getAttribute('srcdoc') ?? '';
+    expect(doc).toContain('pigeon-dark-email');
+    expect(doc).toContain('color-scheme:dark');
+    // The provider markup itself is untouched.
+    expect(doc).toContain('<p>styled by provider</p>');
+  });
+
+  it('keeps the light canvas by default', () => {
+    const props = mailViewProps();
+    props.message = messageFixture({ body_html: '<p>light mail</p>' });
+    render(<MailView {...props} />);
+    const doc = screen.getByTitle('Message body').getAttribute('srcdoc') ?? '';
+    expect(doc).toContain('html{background:#fff}');
+    expect(doc).not.toContain('pigeon-dark-email');
+  });
+});
+
+describe('selected row vs unread row', () => {
+  it('marks the opened row as selected, a separate visual state from unread', () => {
+    const props = mailListProps([
+      {
+        id: 'row-open',
+        from: 'Ines Duarte <ines@duarte.dev>',
+        subject: 'Reading now',
+        createdAt: null,
+        preview: null,
+        unread: false,
+        encrypted: false,
+      },
+      {
+        id: 'row-other',
+        from: 'Tomas Lindqvist <tomas@northlight.se>',
+        subject: 'Still unread',
+        createdAt: null,
+        preview: null,
+        unread: true,
+        encrypted: false,
+      },
+    ]);
+    props.selectedId = 'row-open';
+    render(<MailList {...props} />);
+
+    const open = screen.getByText('Reading now').closest('button');
+    const unread = screen.getByText('Still unread').closest('button');
+    expect(open?.classList.contains('is-selected')).toBe(true);
+    expect(open?.classList.contains('is-unread')).toBe(false);
+    expect(unread?.classList.contains('is-selected')).toBe(false);
+    expect(unread?.classList.contains('is-unread')).toBe(true);
+    expect(within(unread as HTMLElement).getByRole('img', { name: 'Unread' })).toBeInTheDocument();
+    expect(within(open as HTMLElement).queryByRole('img', { name: 'Unread' })).not.toBeInTheDocument();
+  });
+});

@@ -224,6 +224,21 @@
 
   .reader__document {
     padding: 18px 16px 26px;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* On mobile the action bar reads first: it sits between the header and the
+     body instead of hanging below the whole message. */
+  .reader__header {
+    order: -2;
+  }
+
+  .reader__actions {
+    order: -1;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 12px;
+    margin-bottom: 14px;
   }
 
   .reader__identity {

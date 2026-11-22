@@ -13,7 +13,7 @@ import {
   X,
 } from 'lucide-react';
 
-import { avatarHue, displayName, initials, type FolderCounts, type SentStatus } from '../api';
+import { avatarHue, decodeMimeWords, displayName, initials, type FolderCounts, type SentStatus } from '../api';
 import { deriveActiveIds, remainingSelection, type BulkOutcome } from '../bulk';
 import type { LoadState, View } from '../App';
 import BulkBar from './BulkBar';
@@ -185,7 +185,7 @@ export default function MailList({
       }
       return (
         item.from.toLowerCase().includes(needle) ||
-        item.subject.toLowerCase().includes(needle) ||
+        decodeMimeWords(item.subject ?? '').toLowerCase().includes(needle) ||
         (item.preview ?? '').toLowerCase().includes(needle)
       );
     });
@@ -601,7 +601,7 @@ export default function MailList({
                               type="checkbox"
                               className="checkbox"
                               checked={checked}
-                              aria-label={`${displayName(item.from)}: ${item.subject}`}
+                              aria-label={`${displayName(item.from)}: ${decodeMimeWords(item.subject ?? '')}`}
                               onChange={(event) => toggleOne(item.id, event.target.checked)}
                               onClick={(event) => event.stopPropagation()}
                               onKeyDown={(event) => {
@@ -641,7 +641,7 @@ export default function MailList({
                                 {stamp(item.createdAt)}
                               </span>
                             </span>
-                            <span className="mail-row__subject">{item.subject}</span>
+                            <span className="mail-row__subject">{decodeMimeWords(item.subject ?? '')}</span>
                             <span className="mail-row__preview">
                               {item.preview ?? (item.encrypted ? t('mail.previewLocked') : '')}
                             </span>

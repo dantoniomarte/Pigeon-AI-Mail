@@ -2074,6 +2074,7 @@ name = "pigeon-smtp"
 version = "0.1.2"
 dependencies = [
  "axum",
+ "base64",
  "hex",
  "hickory-resolver",
  "pigeon-api",
