@@ -363,11 +363,15 @@
   }
 
   .compose__foot-actions {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+    min-width: 0;
     width: 100%;
   }
 
   .compose__foot-actions .btn {
     flex: 1;
+    min-width: 0;
   }
 
   .toasts {
@@ -408,7 +412,7 @@
 
   .mobile-tabs__item.is-active {
     background: var(--accent-soft);
-    color: var(--accent);
+    color: var(--accent-strong);
     font-weight: 650;
   }
 
@@ -539,6 +543,13 @@
 
   .bulk-bar__actions .btn span {
     display: none;
+  }
+
+  /* The destructive and dismiss actions keep their labels: six identical
+     14px glyphs is an unsafe row. */
+  .bulk-bar__actions .btn--danger span,
+  .bulk-bar__actions .btn--quiet span {
+    display: inline;
   }
 
   .mail-row__badges {

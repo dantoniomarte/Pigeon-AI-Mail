@@ -194,7 +194,7 @@ describe('theme-aware email frame', () => {
     props.message = messageFixture({ body_html: '<p>light mail</p>' });
     render(<MailView {...props} />);
     const doc = screen.getByTitle('Message body').getAttribute('srcdoc') ?? '';
-    expect(doc).toContain('html{background:#fff}');
+    expect(doc).toContain('html{background:#fff;overflow-x:auto');
     expect(doc).not.toContain('pigeon-dark-email');
   });
 });

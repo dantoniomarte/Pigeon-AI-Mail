@@ -19,6 +19,7 @@
   --text-soft: #3d4351;
   --muted: #6b7280;
   --border: #e5e7eb;
+  --btn-ghost-border: #8b93a3;
   --border-strong: #d7dbe2;
 
   /* Brand */
@@ -88,7 +89,8 @@
   --text: #e8eaf1;
   --text-soft: #c7ccda;
   --muted: #9aa1b5;
-  --border: #232838;
+  --border: #646e8c;
+  --btn-ghost-border: #646e8c;
   --border-strong: #333b50;
 
   --accent: #ff7a55;

@@ -815,7 +815,11 @@ export default function App(): JSX.Element {
 
       <span className="app__grain" aria-hidden="true" />
 
-      <main className="shell">
+      {/* B-009: while the compose dialog is up the page behind it is
+          inert — Tab cannot walk onto hidden controls. React 18 renders
+          lowercase custom attributes verbatim, so `inert={composeOpen}`
+          would emit inert="true" even when false (an inert main!). */}
+      <main className="shell" {...(composeOpen ? { inert: '' } : {})}>
         <Sidebar
           counts={counts}
           view={view}

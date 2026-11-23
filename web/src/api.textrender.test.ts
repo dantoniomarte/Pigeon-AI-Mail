@@ -112,12 +112,12 @@ describe('buildEmailFrame dark scheme', () => {
 
   it('keeps the light canvas when the scheme is light', () => {
     const doc = buildEmailFrame(body, false, 'light');
-    expect(doc).toContain('html{background:#fff}');
+    expect(doc).toContain('html{background:#fff;overflow-x:auto');
     expect(doc).not.toContain('pigeon-dark-email');
   });
 
   it('defaults to light for existing callers', () => {
-    expect(buildEmailFrame(body, false)).toContain('html{background:#fff}');
+    expect(buildEmailFrame(body, false)).toContain('html{background:#fff;overflow-x:auto');
   });
 });
 
@@ -129,7 +129,7 @@ describe('buildEmailFrame style preservation', () => {
     );
     const styles = doc.match(/<style>([^<]*)<\/style>/g) ?? [];
     expect(styles.length).toBe(2);
-    expect(styles[0]).toContain('html{background:#fff}');
+    expect(styles[0]).toContain('html{background:#fff;overflow-x:auto');
     expect(styles[1]).toContain('pre{background:#1e222e}');
   });
 });

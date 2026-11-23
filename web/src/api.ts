@@ -897,7 +897,7 @@ export function buildEmailFrame(
   // and the table/img rules scale fixed-width newsletter layouts down to
   // the frame the way mainstream mail readers do.
   const lightBase =
-    'html{background:#fff}body{margin:0;padding:12px 14px;color:#24292f;font:14px/1.5 system-ui,sans-serif;overflow-wrap:break-word}a{color:#0b57d0}table{max-width:100%}td,th{overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;max-width:100%}img{max-width:100%;height:auto}';
+    'html{background:#fff;overflow-x:auto;max-width:100%}body{margin:0;padding:12px 14px;color:#24292f;font:14px/1.5 system-ui,sans-serif;overflow-wrap:break-word;max-width:100%}a{color:#0b57d0}table{max-width:100%}td,th{overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;max-width:100%}img{max-width:100%;height:auto}';
   // Dark scheme: the frame background is transparent so the app's dark
   // surface shows through, and a layered override neutralizes light-styled
   // mail — backgrounds/images reset, text lifted to the dark palette,
@@ -905,7 +905,7 @@ export function buildEmailFrame(
   // anything it declares without a background/border (links, spacing).
   // Images, inline SVG fills, video and canvas are left untouched.
   const darkBase =
-    'html{background:transparent;color-scheme:dark}body{margin:0;padding:12px 14px;color:#e6edf3;font:14px/1.5 system-ui,sans-serif;overflow-wrap:break-word}a{color:#58a6ff}table{max-width:100%}td,th{overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;max-width:100%}img{max-width:100%;height:auto}';
+    'html{background:transparent;color-scheme:dark;overflow-x:auto;max-width:100%}body{margin:0;padding:12px 14px;color:#e6edf3;font:14px/1.5 system-ui,sans-serif;overflow-wrap:break-word;max-width:100%}a{color:#58a6ff}table{max-width:100%}td,th{overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;max-width:100%}img{max-width:100%;height:auto}';
   // Legibility rules for the override, learned from real newsletters:
   // - never `color: inherit` in the universal rule: a nested element that the
   //   email painted dark over its own light background inherits a dark parent
@@ -915,7 +915,7 @@ export function buildEmailFrame(
   //   transparent but make EVERY text light, so dark-on-dark cannot happen.
   // - preserve underline decorations and drop only heavy shadows.
   const darkOverride =
-    '@layer pigeon-dark-email{body{color:#e6edf3!important}*,:before,:after{color:#e6edf3!important;-webkit-text-fill-color:currentColor!important;filter:none!important;opacity:1!important;background-color:transparent!important;background-image:none!important;border-color:rgba(255,255,255,.18)!important;box-shadow:none!important}a{color:#6cb2ff!important}a *{color:#6cb2ff!important}input,textarea,select{background:rgba(255,255,255,.08)!important;color:#e6edf3!important}img,svg,video,canvas{background-color:transparent!important}td,th{border-color:rgba(255,255,255,.18)!important}blockquote{border-left:3px solid rgba(255,255,255,.3)!important;color:#c9d1d9!important}hr{border-color:rgba(255,255,255,.18)!important}}';
+    '@layer pigeon-dark-email{body{color:#e6edf3!important}*,:before,:after{color:#e6edf3!important;-webkit-text-fill-color:currentColor!important;filter:none!important;opacity:1!important;background-color:transparent!important;background-image:none!important;border-color:rgba(255,255,255,.18)!important;box-shadow:none!important}a{color:#6cb2ff!important}a *{color:#6cb2ff!important}a[style*="inline-block"],a[style*="padding"]{background-color:rgba(108,178,255,.16)!important;border:1px solid rgba(108,178,255,.6)!important}input,textarea,select{background:rgba(255,255,255,.08)!important;color:#e6edf3!important}img,svg,video,canvas{background-color:transparent!important}td,th{border-color:rgba(255,255,255,.18)!important}blockquote{border-left:3px solid rgba(255,255,255,.3)!important;color:#c9d1d9!important}hr{border-color:rgba(255,255,255,.18)!important}}';
 
   const styles = scheme === 'dark' ? darkBase + darkOverride : lightBase;
   // The sandbox keeps the frame origin opaque, so the parent cannot measure

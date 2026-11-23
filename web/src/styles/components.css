@@ -100,7 +100,7 @@ body {
 }
 
 .btn--ghost {
-  border-color: var(--border);
+  border-color: var(--btn-ghost-border);
   background: var(--surface);
   color: var(--text-soft);
 }
@@ -328,7 +328,7 @@ body {
 
 .motion-switch.is-on {
   border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
-  color: var(--accent);
+  color: var(--accent-strong);
 }
 
 .motion-switch.is-on .motion-switch__track {
@@ -453,7 +453,7 @@ body {
 
 .nav__item.is-active {
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-strong);
   font-weight: 620;
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 18%, transparent);
 }
@@ -1568,7 +1568,7 @@ body {
 
 .compose__cc-toggle {
   flex: none;
-  padding: 0;
+  padding: 4px 2px;
   border: 0;
   background: transparent;
   color: var(--accent);
@@ -3340,6 +3340,17 @@ li:focus-within .mail-row__actions {
   .mail-row__actions {
     opacity: 1;
     pointer-events: auto;
+  }
+
+  /* The pill is permanently visible on touch: reserve the gutter it needs
+     and give each target the 32px floor. */
+  .mail-row {
+    padding-right: 126px;
+  }
+
+  .row-action {
+    width: 32px;
+    height: 32px;
   }
 }
 
