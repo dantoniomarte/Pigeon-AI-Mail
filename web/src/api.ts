@@ -837,7 +837,7 @@ export function linkifyText(text: string): TextToken[] {
   return tokens;
 }
 
-const CSP_BASE = "default-src 'none'; style-src data: 'unsafe-inline';";
+const CSP_BASE = "default-src 'none'; style-src data: 'unsafe-inline'; script-src 'unsafe-inline';";
 /** Remote content stays opt-in: the frame starts with images/fonts/media
  *  locked to inline data, and the reader can lift that per message. */
 const CSP_BLOCK_REMOTE = `${CSP_BASE} img-src data: blob:; font-src data:; media-src data: blob:`;
@@ -897,7 +897,7 @@ export function buildEmailFrame(
   // and the table/img rules scale fixed-width newsletter layouts down to
   // the frame the way mainstream mail readers do.
   const lightBase =
-    'html{background:#fff}body{margin:0;padding:12px 14px;color:#24292f;font:14px/1.5 system-ui,sans-serif;overflow-wrap:anywhere}table{max-width:100%}img{max-width:100%;height:auto}';
+    'html{background:#fff}body{margin:0;padding:12px 14px;color:#24292f;font:14px/1.5 system-ui,sans-serif;overflow-wrap:break-word}a{color:#0b57d0}table{max-width:100%}td,th{overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;max-width:100%}img{max-width:100%;height:auto}';
   // Dark scheme: the frame background is transparent so the app's dark
   // surface shows through, and a layered override neutralizes light-styled
   // mail — backgrounds/images reset, text lifted to the dark palette,
@@ -905,7 +905,7 @@ export function buildEmailFrame(
   // anything it declares without a background/border (links, spacing).
   // Images, inline SVG fills, video and canvas are left untouched.
   const darkBase =
-    'html{background:transparent;color-scheme:dark}body{margin:0;padding:12px 14px;color:#e6edf3;font:14px/1.5 system-ui,sans-serif;overflow-wrap:anywhere}table{max-width:100%}img{max-width:100%;height:auto}';
+    'html{background:transparent;color-scheme:dark}body{margin:0;padding:12px 14px;color:#e6edf3;font:14px/1.5 system-ui,sans-serif;overflow-wrap:break-word}a{color:#58a6ff}table{max-width:100%}td,th{overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;max-width:100%}img{max-width:100%;height:auto}';
   // Legibility rules for the override, learned from real newsletters:
   // - never `color: inherit` in the universal rule: a nested element that the
   //   email painted dark over its own light background inherits a dark parent
@@ -915,9 +915,19 @@ export function buildEmailFrame(
   //   transparent but make EVERY text light, so dark-on-dark cannot happen.
   // - preserve underline decorations and drop only heavy shadows.
   const darkOverride =
-    '@layer pigeon-dark-email{body{color:#e6edf3!important}*,:before,:after{color:#e6edf3!important;background-color:transparent!important;background-image:none!important;border-color:rgba(255,255,255,.18)!important;box-shadow:none!important}a{color:#6cb2ff!important}a *{color:#6cb2ff!important}input,textarea,select{background:rgba(255,255,255,.08)!important;color:#e6edf3!important}img,svg,video,canvas{background-color:transparent!important}td,th{border-color:rgba(255,255,255,.18)!important}blockquote{border-left:3px solid rgba(255,255,255,.3)!important;color:#c9d1d9!important}hr{border-color:rgba(255,255,255,.18)!important}}';
+    '@layer pigeon-dark-email{body{color:#e6edf3!important}*,:before,:after{color:#e6edf3!important;-webkit-text-fill-color:currentColor!important;filter:none!important;opacity:1!important;background-color:transparent!important;background-image:none!important;border-color:rgba(255,255,255,.18)!important;box-shadow:none!important}a{color:#6cb2ff!important}a *{color:#6cb2ff!important}input,textarea,select{background:rgba(255,255,255,.08)!important;color:#e6edf3!important}img,svg,video,canvas{background-color:transparent!important}td,th{border-color:rgba(255,255,255,.18)!important}blockquote{border-left:3px solid rgba(255,255,255,.3)!important;color:#c9d1d9!important}hr{border-color:rgba(255,255,255,.18)!important}}';
 
   const styles = scheme === 'dark' ? darkBase + darkOverride : lightBase;
+  // The sandbox keeps the frame origin opaque, so the parent cannot measure
+  // the document; this bootstrap is the only script the frame ships (the
+  // sanitizer strips sender scripts and handlers, and the CSP only permits
+  // inline scripts) and reports the rendered height for auto-sizing.
+  const heightScript =
+    '<script>(function(){var send=function(){parent.postMessage({type:"pigeon-frame-height",value:Math.max(document.body.getBoundingClientRect().bottom,document.documentElement.clientHeight?0:0)+12},"*")};' +
+    'window.addEventListener("load",function(){send();requestAnimationFrame(send);setTimeout(send,400)});' +
+    'if(document.fonts&&document.fonts.ready)document.fonts.ready.then(send);' +
+    'var images=document.querySelectorAll("img");for(var i=0;i<images.length;i++){images[i].addEventListener("load",send)};' +
+    '})()</script>';
   return [
     '<!doctype html>',
     '<html><head>',
@@ -926,6 +936,7 @@ export function buildEmailFrame(
     '<base target="_blank">',
     `<style>${styles}</style>`,
     emailCss.length > 0 ? `<style>${emailCss}</style>` : '',
+    heightScript,
     '</head><body>',
     cleanedBody,
     '</body></html>',
@@ -967,6 +978,13 @@ export function sanitizeEmailHtml(html: string): string {
   return parsed.body.innerHTML;
 }
 
+/** Whether the (sanitized) html references remote content: drives the
+ *  load-images banner, which should not promise an action for mail that
+ *  ships no remote references at all. */
+export function hasRemoteContent(html: string): boolean {
+  return /(?:\bsrc|\bbackground|\bsrcset)\s*=\s*["']?\s*(?:https?:)?\/\//i.test(html);
+}
+
 /** Best-effort RFC 2047 encoded-word decoder for display. Mail stored
  *  before the server-side decoder exists (and any provider quirk it may
  *  not cover) still shows readable subjects instead of `=?UTF-8?B?...?=`.
@@ -997,6 +1015,11 @@ export function decodeMimeWords(value: string): string {
       out += rest.slice(start, start + consumed);
     }
     rest = rest.slice(start + consumed);
+    // A doubly-terminated word (`...?=?=`) leaves a stray terminator; after a
+    // decoded word it can only be that artifact, never real prose.
+    if (decoded !== null && rest.startsWith('?=')) {
+      rest = rest.slice(2);
+    }
   }
   return out + rest;
 }

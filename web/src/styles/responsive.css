@@ -247,8 +247,25 @@
 
   .reader__date {
     font-size: 10.5px;
-    max-width: 42%;
-    white-space: normal;
+    max-width: 40%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* First paint shows the message, not chrome: the top quiet action pair
+     duplicates the bottom actions, and the verdict chips collapse. */
+  .reader__bar-actions {
+    display: none;
+  }
+
+  .verdicts {
+    gap: 5px;
+  }
+
+  .verdict {
+    padding: 1px 6px;
+    font-size: 10px;
   }
 
   .reader__subject {

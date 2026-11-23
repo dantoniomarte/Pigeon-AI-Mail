@@ -2244,6 +2244,58 @@ fn seed_stored_message(
     reserved
 }
 
+/// Seed an outbound message in the sent folder with a multipart-style body,
+/// mirroring what `pigeon-smtp` stores for mail the queue handed to the wire.
+fn seed_stored_outbound(state: &AppState, account_id: i64, subject: &str, body: &[u8]) -> i64 {
+    let reserved = state.store.reserve_message_id().expect("reserve id");
+    let aad = format!("account:{account_id}:message:{reserved}");
+    // Same key split as the real ingest: a fresh content key seals the body,
+    // the master key wraps it into the lifecycle row.
+    let content_key = pigeon_crypto::generate_content_key();
+    let wrapped_key = state
+        .master_key
+        .wrap_content_key(&content_key, aad.as_bytes())
+        .expect("wrap key");
+    let sealed =
+        pigeon_crypto::seal_content(&content_key, body, aad.as_bytes()).expect("seal body");
+    state
+        .store
+        .insert_message(
+            NewMessage {
+                account_id,
+                direction: Direction::Out,
+                from_addr: EmailAddress::parse("owner@example.com").expect("sender"),
+                to_addrs: vec![EmailAddress::parse("friend@example.net").expect("recipient")],
+                subject: subject.to_string(),
+                sealed_body: sealed,
+                idempotency_key: None,
+                delivered_for: None,
+            },
+            reserved,
+        )
+        .expect("insert message");
+    state
+        .store
+        .set_message_folder(reserved, MessageFolder::Sent)
+        .expect("move message");
+    state
+        .db
+        .insert_email(&pigeon_api::db::NewEmail {
+            account_id,
+            message_id: reserved,
+            public_id: format!("eml_seed{reserved:06}"),
+            status: "sent".to_string(),
+            to_addrs: vec!["friend@example.net".to_string()],
+            cc_addrs: Vec::new(),
+            tags: Vec::new(),
+            sandbox: false,
+            e2e: "sealed".to_string(),
+            wrapped_key,
+        })
+        .expect("insert email lifecycle row");
+    reserved
+}
+
 /// Rewrite `messages.trashed_at` to `now + offset` (`'-40 days'`) on the file the
 /// API is using. The store only writes `datetime('now')`, so this is the only way
 /// to reach the expired state the purge is supposed to act on.
@@ -4575,4 +4627,42 @@ async fn the_override_list_matches_case_insensitively() {
     assert!(config.is_plaintext_override("legacy.example"));
     assert!(config.is_plaintext_override("LEGACY.EXAMPLE"));
     assert!(!config.is_plaintext_override("other.example"));
+}
+
+#[tokio::test]
+async fn sent_email_reads_back_its_body_with_sealed_false() {
+    let app = TestApp::new();
+    // What the queue stores is the wire document: full MIME, not a bare body.
+    let body = b"Content-Type: multipart/alternative;\r\n boundary=\"b-out\"\r\n\r\n\
+        --b-out\r\n\
+        Content-Type: text/plain; charset=utf-8\r\n\r\n\
+        Sent copy plain\r\n\
+        --b-out\r\n\
+        Content-Type: text/html; charset=utf-8\r\n\r\n\
+        <h2>Sent copy</h2><p>render me</p>\r\n\
+        --b-out--\r\n";
+    seed_stored_outbound(&app.state, app.account_id, "my sent copy", body);
+    let public = app
+        .state
+        .db
+        .email_page(app.account_id, 10, 0, None, None)
+        .expect("page")
+        .0
+        .first()
+        .expect("seeded email row")
+        .public_id
+        .clone();
+
+    let response = app
+        .get(
+            &format!("/v1/messages/{public}?sealed=false"),
+            Some(&app.full_key),
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::OK, "{:?}", response.body);
+    assert_eq!(response.body["subject"], "my sent copy");
+    assert_eq!(
+        response.body["body_html"],
+        "<h2>Sent copy</h2><p>render me</p>"
+    );
 }

@@ -460,9 +460,6 @@ pub async fn get_message(
     Query(params): Query<Params>,
 ) -> Response {
     let result = blocking(move || {
-        if !ids::is_well_formed(&id, ids::MSG) {
-            return Err(not_found(format!("{id:?} is not a msg_ id")));
-        }
         let sealed = bool_param(&params, "sealed", true)?;
         // Checked before touching the database: plaintext is refused on the
         // credential, not on whether a body happens to exist.
@@ -471,16 +468,40 @@ pub async fn get_message(
                 "decrypted bodies require an API key with the `full` scope; use the default sealed view",
             ));
         }
-        let Some(stored) = state
-            .db
-            .message_by_public_id(context.account_id, &id)
-            .map_err(Problem::from)?
-        else {
+        // The webmail sent reader walks the `/v1/emails` list, so it holds the
+        // `eml_` lifecycle id; mailbox rows carry the `msg_` id. Both shapes
+        // resolve to the same owned row; everything after this point uses the
+        // row itself instead of re-resolving the raw id.
+        let well_formed_msg = ids::is_well_formed(&id, ids::MSG);
+        let well_formed_eml = ids::is_well_formed(&id, ids::EML);
+        if !well_formed_msg && !well_formed_eml {
+            return Err(not_found(format!("{id:?} is not a msg_ or eml_ id")));
+        }
+        let stored = if well_formed_msg {
+            state
+                .db
+                .message_by_public_id(context.account_id, &id)
+                .map_err(Problem::from)?
+        } else {
+            match state
+                .db
+                .email_by_public_id(context.account_id, &id)
+                .map_err(Problem::from)?
+            {
+                Some(row) => state
+                    .db
+                    .message_by_row_id(context.account_id, row.message_id)
+                    .map_err(Problem::from)?,
+                None => None,
+            }
+        };
+        let Some(stored) = stored else {
             return Err(not_found(format!("message {id} not found")));
         };
-        if stored.direction != "in" {
-            return Err(not_found(format!("{id} is an outbound email, not a message")));
-        }
+        // Outbound mail carries the same sealed copy the wire received (the
+        // queue stores exactly what it handed over), so `sealed=false` reads
+        // it back the same way: the webmail sent reader needs the body, not
+        // just the lifecycle metadata of `/v1/emails`.
         let attachments = attachment_views(&state, stored.message_id)?;
         if sealed {
             return Ok(MessageResponse::Sealed(SealedMessageView {

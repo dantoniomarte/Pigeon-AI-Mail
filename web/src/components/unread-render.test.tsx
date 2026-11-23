@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 import MailList, { type MailListProps } from './MailList';
 import MailView from './MailView';
 import type { MessageDetail } from '../api';
+import * as apiModule from '../api';
 
 function mailListProps(items: MailListProps['items']): MailListProps {
   return {
@@ -90,14 +91,18 @@ function mailViewProps(): Parameters<typeof MailView>[0] {
 describe('html message rendering', () => {
   it('renders an html body inside a sandboxed frame, never flattened text', () => {
     const props = mailViewProps();
-    props.message = messageFixture({ body_html: '<h2>Title</h2><p>Body copy</p>' });
+    props.message = messageFixture({
+      body_html: '<h2>Title</h2><p>Body copy</p><img src="https://cdn.example/pic.png" alt="pic">',
+    });
     render(<MailView {...props} />);
 
     const frame = screen.getByTitle('Message body');
     expect(frame.tagName).toBe('IFRAME');
     const sandbox = frame.getAttribute('sandbox') ?? '';
     expect(sandbox).toContain('allow-popups');
-    expect(sandbox).not.toContain('allow-scripts');
+    // Scripts may exist only because the CSP allows exactly our height
+    // bootstrap; the frame origin stays opaque (no same-origin).
+    expect(sandbox).toContain('allow-scripts');
     expect(sandbox).not.toContain('allow-same-origin');
 
     const doc = frame.getAttribute('srcdoc') ?? '';
@@ -112,6 +117,13 @@ describe('html message rendering', () => {
 
     // The old "text was extracted" fallback must be gone for html bodies.
     expect(screen.queryByText(/extracted for safe reading/)).not.toBeInTheDocument();
+  });
+
+  it('shows no images banner when the mail ships no remote content', () => {
+    const props = mailViewProps();
+    props.message = messageFixture({ body_html: '<h2>Title</h2><p>Body copy</p>' });
+    render(<MailView {...props} />);
+    expect(screen.queryByRole('button', { name: 'Load images' })).not.toBeInTheDocument();
   });
 
   it('rebuilds the frame with remote images allowed after the explicit action', async () => {
@@ -252,5 +264,39 @@ describe('dark scheme sender paint neutralization', () => {
     render(<MailView {...props} />);
     const doc = screen.getByTitle('Message body').getAttribute('srcdoc') ?? '';
     expect(doc).toContain('#0f6b5c');
+  });
+});
+
+describe('sent reader body', () => {
+  it('fetches the sent body through the message route and renders it', async () => {
+    const fetchMessage = vi.fn().mockResolvedValue({
+      data: {
+        id: 'eml_1',
+        from_addr: 'owner@example.com',
+        subject: 'my sent copy',
+        created_at: '2026-02-03T10:00:00Z',
+        body_html: '<h2>Sent copy</h2><p>render me</p>',
+      },
+      demo: false,
+    });
+    vi.spyOn(apiModule, 'fetchMessage').mockImplementation(fetchMessage);
+
+    const props = { ...mailViewProps(), mode: 'sent' as const, sentStatus: 'sent' as const };
+    props.message = {
+      id: 'eml_1',
+      from_addr: 'owner@example.com',
+      subject: 'my sent copy',
+      created_at: '2026-02-03T10:00:00Z',
+    };
+    render(<MailView {...props} />);
+
+    await vi.waitFor(() => expect(fetchMessage).toHaveBeenCalledWith(null, 'eml_1'));
+    await vi.waitFor(() => expect(screen.getByTitle('Message body')).toBeInTheDocument());
+    const doc = screen.getByTitle('Message body').getAttribute('srcdoc') ?? '';
+    expect(doc).toContain('<h2>Sent copy</h2>');
+    // The metadata-only note is gone once the body arrives.
+    await vi.waitFor(() =>
+      expect(screen.queryByText(/sealed body stays on the server/i)).not.toBeInTheDocument(),
+    );
   });
 });

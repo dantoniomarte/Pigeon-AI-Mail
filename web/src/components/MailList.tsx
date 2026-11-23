@@ -398,7 +398,7 @@ export default function MailList({
           <PigeonArt size={190} />
           <h3>{searching ? t('mail.emptySearchTitle') : emptyCopy.title}</h3>
           <p>{searching ? t('mail.emptySearchBody') : emptyCopy.body}</p>
-          {!searching && view === 'inbox' ? (
+          {!searching && (view === 'inbox' || view === 'sent') ? (
             <button type="button" className="btn btn--primary" onClick={onCompose}>
               {t('nav.compose')}
             </button>
@@ -642,9 +642,9 @@ export default function MailList({
                               </span>
                             </span>
                             <span className="mail-row__subject">{decodeMimeWords(item.subject ?? '')}</span>
-                            <span className="mail-row__preview">
-                              {item.preview ?? (item.encrypted ? t('mail.previewLocked') : '')}
-                            </span>
+                            {item.preview !== null && item.preview.length > 0 ? (
+                              <span className="mail-row__preview">{item.preview}</span>
+                            ) : null}
                             <span className="mail-row__badges">
                               {item.encrypted ? (
                                 <span className="badge badge--enc">

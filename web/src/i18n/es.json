@@ -123,6 +123,7 @@
     "sealedBody": "Este mensaje sigue sellado. Una clave con el alcance full puede descifrarlo.",
     "noBody": "Este mensaje no tiene un cuerpo legible.",
     "sentNote": "Los mensajes enviados guardan solo los metadatos y el estado de entrega: el cuerpo sellado queda en el servidor.",
+    "sentBodyError": "No se pudo cargar el cuerpo de este mensaje enviado.",
     "markRead": "Marcar como leído",
     "markUnread": "Marcar como no leído",
     "toSpam": "Marcar como spam",

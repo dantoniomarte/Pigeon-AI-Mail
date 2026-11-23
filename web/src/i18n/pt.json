@@ -123,6 +123,7 @@
     "sealedBody": "Esta mensagem continua selada. Uma chave com escopo full pode descriptografá-la.",
     "noBody": "Esta mensagem não tem um corpo legível.",
     "sentNote": "Mensagens enviadas guardam apenas metadados e o status de entrega — o corpo selado fica no servidor.",
+    "sentBodyError": "Não foi possível carregar o corpo desta mensagem enviada.",
     "markRead": "Marcar como lido",
     "markUnread": "Marcar como não lido",
     "toSpam": "Marcar como spam",

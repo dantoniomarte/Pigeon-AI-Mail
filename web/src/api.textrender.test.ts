@@ -65,11 +65,17 @@ describe('buildEmailFrame', () => {
         '<object data="x"></object><embed src="x"><img src="https://cdn.example/x.png" onerror="steal()">',
       false,
     );
-    expect(doc).not.toContain('<script');
+    // Sender scripts are gone; the frame ships exactly one script (the
+    // height bootstrap injected after the body html, not sender markup).
+    const body = doc.slice(doc.indexOf('<body>'));
+    expect(body).not.toContain('<script');
     expect(doc).not.toContain('<iframe');
     expect(doc).not.toContain('<object');
     expect(doc).not.toContain('<embed');
     expect(doc).not.toContain('onerror');
+    expect(doc.match(/<script/g)).toHaveLength(1);
+    expect(doc).toContain('pigeon-frame-height');
+    expect(doc).toContain("script-src 'unsafe-inline'");
     expect(doc).toContain('<p>hi</p>');
   });
 });

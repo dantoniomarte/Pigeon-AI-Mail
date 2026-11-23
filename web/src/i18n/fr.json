@@ -123,6 +123,7 @@
     "sealedBody": "Ce message est encore scellé. Une clé avec la portée full peut le déchiffrer.",
     "noBody": "Ce message n’a pas de corps lisible.",
     "sentNote": "Les messages envoyés ne gardent que les métadonnées et le statut de livraison — le corps scellé reste sur le serveur.",
+    "sentBodyError": "Impossible de charger le corps de ce message envoyé.",
     "markRead": "Marquer comme lu",
     "markUnread": "Marquer comme non lu",
     "toSpam": "Signaler comme indésirable",

@@ -719,8 +719,8 @@ body {
   z-index: 2;
   margin: 8px 8px 2px;
   padding: 5px 2px;
-  background: color-mix(in srgb, var(--surface) 90%, transparent);
-  backdrop-filter: blur(8px);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
   color: var(--muted);
   font-size: 10.5px;
   font-weight: 680;
@@ -764,16 +764,17 @@ body {
   color: var(--text-soft);
 }
 
-.mail-row.is-unread .mail-row__time {
-  color: var(--accent);
-}
-
 /* The row being read: neutral fill plus an accent ring, deliberately not the
    unread tint (an open email is no longer unread). Overrides the unread
    bar+box-shadow when a row is both, so the ring reads as the final state. */
 .mail-row.is-selected {
   background: var(--surface-2);
   box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+:root[data-theme='dark'] .mail-row.is-selected {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 60%, transparent);
 }
 
 .mail-row:focus-visible {
@@ -784,13 +785,13 @@ body {
   --avatar-hue: 18;
   display: grid;
   place-items: center;
-  width: 36px;
-  height: 36px;
+  width: 30px;
+  height: 30px;
   flex: none;
-  border-radius: 11px;
+  border-radius: 9px;
   background: hsl(var(--avatar-hue) 74% 92%);
   color: hsl(var(--avatar-hue) 48% 34%);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.02em;
 }
@@ -837,15 +838,23 @@ body {
   color: var(--muted);
   font-size: 10.5px;
   font-variant-numeric: tabular-nums;
+  transition: opacity var(--dur-1) var(--ease);
+}
+
+@media (hover: hover) {
+  .mail-group__list li:hover .mail-row__time {
+    opacity: 0;
+  }
 }
 
 .mail-row__subject {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
   overflow: hidden;
   color: var(--text);
   font-size: 13.5px;
   font-weight: 520;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .mail-row__preview {
@@ -902,9 +911,9 @@ body {
 }
 
 .badge--enc {
-  border-color: color-mix(in srgb, var(--enc) 22%, transparent);
-  background: var(--enc-soft);
-  color: var(--enc);
+  border-color: var(--border);
+  background: var(--surface-2);
+  color: var(--muted);
 }
 
 .badge--demo {
@@ -1181,7 +1190,7 @@ body {
 }
 
 .reader__body a {
-  color: var(--accent);
+  color: var(--accent-strong);
   text-underline-offset: 2px;
 }
 
@@ -1217,9 +1226,11 @@ body {
 
 /* Dark theme: the frame box must not paint white under a dark email
    document — light text over the white box was the reported illegibility
-   (JD-B-001). The app surface shows through instead. */
+   (JD-B-001). A hairline of light keeps the email boundary perceivable
+   without repainting the white void. */
 :root[data-theme='dark'] .reader__frame {
-  background: transparent;
+  background: rgba(255, 255, 255, 0.02);
+  border-color: rgba(255, 255, 255, 0.16);
 }
 
 .reader__body p:last-child {
@@ -3409,9 +3420,10 @@ body[data-motion="off"] .mail-row__actions {
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
-/* A permanent gutter keeps the rows from jumping when the box fades in. */
+/* The checkbox overlays the row edge and fades in on hover/focus/checked;
+   no permanent gutter so the subject column gets the full width. */
 .mail-row--selectable {
-  padding-left: 38px;
+  padding-left: 12px;
 }
 
 .mail-row__select {

@@ -25,6 +25,8 @@ import {
   avatarHue,
   buildEmailFrame,
   decodeMimeWords,
+  fetchMessage,
+  hasRemoteContent,
   displayName,
   emailAddress,
   formatSize,
@@ -151,6 +153,56 @@ export default function MailView({
   useEffect(() => {
     setRemoteImages(false);
   }, [message?.id]);
+  // The sandboxed frame reports its rendered height; sized to content (bounded)
+  // so short mail does not show a tall empty panel or push actions off-screen.
+  const [frameHeight, setFrameHeight] = useState<number | null>(null);
+  useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      const data = event.data as { type?: string; value?: number } | null;
+      if (
+        data !== null &&
+        typeof data === 'object' &&
+        data.type === 'pigeon-frame-height' &&
+        typeof data.value === 'number' &&
+        Number.isFinite(data.value) &&
+        data.value > 0
+      ) {
+        setFrameHeight(Math.min(760, Math.max(240, Math.ceil(data.value))));
+      }
+    };
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+  }, []);
+  useEffect(() => {
+    setFrameHeight(null);
+  }, [message?.id]);
+  // Sent rows arrive as lifecycle metadata (`/v1/emails`); the body lives
+  // behind the message route, so the reader fetches it once per sent message.
+  const [sentBody, setSentBody] = useState<MessageDetail | null>(null);
+  const [sentBodyState, setSentBodyState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  useEffect(() => {
+    if (mode !== 'sent' || message === null) {
+      setSentBody(null);
+      setSentBodyState('idle');
+      return;
+    }
+    let cancelled = false;
+    setSentBodyState('loading');
+    setSentBody(null);
+    void fetchMessage(null, message.id)
+      .then((result) => {
+        if (cancelled) return;
+        setSentBody(result.data);
+        setSentBodyState('ready');
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setSentBodyState('error');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [mode, message]);
 
   // J/K and the arrow keys walk the list the reader was opened from, as long as
   // the user is not typing somewhere and no other handler took the key first.
@@ -297,27 +349,64 @@ export default function MailView({
         </div>
 
         <div className={`reader__body${body !== null && 'html' in body ? ' reader__body--html' : ''}`}>
-          {isSent ? (
-            <p className="reader__note">{t('mail.sentNote')}</p>
+          {isSent && sentBodyState === 'loading' ? (
+            <div aria-busy="true" aria-label={t('common.loading')}>
+              <span className="skeleton skeleton--line" />
+              <span className="skeleton skeleton--line skeleton--short" />
+              <span className="skeleton skeleton--line" />
+            </div>
+          ) : isSent && sentBodyState === 'error' ? (
+            <p className="reader__note">{t('mail.sentBodyError')}</p>
+          ) : isSent && sentBody !== null && sentBody.body_html !== undefined && sentBody.body_html.trim().length > 0 ? (
+            <>
+              {hasRemoteContent(sentBody.body_html) ? (
+                <p className="reader__note reader__images-note">
+                  <span>{remoteImages ? t('mail.remoteImagesOn') : t('mail.remoteImagesOff')}</span>
+                  <button
+                    type="button"
+                    className="btn btn--ghost reader__images-toggle"
+                    onClick={() => setRemoteImages((value) => !value)}
+                  >
+                    {remoteImages ? t('mail.blockImages') : t('mail.loadImages')}
+                  </button>
+                </p>
+              ) : null}
+              <iframe
+                className="reader__frame"
+                title={t('mail.messageBody')}
+                sandbox="allow-popups allow-popups-to-escape-sandbox allow-scripts"
+                style={frameHeight !== null ? { height: `${frameHeight}px` } : undefined}
+                srcDoc={buildEmailFrame(sentBody.body_html, remoteImages, scheme)}
+              />
+            </>
+          ) : isSent && sentBody !== null && sentBody.body_text !== undefined && sentBody.body_text.trim().length > 0 ? (
+            sentBody.body_text.split(/\n{2,}/).map((paragraph, index) => (
+              <TextParagraph key={index} value={paragraph} />
+            ))
+          ) : isSent ? (
+            <p className="reader__note">{t('mail.sentBodyError')}</p>
           ) : body !== null && 'html' in body ? (
             <>
-              <p className="reader__note reader__images-note">
-                <span>{remoteImages ? t('mail.remoteImagesOn') : t('mail.remoteImagesOff')}</span>
-                <button
-                  type="button"
-                  className="btn btn--ghost reader__images-toggle"
-                  onClick={() => setRemoteImages((value) => !value)}
-                >
-                  {remoteImages ? t('mail.blockImages') : t('mail.loadImages')}
-                </button>
-              </p>
+              {hasRemoteContent(body.html) ? (
+                <p className="reader__note reader__images-note">
+                  <span>{remoteImages ? t('mail.remoteImagesOn') : t('mail.remoteImagesOff')}</span>
+                  <button
+                    type="button"
+                    className="btn btn--ghost reader__images-toggle"
+                    onClick={() => setRemoteImages((value) => !value)}
+                  >
+                    {remoteImages ? t('mail.blockImages') : t('mail.loadImages')}
+                  </button>
+                </p>
+              ) : null}
               {/* Scripts and same-origin are excluded on purpose: an email is
                   untrusted input, and the CSP inside the frame is the second
                   layer behind the sandbox. */}
               <iframe
                 className="reader__frame"
                 title={t('mail.messageBody')}
-                sandbox="allow-popups allow-popups-to-escape-sandbox"
+                sandbox="allow-popups allow-popups-to-escape-sandbox allow-scripts"
+                style={frameHeight !== null ? { height: `${frameHeight}px` } : undefined}
                 srcDoc={buildEmailFrame(body.html, remoteImages, scheme)}
               />
             </>

@@ -572,6 +572,32 @@ impl ApiDb {
         }))
     }
 
+    /// Load one stored message by its internal row id (same ownership checks
+    /// as [`Self::message_by_public_id`], for callers that resolved the row
+    /// through another route — the `eml_` lifecycle id, for instance).
+    pub fn message_by_row_id(
+        &self,
+        account_id: i64,
+        message_id: i64,
+    ) -> store::Result<Option<StoredMessage>> {
+        let conn = self.lock();
+        let message = conn
+            .query_row(
+                "SELECT m.id, m.direction, m.from_addr, m.to_addrs, m.subject, \
+                        m.sealed_body, m.created_at, a.wrapped_key, m.delivered_for \
+                   FROM messages m \
+                   LEFT JOIN api_messages a ON a.message_id = m.id \
+                  WHERE m.id = ?1 AND m.account_id = ?2",
+                params![message_id, account_id],
+                map_stored_message,
+            )
+            .optional()?;
+        Ok(message.map(|mut message| {
+            message.public_id = crate::ids::derived(crate::ids::MSG, message_id);
+            message
+        }))
+    }
+
     // ----------------------------------------------------------- attachments
 
     /// Store one sealed attachment blob; returns the row id.

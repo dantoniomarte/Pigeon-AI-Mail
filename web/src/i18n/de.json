@@ -123,6 +123,7 @@
     "sealedBody": "Diese Nachricht ist noch versiegelt. Ein Schlüssel mit dem Scope full kann sie entschlüsseln.",
     "noBody": "Diese Nachricht hat keinen lesbaren Inhalt.",
     "sentNote": "Gesendete Nachrichten behalten nur Metadaten und Zustellstatus — der versiegelte Inhalt bleibt auf dem Server.",
+    "sentBodyError": "Der Inhalt dieser gesendeten Nachricht konnte nicht geladen werden.",
     "markRead": "Als gelesen markieren",
     "markUnread": "Als ungelesen markieren",
     "toSpam": "Als Spam melden",

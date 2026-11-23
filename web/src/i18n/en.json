@@ -123,6 +123,7 @@
     "sealedBody": "This message is still sealed. A key with the full scope can decrypt it.",
     "noBody": "This message has no readable body.",
     "sentNote": "Sent messages keep metadata and delivery status only — the sealed body stays on the server.",
+    "sentBodyError": "Couldn't load the body of this sent message.",
     "markRead": "Mark as read",
     "markUnread": "Mark as unread",
     "toSpam": "Report spam",
