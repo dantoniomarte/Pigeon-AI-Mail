@@ -772,6 +772,12 @@ body {
   box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 45%, transparent);
 }
 
+.mail-row.is-selected:not(.is-unread) .mail-row__from,
+.mail-row.is-selected:not(.is-unread) .mail-row__subject {
+  color: var(--text);
+  font-weight: 520;
+}
+
 :root[data-theme='dark'] .mail-row.is-selected {
   background: color-mix(in srgb, var(--accent) 16%, transparent);
   box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 60%, transparent);
@@ -878,6 +884,18 @@ body {
 .mail-row.is-unread .mail-row__from {
   color: var(--text);
   font-weight: 650;
+}
+
+/* A read row is deliberately quieter than unread: muted from + subject so
+   browsing old mail never reads as "another unread one". */
+.mail-row:not(.is-unread) .mail-row__from {
+  color: var(--muted);
+  font-weight: 460;
+}
+
+.mail-row:not(.is-unread) .mail-row__subject {
+  color: var(--text-soft);
+  font-weight: 460;
 }
 
 .mail-row.is-unread .mail-row__subject {

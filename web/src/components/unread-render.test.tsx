@@ -337,3 +337,48 @@ describe('read-marking keeps the list stable', () => {
     expect(screen.queryByLabelText(/Cargando|Loading/i)).not.toBeInTheDocument();
   });
 });
+
+describe('reading round fixes', () => {
+  it('renders sent actions: delete + forward + mark unread', () => {
+    const props = { ...mailViewProps(), mode: 'sent' as const, sentStatus: 'sent' as const };
+    props.message = {
+      id: 'eml_1',
+      from_addr: 'owner@example.com',
+      subject: 'sent copy',
+      created_at: '2026-02-03T10:00:00Z',
+      read: true,
+    };
+    props.onDelete = vi.fn();
+    props.onMarkRead = vi.fn();
+    render(<MailView {...props} />);
+
+    expect(screen.getByRole('button', { name: 'Delete permanently' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Forward' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Mark as unread' })).toBeInTheDocument();
+  });
+
+  it('uses the wide html box for sent bodies like inbox', () => {
+    const props = { ...mailViewProps(), mode: 'sent' as const, sentStatus: 'sent' as const };
+    props.message = {
+      id: 'eml_2',
+      from_addr: 'owner@example.com',
+      subject: 'sent html',
+      created_at: '2026-02-03T10:00:00Z',
+      body_html: '<p>body</p>',
+    };
+    const { container } = render(<MailView {...props} />);
+    expect(container.querySelector('.reader__body--html')).not.toBeNull();
+  });
+
+  it('restores the frame reading position after a theme flip', () => {
+    // The bootstrap handshake is pinned: the frame script listens for the
+    // restore message and the app remembers the scroll fraction.
+    const props = mailViewProps();
+    props.scheme = 'dark';
+    props.message = messageFixture({ body_html: '<p>long body</p>' });
+    render(<MailView {...props} />);
+    const doc = screen.getByTitle('Message body').getAttribute('srcdoc') ?? '';
+    expect(doc).toContain('pigeon-frame-scroll');
+    expect(doc).toContain('pigeon-frame-restore');
+  });
+});

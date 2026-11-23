@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   AlertTriangle,
@@ -156,6 +156,10 @@ export default function MailView({
   // The sandboxed frame reports its rendered height; sized to content (bounded)
   // so short mail does not show a tall empty panel or push actions off-screen.
   const [frameHeight, setFrameHeight] = useState<number | null>(null);
+  // O1: switching the theme rebuilds the frame document (new srcDoc), which
+  // resets its scroll to the top. Remember the reading fraction so the
+  // rebuilt document can restore it.
+  const frameScrollRef = useRef<number | null>(null);
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {
       const data = event.data as { type?: string; value?: number } | null;
@@ -176,6 +180,26 @@ export default function MailView({
   useEffect(() => {
     setFrameHeight(null);
   }, [message?.id]);
+  // O1: after the theme changes the frame document is rebuilt; restore the
+  // remembered reading position once the new document reports its height.
+  const schemeRef = useRef(scheme);
+  useEffect(() => {
+    const flipped = schemeRef.current !== scheme;
+    schemeRef.current = scheme;
+    if (!flipped || frameHeight === null || frameScrollRef.current === null) {
+      return;
+    }
+    const value = frameScrollRef.current;
+    const timer = window.setTimeout(() => {
+      for (const frame of Array.from(document.querySelectorAll<HTMLIFrameElement>('iframe.reader__frame'))) {
+        frame.contentWindow?.postMessage(
+          { type: 'pigeon-frame-restore', value },
+          '*',
+        );
+      }
+    }, 120);
+    return () => window.clearTimeout(timer);
+  }, [scheme, frameHeight]);
   // Sent rows arrive as lifecycle metadata (`/v1/emails`); the body lives
   // behind the message route, so the reader fetches it once per sent message.
   const [sentBody, setSentBody] = useState<MessageDetail | null>(null);
@@ -348,7 +372,7 @@ export default function MailView({
           ) : null}
         </div>
 
-        <div className={`reader__body${body !== null && 'html' in body ? ' reader__body--html' : ''}`}>
+        <div className={`reader__body${(body !== null && 'html' in body) || (isSent && sentBody !== null && sentBody.body_html !== undefined && sentBody.body_html.trim().length > 0) ? ' reader__body--html' : ''}`}>
           {isSent && sentBodyState === 'loading' ? (
             <div aria-busy="true" aria-label={t('common.loading')}>
               <span className="skeleton skeleton--line" />
@@ -443,25 +467,49 @@ export default function MailView({
           </div>
         ) : null}
 
-        {isSent && onDelete !== undefined && message !== null ? (
+        {isSent && message !== null && (onDelete !== undefined || onMarkRead !== undefined) ? (
           <div className="reader__actions">
+            {onMarkRead !== undefined && message.read ? (
+              <button
+                type="button"
+                className="btn btn--ghost"
+                onClick={() => onMarkRead(message.id, false)}
+                aria-label={t('mail.markUnread')}
+                title={t('mail.markUnread')}
+              >
+                <Mail size={16} aria-hidden="true" />
+                {t('mail.markUnread')}
+              </button>
+            ) : null}
             <button
               type="button"
-              className={`btn ${confirmDelete ? 'btn--danger' : 'btn--ghost'} reader__delete`}
-              onClick={() => {
-                if (!confirmDelete) {
-                  setConfirmDelete(true);
-                  return;
-                }
-                setConfirmDelete(false);
-                onDelete(message.id);
-              }}
-              aria-label={confirmDelete ? t('mail.confirmDelete') : t('mail.deleteForever')}
-              title={confirmDelete ? t('mail.confirmDelete') : t('mail.deleteForever')}
+              className="btn btn--ghost"
+              onClick={() => onForward(message)}
+              aria-label={t('mail.forward')}
+              title={t('mail.forward')}
             >
-              <Trash2 size={16} aria-hidden="true" />
-              <span>{confirmDelete ? t('mail.confirmDelete') : t('mail.deleteForever')}</span>
+              <Forward size={16} aria-hidden="true" />
+              {t('mail.forward')}
             </button>
+            {onDelete !== undefined ? (
+              <button
+                type="button"
+                className={`btn ${confirmDelete ? 'btn--danger' : 'btn--ghost'} reader__delete`}
+                onClick={() => {
+                  if (!confirmDelete) {
+                    setConfirmDelete(true);
+                    return;
+                  }
+                  setConfirmDelete(false);
+                  onDelete(message.id);
+                }}
+                aria-label={confirmDelete ? t('mail.confirmDelete') : t('mail.deleteForever')}
+                title={confirmDelete ? t('mail.confirmDelete') : t('mail.deleteForever')}
+              >
+                <Trash2 size={16} aria-hidden="true" />
+                <span>{confirmDelete ? t('mail.confirmDelete') : t('mail.deleteForever')}</span>
+              </button>
+            ) : null}
           </div>
         ) : !isSent ? (
           <div className="reader__actions">

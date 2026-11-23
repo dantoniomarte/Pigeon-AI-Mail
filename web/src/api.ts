@@ -1124,9 +1124,12 @@ export function buildEmailFrame(
   // inline scripts) and reports the rendered height for auto-sizing.
   const heightScript =
     '<script>(function(){var send=function(){parent.postMessage({type:"pigeon-frame-height",value:Math.max(document.body.getBoundingClientRect().bottom,document.documentElement.clientHeight?0:0)+12},"*")};' +
+    'var sendScroll=function(){var d=document.documentElement;var max=d.scrollHeight-d.clientHeight;if(max>0){parent.postMessage({type:"pigeon-frame-scroll",value:d.scrollTop/max},"*")}};' +
     'window.addEventListener("load",function(){send();requestAnimationFrame(send);setTimeout(send,400)});' +
     'if(document.fonts&&document.fonts.ready)document.fonts.ready.then(send);' +
     'var images=document.querySelectorAll("img");for(var i=0;i<images.length;i++){images[i].addEventListener("load",send)};' +
+    'var t=null;window.addEventListener("scroll",function(){if(t===null){t=window.setTimeout(function(){t=null;sendScroll()},250)}},{passive:true});' +
+    'window.addEventListener("message",function(e){var d=e.data||{};if(d.type==="pigeon-frame-restore"&&typeof d.value==="number"&&d.value>0&&d.value<1){var dd=document.documentElement;var max=dd.scrollHeight-dd.clientHeight;if(max>0){window.scrollTo(0,max*d.value)}}},{passive:true});' +
     '})()</script>';
   return [
     '<!doctype html>',
