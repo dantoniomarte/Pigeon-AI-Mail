@@ -762,8 +762,6 @@ const URL_PATTERN = /https?:\/\/[^\s<>"')\]]+|www\.[^\s<>"')\]]+/gi;
   // document is rendered, so the lifted palette applies uniformly. Legibility
   // wins over per-element fidelity (mark/CTA backgrounds flatten, text stays
   // readable).
-  const NEUTRALIZED_DECLARATIONS =
-    /^(color|-webkit-text-fill-color|background|background-color|background-image|filter)$/i;
   // Quote-aware split: a `;` inside '…' or "…" is a separator, not a
   // declaration boundary (JD-A-N2).
   const splitDeclarations = (style: string): string[] => {
@@ -787,22 +785,218 @@ const URL_PATTERN = /https?:\/\/[^\s<>"')\]]+|www\.[^\s<>"')\]]+/gi;
     declarations.push(current);
     return declarations;
   };
-  const neutralizeInlineColors = (fragment: string): string => {
-    const document = new DOMParser().parseFromString(fragment, 'text/html');
-    for (const element of document.querySelectorAll('[style]')) {
-      const kept = splitDeclarations(element.getAttribute('style') ?? '')
+
+  const PAINT_DECLARATIONS =
+    /^(color|-webkit-text-fill-color|background|background-color|background-image|filter)$/i;
+
+  const NAMED_COLORS: Record<string, string> = {
+    white: '#ffffff', black: '#000000', silver: '#c0c0c0', gray: '#808080',
+    grey: '#808080', red: '#ff0000', green: '#008000', blue: '#0000ff',
+    navy: '#000080', teal: '#008080', aqua: '#00ffff', cyan: '#00ffff',
+    maroon: '#800000', purple: '#800080', fuchsia: '#ff00ff', magenta: '#ff00ff',
+    orange: '#ffa500', yellow: '#ffff00', lime: '#00ff00', gold: '#ffd700',
+    ivory: '#fffff0', beige: '#f5f5dc', whitesmoke: '#f5f5f5',
+    ghostwhite: '#f8f8ff', aliceblue: '#f0f8ff', snow: '#fffafa',
+    lightgray: '#d3d3d3', lightgrey: '#d3d3d3', lightblue: '#add8e6',
+    darkgray: '#a9a9a9', darkgrey: '#a9a9a9', darkblue: '#00008b',
+    lightyellow: '#ffffe0', floralwhite: '#fffaf0', oldlace: '#fdf5e6',
+    linen: '#faf0e6', honeydew: '#f0fff0', mintcream: '#f5fffa',
+  };
+
+  interface ParsedFill { r: number; g: number; b: number; a: number }
+
+  const hexToRgb = (hex: string): { r: number; g: number; b: number } | null => {
+    const match = /^#([0-9a-f]{6}|[0-9a-f]{3})$/i.exec(hex);
+    if (match === null) return null;
+    const digits = match[1].length === 3 ? match[1].split('').map((c) => c + c).join('') : match[1];
+    return {
+      r: Number.parseInt(digits.slice(0, 2), 16),
+      g: Number.parseInt(digits.slice(2, 4), 16),
+      b: Number.parseInt(digits.slice(4, 6), 16),
+    };
+  };
+
+  const hslToRgb = (h: number, s: number, l: number): { r: number; g: number; b: number } => {
+    const c = (1 - Math.abs(2 * l - 1)) * s;
+    const hp = h / 60;
+    const x = c * (1 - Math.abs((hp % 2) - 1));
+    let r = 0;
+    let g = 0;
+    let b = 0;
+    if (hp < 1) { r = c; g = x; }
+    else if (hp < 2) { r = x; g = c; }
+    else if (hp < 3) { g = c; b = x; }
+    else if (hp < 4) { g = x; b = c; }
+    else if (hp < 5) { r = x; b = c; }
+    else { r = c; b = x; }
+    const m = l - c / 2;
+    return {
+      r: Math.round((r + m) * 255),
+      g: Math.round((g + m) * 255),
+      b: Math.round((b + m) * 255),
+    };
+  };
+
+  /// Parse a fill into safe numeric components, or null when it is not a
+  /// recognizable, storable color (the raw string is NEVER interpolated into
+  /// the frame stylesheet — judge JD-B-001).
+  const parseFill = (value: string): ParsedFill | null => {
+    const v = value.trim().toLowerCase();
+    if (v.length === 0 || v.length > 40 || /[<>{}/]/.test(v)) return null;
+    if (/^(transparent|none|inherit|currentcolor)$/.test(v)) return null;
+    const named = NAMED_COLORS[v];
+    if (named !== undefined) {
+      const rgb = hexToRgb(named);
+      return rgb !== null ? { ...rgb, a: 1 } : null;
+    }
+    if (v.startsWith('#')) {
+      const rgb = hexToRgb(v);
+      if (rgb === null) return null;
+      if (v.length === 9) {
+        return { ...rgb, a: Number.parseInt(v.slice(7, 9), 16) / 255 };
+      }
+      return { ...rgb, a: 1 };
+    }
+    const rgb = /^rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*(?:,\s*(0?\.?\d+)\s*)?\)$/.exec(v);
+    if (rgb !== null) {
+      const r = Number(rgb[1]);
+      const g = Number(rgb[2]);
+      const b = Number(rgb[3]);
+      if (r > 255 || g > 255 || b > 255) return null;
+      return { r, g, b, a: rgb[4] === undefined ? 1 : Math.min(1, Number(rgb[4])) };
+    }
+    const hsl = /^hsla?\(\s*(\d{1,3})\s*,\s*(\d{1,3})%\s*,\s*(\d{1,3})%\s*(?:,\s*(0?\.?\d+)\s*)?\)$/.exec(v);
+    if (hsl !== null) {
+      const rgb = hslToRgb(Number(hsl[1]), Number(hsl[2]) / 100, Number(hsl[3]) / 100);
+      return { ...rgb, a: hsl[4] === undefined ? 1 : Math.min(1, Number(hsl[4])) };
+    }
+    return null;
+  };
+
+  const luminance = (c: { r: number; g: number; b: number }): number =>
+    0.2126 * (c.r / 255) ** 2.2 + 0.7152 * (c.g / 255) ** 2.2 + 0.0722 * (c.b / 255) ** 2.2;
+
+  const contrastRatio = (
+    fg: { r: number; g: number; b: number },
+    bg: { r: number; g: number; b: number },
+  ): number => {
+    const l1 = luminance(fg);
+    const l2 = luminance(bg);
+    const [hi, lo] = l1 > l2 ? [l1, l2] : [l2, l1];
+    return (hi + 0.05) / (lo + 0.05);
+  };
+
+  /// The composited fill over the app dark surface (fills may be
+  /// translucent, JD-B-003).
+  const compositedFill = (fill: ParsedFill): { r: number; g: number; b: number } => ({
+    r: Math.round(fill.r * fill.a + 23 * (1 - fill.a)),
+    g: Math.round(fill.g * fill.a + 26 * (1 - fill.a)),
+    b: Math.round(fill.b * fill.a + 35 * (1 - fill.a)),
+  });
+
+  const normalize = (c: { r: number; g: number; b: number }): string =>
+    `rgb(${c.r}, ${c.g}, ${c.b})`;
+
+  /// Text color for a preserved surface: the sender's declared color when it
+  /// still clears 3:1 against the composited fill (button chips are bold/large
+  /// text and the sender's palette is the intent), else black/white by
+  /// luminance.
+  const textForFill = (fill: ParsedFill, declared: string | null): string => {
+    const bg = compositedFill(fill);
+    if (declared !== null) {
+      const fg = parseFill(declared);
+      if (fg !== null && fg.a >= 0.5 && contrastRatio({ r: fg.r, g: fg.g, b: fg.b }, bg) >= 3) {
+        return normalize({ r: fg.r, g: fg.g, b: fg.b });
+      }
+    }
+    const white = contrastRatio({ r: 255, g: 255, b: 255 }, bg);
+    const black = contrastRatio({ r: 17, g: 20, b: 24 }, bg);
+    return white >= black ? '#ffffff' : '#111418';
+  };
+
+  /// Sender-declared text color for the surface itself or, on cells, its
+  /// button anchor (read BEFORE the paint strip removes it).
+  const declaredText = (element: Element): string | null => {
+    const sources = [element, element.querySelector('a[href]')].filter(
+      (candidate): candidate is Element => candidate !== null,
+    );
+    for (const source of sources) {
+      const match = (source.getAttribute('style') ?? '').match(
+        /(?:^|;)\s*color\s*:\s*([^;!]+)/i,
+      );
+      if (match !== null && parseFill(match[1].trim()) !== null) {
+        return match[1].trim();
+      }
+    }
+    return null;
+  };
+
+  const declaredFill = (element: Element): string | null => {
+    const bgcolor = element.getAttribute('bgcolor');
+    if (bgcolor !== null && bgcolor.trim().length > 0) return bgcolor.trim();
+    const match = (element.getAttribute('style') ?? '').match(
+      /background(?:-color)?\s*:\s*([^;!]+)/i,
+    );
+    return match !== null ? match[1].trim() : null;
+  };
+
+  /// Preserve only surfaces that read as intentional painted controls:
+  /// a declared fill with real opacity and SHORT button/chip-like text
+  /// (JD-B-005 — long-text containers stay neutralized, no dark glare).
+  const SURFACE_MAX_TEXT = 40;
+
+  // Dark mode is not "strip all paint": intentional painted surfaces — CTA
+  // buttons whose fill lives on the enclosing cell (bgcolor/inline, the
+  // "Visit group"/"View profile" pattern), OTP code chips, header bands with
+  // short titles — are PRESERVED with luminance-picked contrasting text,
+  // while every long-text container stays neutralized by the override layer.
+  const darkAdaptSurfaces = (document: Document): { html: string; keepCss: string } => {
+    const rules: string[] = [];
+    let kept = 0;
+    for (const element of Array.from(document.body.querySelectorAll('*'))) {
+      if (element.tagName === 'BODY') continue;
+      const fillValue = declaredFill(element);
+      const fill = fillValue !== null ? parseFill(fillValue) : null;
+      const text = (element.textContent ?? '').trim();
+      const isSurface =
+        fill !== null &&
+        fill.a >= 0.5 &&
+        text.length > 0 &&
+        text.length <= SURFACE_MAX_TEXT;
+      if (isSurface && fill !== null) {
+        kept += 1;
+        const textColor = textForFill(fill, declaredText(element));
+        // Normalized numeric emission only — never the sender's raw string.
+        const fillCss = normalize({ r: fill.r, g: fill.g, b: fill.b });
+        element.setAttribute('data-pk', String(kept));
+        rules.push(
+          `[data-pk="${kept}"]{background-color:${fillCss}!important;color:${textColor}!important;-webkit-text-fill-color:${textColor}!important}` +
+            `[data-pk="${kept}"] a{background-color:${fillCss}!important;color:${textColor}!important;-webkit-text-fill-color:${textColor}!important}` +
+            `[data-pk="${kept}"] *{color:${textColor}!important;-webkit-text-fill-color:${textColor}!important}` +
+            `[data-pk="${kept}"] a[style*="padding"],[data-pk="${kept}"] a[style*="inline-block"]{background-color:${fillCss}!important;color:${textColor}!important;-webkit-text-fill-color:${textColor}!important}`,
+        );
+      }
+      const style = element.getAttribute('style') ?? '';
+      const keptDeclarations = splitDeclarations(style)
         .filter((declaration) => {
           const name = declaration.split(':')[0]?.trim() ?? '';
-          return name.length > 0 && !NEUTRALIZED_DECLARATIONS.test(name);
+          return (
+            name.length > 0 &&
+            !PAINT_DECLARATIONS.test(name) &&
+            !/[<>{}]/.test(declaration)
+          );
         })
         .join(';');
-      if (kept.length > 0) {
-        element.setAttribute('style', kept);
+      if (keptDeclarations.length > 0) {
+        element.setAttribute('style', keptDeclarations);
       } else {
         element.removeAttribute('style');
       }
+      if (element.hasAttribute('bgcolor')) {
+        element.removeAttribute('bgcolor');
+      }
     }
-    return document.body.innerHTML;
+    return { html: document.body.innerHTML, keepCss: rules.join('') };
   };
 
 /** Detect http(s) and www. URLs in plain text, so long links stay clickable
@@ -889,9 +1083,15 @@ export function buildEmailFrame(
     .map((node) => node.textContent ?? '')
     .join('\n');
   emailDocument.querySelectorAll('style').forEach((node) => node.remove());
-  const cleanedBody = sanitizeEmailHtml(
-    scheme === 'dark' ? neutralizeInlineColors(emailDocument.body.innerHTML) : emailDocument.body.innerHTML,
-  );
+  let keepCss = '';
+  let cleanedBody: string;
+  if (scheme === 'dark') {
+    const adapted = darkAdaptSurfaces(emailDocument);
+    cleanedBody = sanitizeEmailHtml(adapted.html);
+    keepCss = adapted.keepCss;
+  } else {
+    cleanedBody = sanitizeEmailHtml(emailDocument.body.innerHTML);
+  }
   // Emails usually assume a light canvas; their own styles override this.
   // `overflow-wrap: anywhere` keeps unbreakable email URLs inside the frame,
   // and the table/img rules scale fixed-width newsletter layouts down to
@@ -915,7 +1115,7 @@ export function buildEmailFrame(
   //   transparent but make EVERY text light, so dark-on-dark cannot happen.
   // - preserve underline decorations and drop only heavy shadows.
   const darkOverride =
-    '@layer pigeon-dark-email{body{color:#e6edf3!important}*,:before,:after{color:#e6edf3!important;-webkit-text-fill-color:currentColor!important;filter:none!important;opacity:1!important;background-color:transparent!important;background-image:none!important;border-color:rgba(255,255,255,.18)!important;box-shadow:none!important}a{color:#6cb2ff!important}a *{color:#6cb2ff!important}a[style*="inline-block"],a[style*="padding"]{background-color:rgba(108,178,255,.16)!important;border:1px solid rgba(108,178,255,.6)!important}input,textarea,select{background:rgba(255,255,255,.08)!important;color:#e6edf3!important}img,svg,video,canvas{background-color:transparent!important}td,th{border-color:rgba(255,255,255,.18)!important}blockquote{border-left:3px solid rgba(255,255,255,.3)!important;color:#c9d1d9!important}hr{border-color:rgba(255,255,255,.18)!important}}';
+    '@layer pigeon-dark-email{body{color:#e6edf3!important}*,:before,:after{color:#e6edf3!important;-webkit-text-fill-color:currentColor!important;filter:none!important;opacity:1!important;background-color:transparent!important;background-image:none!important;border-color:rgba(255,255,255,.18)!important;box-shadow:none!important}a{color:#6cb2ff!important}a *{color:#6cb2ff!important}:where(a[style*="padding"],a[style*="inline-block"]){background-color:rgba(108,178,255,.12)!important;border:1px solid rgba(108,178,255,.5)!important;border-radius:4px!important}input,textarea,select{background:rgba(255,255,255,.08)!important;color:#e6edf3!important}img,svg,video,canvas{background-color:transparent!important}td,th{border-color:rgba(255,255,255,.18)!important}blockquote{border-left:3px solid rgba(255,255,255,.3)!important;color:#c9d1d9!important}hr{border-color:rgba(255,255,255,.18)!important}}';
 
   const styles = scheme === 'dark' ? darkBase + darkOverride : lightBase;
   // The sandbox keeps the frame origin opaque, so the parent cannot measure
@@ -936,6 +1136,7 @@ export function buildEmailFrame(
     '<base target="_blank">',
     `<style>${styles}</style>`,
     emailCss.length > 0 ? `<style>${emailCss}</style>` : '',
+    keepCss.length > 0 ? `<style>@layer pigeon-dark-email{${keepCss}}</style>` : '',
     heightScript,
     '</head><body>',
     cleanedBody,

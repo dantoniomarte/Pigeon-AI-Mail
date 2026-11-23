@@ -247,10 +247,13 @@ describe('dark scheme sender paint neutralization', () => {
     render(<MailView {...props} />);
 
     const doc = screen.getByTitle('Message body').getAttribute('srcdoc') ?? '';
-    // No sender paint values survive in dark mode (JD-B-002 / JD-B-003).
-    expect(doc).not.toMatch(/color\s*:\s*#fff/i);
-    expect(doc).not.toContain('#0f6b5c');
+    // No raw sender paint survives inline (JD-B-002 / JD-B-003); the green
+    // block is a short painted surface, so it is preserved with its fill and
+    // a contrasting text color.
+    expect(doc).not.toContain('style="color:#fff');
     expect(doc).not.toContain('-webkit-text-fill-color:transparent');
+    expect(doc).toContain('background-color:rgb(15, 107, 92)!important');
+    expect(doc).toContain('color:#ffffff!important');
     // The markup and text remain.
     expect(doc).toContain('invisible risk');
     expect(doc).toContain('headline');
@@ -298,5 +301,39 @@ describe('sent reader body', () => {
     await vi.waitFor(() =>
       expect(screen.queryByText(/sealed body stays on the server/i)).not.toBeInTheDocument(),
     );
+  });
+});
+
+describe('read-marking keeps the list stable', () => {
+  it('keeps showing rows when a background refresh re-enters loading', () => {
+    // App flips listState to 'loading' on every badge-reconciling refresh;
+    // replacing visible rows with skeletons reset the scroll position while
+    // the reader browsed old mail.
+    const props = mailListProps([
+      {
+        id: 'msg_1',
+        from: 'A <a@x.test>',
+        subject: 'one',
+        createdAt: null,
+        preview: null,
+        unread: false,
+        encrypted: false,
+      },
+      {
+        id: 'msg_2',
+        from: 'B <b@x.test>',
+        subject: 'two',
+        createdAt: null,
+        preview: null,
+        unread: true,
+        encrypted: false,
+      },
+    ]);
+    const { rerender } = render(<MailList {...props} />);
+    expect(screen.getByText('one')).toBeInTheDocument();
+
+    rerender(<MailList {...props} state="loading" />);
+    expect(screen.getByText('one')).toBeInTheDocument();
+    expect(screen.queryByLabelText(/Cargando|Loading/i)).not.toBeInTheDocument();
   });
 });

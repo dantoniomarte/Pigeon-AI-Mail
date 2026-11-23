@@ -133,3 +133,101 @@ describe('buildEmailFrame style preservation', () => {
     expect(styles[1]).toContain('pre{background:#1e222e}');
   });
 });
+
+describe('dark painted surfaces preservation', () => {
+  // The real-world pattern behind "Visit group"/"View profile" buttons:
+  // the fill lives on the enclosing cell (bgcolor), not on the anchor.
+  const visitGroup =
+    '<table><tr><td bgcolor="#1877f2" style="border-radius:6px">' +
+    '<a href="https://groups.example.com/visit" style="display:inline-block;padding:10px 16px;color:#ffffff;font-weight:600">Visit group</a>' +
+    '</td></tr></table>';
+
+  it('keeps button-like cells painted with contrasting text in dark', () => {
+    const doc = buildEmailFrame(visitGroup, false, 'dark');
+    expect(doc).toContain('data-pk=');
+    expect(doc).toContain('background-color:rgb(24, 119, 242)!important');
+    expect(doc).toContain('color:rgb(255, 255, 255)!important');
+    // The anchor itself is painted too, so the clickable area is the button.
+    expect(doc).toContain('data-pk=');
+  });
+
+  it('keeps OTP-style chips painted (light fill, dark text)', () => {
+    const doc = buildEmailFrame(
+      '<p style="background:#f0f2f5;padding:14px 20px;border-radius:8px;font-size:34px">03730</p>',
+      false,
+      'dark',
+    );
+    expect(doc).toContain('data-pk=');
+    expect(doc).toContain('background-color:rgb(240, 242, 245)!important');
+    expect(doc).toMatch(/color:#111418!important/);
+  });
+
+  it('neutralizes long-text containers (no dark glare)', () => {
+    const doc = buildEmailFrame(
+      '<div style="background:#0f6b5c;padding:18px"><p>' + 'x'.repeat(120) + '</p></div>',
+      false,
+      'dark',
+    );
+    expect(doc).not.toContain('data-pk=');
+    expect(doc).toContain('background-color:transparent!important');
+  });
+
+  it('escapes hostile fill values (no style escape, no script)', () => {
+    const doc = buildEmailFrame(
+      '<div style="background:#fff}</style><script>parent.postMessage({type:\'pwned\'},\'*\')</script><style>a:;padding:4px">Verify</div>',
+      false,
+      'dark',
+    );
+    // The hostile payload is parsed to nothing: no data-pk, no raw escape,
+    // exactly one script (the height bootstrap).
+    expect(doc.match(/<script/g)).toHaveLength(1);
+    expect(doc).not.toContain('pwned');
+    expect(doc).not.toContain('data-pk');
+    expect(doc).not.toContain('@layer pigeon-dark-email{[data-pk');
+  });
+
+  it('preserves named colors with contrasting text', () => {
+    const doc = buildEmailFrame(
+      '<div style="background:white;padding:18px">Order shipped</div>',
+      false,
+      'dark',
+    );
+    expect(doc).toContain('background-color:rgb(255, 255, 255)!important');
+    expect(doc).toContain('color:#111418!important');
+  });
+
+  it('treats near-transparent fills as non-surfaces', () => {
+    const doc = buildEmailFrame(
+      '<div style="background:rgba(255,255,255,0.08);padding:18px">dark panel</div>',
+      false,
+      'dark',
+    );
+    expect(doc).not.toContain('data-pk=');
+  });
+
+  it('lets a nested CTA keep its own fill over the preserved card', () => {
+    const doc = buildEmailFrame(
+      '<div style="background:#ffffff;padding:20px"><a style="background:#1877f2;color:#fff;padding:10px 14px">Confirm</a></div>',
+      false,
+      'dark',
+    );
+    // The card is preserved (short text) AND the anchor is preserved: the
+    // anchor's own rule (0,1,0) must beat the :where() descendant rule.
+    expect(doc).toContain('background-color:rgb(24, 119, 242)!important');
+    expect(doc).toContain('background-color:rgb(255, 255, 255)!important');
+    // Order: card rule first, anchor rule after (document order).
+    const cardPos = doc.indexOf('background-color:rgb(255, 255, 255)!important');
+    const anchorPos = doc.indexOf('background-color:rgb(24, 119, 242)!important');
+    expect(anchorPos).toBeGreaterThan(cardPos);
+  });
+
+  it('gives outlined padded anchors a low-key affordance in dark', () => {
+    const doc = buildEmailFrame(
+      '<a style="display:inline-block;padding:12px 22px;border:2px solid #1877f2;color:#1877f2">Get started</a>',
+      false,
+      'dark',
+    );
+    expect(doc).toContain('background-color:rgba(108,178,255,.12)!important');
+    expect(doc).toContain('border:1px solid rgba(108,178,255,.5)!important');
+  });
+});

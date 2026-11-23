@@ -357,7 +357,11 @@ export default function MailList({
   };
 
   const renderState = (): JSX.Element | null => {
-    if (state === 'loading' || state === 'idle') {
+    // A background refresh (read-marking, badge reconciliation) must not
+    // replace the rows the reader is looking at with skeletons: that reset
+    // the scroll position while browsing old mail. Loading only renders as
+    // a skeleton list when there is nothing to show yet.
+    if ((state === 'loading' || state === 'idle') && visible.length === 0) {
       return (
         <div className="mail-list__skeletons" aria-busy="true" aria-label={t('common.loading')}>
           {Array.from({ length: 7 }, (_, index) => (
