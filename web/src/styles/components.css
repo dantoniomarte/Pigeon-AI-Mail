@@ -1215,6 +1215,13 @@ body {
   background: #fff;
 }
 
+/* Dark theme: the frame box must not paint white under a dark email
+   document — light text over the white box was the reported illegibility
+   (JD-B-001). The app surface shows through instead. */
+:root[data-theme='dark'] .reader__frame {
+  background: transparent;
+}
+
 .reader__body p:last-child {
   margin-bottom: 0;
 }

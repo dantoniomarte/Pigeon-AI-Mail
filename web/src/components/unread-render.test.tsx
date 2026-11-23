@@ -166,6 +166,13 @@ describe('theme-aware email frame', () => {
     const doc = screen.getByTitle('Message body').getAttribute('srcdoc') ?? '';
     expect(doc).toContain('pigeon-dark-email');
     expect(doc).toContain('color-scheme:dark');
+    // Legibility: the universal rule forces a light color directly (never
+    // `inherit`), so dark text painted by the email cannot survive on the
+    // darkened background.
+    expect(doc).toContain('color:#e6edf3!important');
+    expect(doc).not.toContain('color:inherit!important');
+    // Links stay recognizable.
+    expect(doc).toContain('a{color:#6cb2ff!important');
     // The provider markup itself is untouched.
     expect(doc).toContain('<p>styled by provider</p>');
   });
@@ -213,5 +220,37 @@ describe('selected row vs unread row', () => {
     expect(unread?.classList.contains('is-unread')).toBe(true);
     expect(within(unread as HTMLElement).getByRole('img', { name: 'Unread' })).toBeInTheDocument();
     expect(within(open as HTMLElement).queryByRole('img', { name: 'Unread' })).not.toBeInTheDocument();
+  });
+});
+
+describe('dark scheme sender paint neutralization', () => {
+  it('strips sender inline color/background declarations in dark mode', () => {
+    const props = mailViewProps();
+    props.scheme = 'dark';
+    props.message = messageFixture({
+      body_html:
+        '<div style="background:#0f6b5c"><p style="color:#fff!important">invisible risk</p></div>' +
+        '<h1 style="background:linear-gradient(#0f6b5c,#14876f);-webkit-background-clip:text;-webkit-text-fill-color:transparent">headline</h1>',
+    });
+    render(<MailView {...props} />);
+
+    const doc = screen.getByTitle('Message body').getAttribute('srcdoc') ?? '';
+    // No sender paint values survive in dark mode (JD-B-002 / JD-B-003).
+    expect(doc).not.toMatch(/color\s*:\s*#fff/i);
+    expect(doc).not.toContain('#0f6b5c');
+    expect(doc).not.toContain('-webkit-text-fill-color:transparent');
+    // The markup and text remain.
+    expect(doc).toContain('invisible risk');
+    expect(doc).toContain('headline');
+    // The lifted palette rule is present.
+    expect(doc).toContain('color:#e6edf3!important');
+  });
+
+  it('keeps sender inline styles untouched in light mode', () => {
+    const props = mailViewProps();
+    props.message = messageFixture({ body_html: '<p style="color:#fff!important;background:#0f6b5c">styled</p>' });
+    render(<MailView {...props} />);
+    const doc = screen.getByTitle('Message body').getAttribute('srcdoc') ?? '';
+    expect(doc).toContain('#0f6b5c');
   });
 });

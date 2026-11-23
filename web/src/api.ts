@@ -755,6 +755,56 @@ export type TextToken =
 
 const URL_PATTERN = /https?:\/\/[^\s<>"')\]]+|www\.[^\s<>"')\]]+/gi;
 
+  // Sender inline styles are the one cascade source that beats the override
+  // layer (`style="color:#fff!important"` survives while its background pair
+  // is neutralized, leaving white-on-dark text; JD-B-002). In dark mode the
+  // paint declarations are stripped from every inline style before the
+  // document is rendered, so the lifted palette applies uniformly. Legibility
+  // wins over per-element fidelity (mark/CTA backgrounds flatten, text stays
+  // readable).
+  const NEUTRALIZED_DECLARATIONS =
+    /^(color|-webkit-text-fill-color|background|background-color|background-image|filter)$/i;
+  // Quote-aware split: a `;` inside '…' or "…" is a separator, not a
+  // declaration boundary (JD-A-N2).
+  const splitDeclarations = (style: string): string[] => {
+    const declarations: string[] = [];
+    let current = '';
+    let quote: string | null = null;
+    for (const character of style) {
+      if (quote !== null) {
+        current += character;
+        if (character === quote) quote = null;
+      } else if (character === "'" || character === '"') {
+        quote = character;
+        current += character;
+      } else if (character === ';') {
+        declarations.push(current);
+        current = '';
+      } else {
+        current += character;
+      }
+    }
+    declarations.push(current);
+    return declarations;
+  };
+  const neutralizeInlineColors = (fragment: string): string => {
+    const document = new DOMParser().parseFromString(fragment, 'text/html');
+    for (const element of document.querySelectorAll('[style]')) {
+      const kept = splitDeclarations(element.getAttribute('style') ?? '')
+        .filter((declaration) => {
+          const name = declaration.split(':')[0]?.trim() ?? '';
+          return name.length > 0 && !NEUTRALIZED_DECLARATIONS.test(name);
+        })
+        .join(';');
+      if (kept.length > 0) {
+        element.setAttribute('style', kept);
+      } else {
+        element.removeAttribute('style');
+      }
+    }
+    return document.body.innerHTML;
+  };
+
 /** Detect http(s) and www. URLs in plain text, so long links stay clickable
  *  and visibly separate instead of blurring into the sentence around them. */
 export function linkifyText(text: string): TextToken[] {
@@ -839,7 +889,9 @@ export function buildEmailFrame(
     .map((node) => node.textContent ?? '')
     .join('\n');
   emailDocument.querySelectorAll('style').forEach((node) => node.remove());
-  const cleanedBody = sanitizeEmailHtml(emailDocument.body.innerHTML);
+  const cleanedBody = sanitizeEmailHtml(
+    scheme === 'dark' ? neutralizeInlineColors(emailDocument.body.innerHTML) : emailDocument.body.innerHTML,
+  );
   // Emails usually assume a light canvas; their own styles override this.
   // `overflow-wrap: anywhere` keeps unbreakable email URLs inside the frame,
   // and the table/img rules scale fixed-width newsletter layouts down to
@@ -854,8 +906,17 @@ export function buildEmailFrame(
   // Images, inline SVG fills, video and canvas are left untouched.
   const darkBase =
     'html{background:transparent;color-scheme:dark}body{margin:0;padding:12px 14px;color:#e6edf3;font:14px/1.5 system-ui,sans-serif;overflow-wrap:anywhere}table{max-width:100%}img{max-width:100%;height:auto}';
+  // Legibility rules for the override, learned from real newsletters:
+  // - never `color: inherit` in the universal rule: a nested element that the
+  //   email painted dark over its own light background inherits a dark parent
+  //   color instead of the lifted one; force the light color directly.
+  // - keep white/very-light backgrounds as the sender set them ONLY when the
+  //   text over them is already light; simpler and safer: keep backgrounds
+  //   transparent but make EVERY text light, so dark-on-dark cannot happen.
+  // - preserve underline decorations and drop only heavy shadows.
   const darkOverride =
-    '@layer pigeon-dark-email{body{color:#e6edf3!important}*,:before,:after{background-color:transparent!important;background-image:none!important;border-color:rgba(255,255,255,.16)!important;color:inherit!important;text-decoration-color:inherit!important;box-shadow:none!important;text-shadow:none!important}a{color:#58a6ff!important}input,textarea,select{background:rgba(255,255,255,.06)!important;color:inherit!important}img,svg,video,canvas{background-color:transparent!important}}';
+    '@layer pigeon-dark-email{body{color:#e6edf3!important}*,:before,:after{color:#e6edf3!important;background-color:transparent!important;background-image:none!important;border-color:rgba(255,255,255,.18)!important;box-shadow:none!important}a{color:#6cb2ff!important}a *{color:#6cb2ff!important}input,textarea,select{background:rgba(255,255,255,.08)!important;color:#e6edf3!important}img,svg,video,canvas{background-color:transparent!important}td,th{border-color:rgba(255,255,255,.18)!important}blockquote{border-left:3px solid rgba(255,255,255,.3)!important;color:#c9d1d9!important}hr{border-color:rgba(255,255,255,.18)!important}}';
+
   const styles = scheme === 'dark' ? darkBase + darkOverride : lightBase;
   return [
     '<!doctype html>',
