@@ -606,6 +606,9 @@ export default function App(): JSX.Element {
       to: sentSelection.to,
       subject: sentSelection.subject,
       created_at: sentSelection.created_at,
+      // F5: outbound copies are never unread server-side; the field lets the
+      // sent reader render the Mark-as-unread action.
+      read: true,
     };
   }, [sentSelection]);
 
@@ -733,7 +736,10 @@ export default function App(): JSX.Element {
     return <></>; // resolving the session cookie
   }
 
-  if (!sessionActive && !apiKeyFallback) {
+  // F4 fix: a stored API key is a valid persistent session (API-key mode
+  // persists across reloads); previously the stored key was ignored until
+  // the user clicked through Landing again.
+  if (!sessionActive && !apiKeyFallback && (apiKey === null || apiKey.length === 0)) {
     if (!loginOpen) {
       return (
         <Landing
@@ -886,7 +892,8 @@ export default function App(): JSX.Element {
               onRetry={() => setReloadToken((token) => token + 1)}
               onCompose={startCompose}
             />
-            <MailView
+<MailView
+              apiKey={key}
           scheme={theme}
               mode={view === 'sent' ? 'sent' : 'mail'}
               message={view === 'sent' ? sentDetail : detail}

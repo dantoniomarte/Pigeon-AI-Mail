@@ -39,6 +39,8 @@ import { PigeonArt } from './MailList';
 
 export interface MailViewProps {
   mode: 'mail' | 'sent';
+  /** Credential for the sent-body fetch: the API key, or null for session mode. */
+  apiKey?: string | null;
   /** Active app theme: dark mail frames render with the dark scheme. */
   scheme?: 'light' | 'dark';
   message: MessageDetail | null;
@@ -122,6 +124,7 @@ function TextParagraph({ value }: { value: string }): JSX.Element {
 
 export default function MailView({
   mode,
+  apiKey = null,
   scheme = 'light',
   message,
   state,
@@ -156,9 +159,30 @@ export default function MailView({
   // The sandboxed frame reports its rendered height; sized to content (bounded)
   // so short mail does not show a tall empty panel or push actions off-screen.
   const [frameHeight, setFrameHeight] = useState<number | null>(null);
+  // F2: production CSP blocks the frame's inline bootstrap (script-src
+  // 'self' on srcdoc), so the height/scroll handshake cannot rely on scripts
+  // inside the frame. Height is measured from the frame element's layout via
+  // ResizeObserver on its documentElement (same-origin-less srcdoc still
+  // allows contentDocument access for about:srcdoc in Firefox/Chromium with
+  // sandbox allow-scripts? No: opaque origin BLOCKS contentDocument). The
+  // parent-side measurement below uses the iframe element box only.
   // O1: switching the theme rebuilds the frame document (new srcDoc), which
-  // resets its scroll to the top. Remember the reading fraction so the
-  // rebuilt document can restore it.
+  // resets its scroll to the top. Without the script channel the restore is
+  // impossible; instead the frame key includes the scheme so the reader
+  // scroll (parent .reader__scroll) is preserved naturally — the page-level
+  // scroll does not reset when the iframe content re-renders at the same
+  // element. The user's complaint is the INNER frame scroll; with a sized
+  // frame (auto-height dead → fixed 612px) the inner scroll resets. Restoring
+  // the inner position without scripts requires the scroll to live OUTSIDE
+  // the frame: keep the frame heightless (full document height) is not
+  // possible without measurement. So: measure via ResizeObserver on the
+  // frame element (its height animates with our style), and report the
+  // content height through the load event using a same-origin-free trick:
+  // about:srcdoc in Firefox exposes contentDocument.height for sandboxed
+  // frames — Chromium does not. Final approach: keep the bootstrap script but
+  // ALSO fix the prod CSP (server-side) to allow inline scripts in srcdoc
+  // frames; here, degrade gracefully: no height message -> frame keeps the
+  // CSS clamp height (still usable, as #86 documented).
   const frameScrollRef = useRef<number | null>(null);
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {
@@ -171,7 +195,18 @@ export default function MailView({
         Number.isFinite(data.value) &&
         data.value > 0
       ) {
-        setFrameHeight(Math.min(760, Math.max(240, Math.ceil(data.value))));
+        setFrameHeight(Math.min(1400, Math.max(240, Math.ceil(data.value))));
+      }
+      // F1 fix: remember the reading fraction so the theme-flip restore has
+      // something to replay (the prod audit found the ref was only read).
+      if (
+        data !== null &&
+        typeof data === 'object' &&
+        data.type === 'pigeon-frame-scroll' &&
+        typeof data.value === 'number' &&
+        Number.isFinite(data.value)
+      ) {
+        frameScrollRef.current = data.value;
       }
     };
     window.addEventListener('message', onMessage);
@@ -213,7 +248,7 @@ export default function MailView({
     let cancelled = false;
     setSentBodyState('loading');
     setSentBody(null);
-    void fetchMessage(null, message.id)
+    void fetchMessage(apiKey, message.id)
       .then((result) => {
         if (cancelled) return;
         setSentBody(result.data);
