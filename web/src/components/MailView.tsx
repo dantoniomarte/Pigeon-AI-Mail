@@ -15,7 +15,6 @@ import {
   Mail,
   MailOpen,
   Trash2,
-  X,
 } from 'lucide-react';
 import type { CSSProperties } from 'react';
 
@@ -516,106 +515,7 @@ export default function MailView({
           </div>
         ) : null}
 
-        {isSent && message !== null && (onDelete !== undefined || onMarkRead !== undefined) ? (
-          <div className="reader__actions">
-            {onMarkRead !== undefined && message.read ? (
-              <button
-                type="button"
-                className="btn btn--ghost"
-                onClick={() => onMarkRead(message.id, false)}
-                aria-label={t('mail.markUnread')}
-                title={t('mail.markUnread')}
-              >
-                <Mail size={16} aria-hidden="true" />
-                {t('mail.markUnread')}
-              </button>
-            ) : null}
-            <button
-              type="button"
-              className="btn btn--ghost"
-              onClick={() => onForward(message)}
-              aria-label={t('mail.forward')}
-              title={t('mail.forward')}
-            >
-              <Forward size={16} aria-hidden="true" />
-              {t('mail.forward')}
-            </button>
-            {onDelete !== undefined ? (
-              <button
-                type="button"
-                className={`btn ${confirmDelete ? 'btn--danger' : 'btn--ghost'} reader__delete`}
-                onClick={() => {
-                  if (!confirmDelete) {
-                    setConfirmDelete(true);
-                    return;
-                  }
-                  setConfirmDelete(false);
-                  onDelete(message.id);
-                }}
-                aria-label={confirmDelete ? t('mail.confirmDelete') : t('mail.deleteForever')}
-                title={confirmDelete ? t('mail.confirmDelete') : t('mail.deleteForever')}
-              >
-                <Trash2 size={16} aria-hidden="true" />
-                <span>{confirmDelete ? t('mail.confirmDelete') : t('mail.deleteForever')}</span>
-              </button>
-            ) : null}
-          </div>
-        ) : !isSent ? (
-          <div className="reader__actions">
-            <button type="button" className="btn btn--primary" onClick={() => onReply(message)}>
-              <Reply size={16} aria-hidden="true" />
-              {t('mail.reply')}
-            </button>
-            <button type="button" className="btn btn--ghost" onClick={() => onForward(message)}>
-              <Forward size={16} aria-hidden="true" />
-              {t('mail.forward')}
-            </button>
-            {onMarkRead ? (
-              <button
-                type="button"
-                className="btn btn--ghost"
-                onClick={() => onMarkRead(message.id, !message.read)}
-                aria-label={message.read ? t('mail.markUnread') : t('mail.markRead')}
-                title={message.read ? t('mail.markUnread') : t('mail.markRead')}
-              >
-                {message.read ? <MailOpen size={16} aria-hidden="true" /> : <Mail size={16} aria-hidden="true" />}
-              </button>
-            ) : null}
-            {onMove ? (
-              <button
-                type="button"
-                className="btn btn--ghost"
-                onClick={() => onMove(message.id, 'spam')}
-                aria-label={t('mail.toSpam')}
-                title={t('mail.toSpam')}
-              >
-                <ShieldAlert size={16} aria-hidden="true" />
-              </button>
-            ) : null}
-            {onMove ? (
-              <button
-                type="button"
-                className="btn btn--ghost"
-                onClick={() => onMove(message.id, 'trash')}
-                aria-label={t('mail.toTrash')}
-                title={t('mail.toTrash')}
-              >
-                <Trash2 size={16} aria-hidden="true" />
-              </button>
-            ) : null}
-            {onDelete ? (
-              <button
-                type="button"
-                className="btn btn--ghost reader__delete"
-                onClick={() => onDelete(message.id)}
-                aria-label={t('mail.deleteForever')}
-                title={t('mail.deleteForever')}
-              >
-                <X size={16} aria-hidden="true" />
-              </button>
-            ) : null}
-          </div>
-        ) : null}
+
       </div>
     );
   };
@@ -659,8 +559,8 @@ export default function MailView({
             </button>
           </div>
         )}
-        {isSent ? null : (
-          <div className="reader__bar-actions">
+        <div className="reader__bar-actions">
+          {!isSent ? (
             <button
               type="button"
               className="btn btn--quiet"
@@ -670,25 +570,92 @@ export default function MailView({
                 }
               }}
               disabled={message === null}
+              aria-label={t('mail.reply')}
             >
               <Reply size={15} aria-hidden="true" />
               <span>{t('mail.reply')}</span>
             </button>
+          ) : null}
+          <button
+            type="button"
+            className="btn btn--quiet"
+            onClick={() => {
+              if (message !== null) {
+                onForward(message);
+              }
+            }}
+            disabled={message === null}
+            aria-label={t('mail.forward')}
+          >
+            <Forward size={15} aria-hidden="true" />
+            <span>{t('mail.forward')}</span>
+          </button>
+          {isSent && onMarkRead !== undefined && message !== null && !confirmDelete ? (
             <button
               type="button"
               className="btn btn--quiet"
+              onClick={() => onMarkRead(message.id, !message.read)}
+              disabled={message === null}
+              aria-label={message.read ? t('mail.markUnread') : t('mail.markRead')}
+              title={message.read ? t('mail.markUnread') : t('mail.markRead')}
+            >
+              {message.read ? <MailOpen size={15} aria-hidden="true" /> : <Mail size={15} aria-hidden="true" />}
+              <span className="reader__bar-label">
+                {message.read ? t('mail.markUnread') : t('mail.markRead')}
+              </span>
+            </button>
+          ) : null}
+          {!isSent && onMove !== undefined && message !== null ? (
+            <button
+              type="button"
+              className="btn btn--quiet"
+              onClick={() => onMove(message.id, 'spam')}
+              disabled={message === null}
+              aria-label={t('mail.toSpam')}
+              title={t('mail.toSpam')}
+            >
+              <ShieldAlert size={15} aria-hidden="true" />
+              <span className="reader__bar-label">{t('mail.toSpam')}</span>
+            </button>
+          ) : null}
+          {!isSent && onMove !== undefined && message !== null ? (
+            <button
+              type="button"
+              className="btn btn--quiet"
+              onClick={() => onMove(message.id, 'trash')}
+              disabled={message === null}
+              aria-label={t('mail.toTrash')}
+              title={t('mail.toTrash')}
+            >
+              <Trash2 size={15} aria-hidden="true" />
+              <span className="reader__bar-label">{t('mail.toTrash')}</span>
+            </button>
+          ) : null}
+          {onDelete !== undefined && message !== null ? (
+            <button
+              type="button"
+              className={`btn btn--quiet${isSent && confirmDelete ? ' btn--danger' : ''}`}
               onClick={() => {
-                if (message !== null) {
-                  onForward(message);
+                // Sent rows arm a confirmation first: the delete is
+                // permanent (no trash for outbound copies).
+                if (isSent && !confirmDelete) {
+                  setConfirmDelete(true);
+                  return;
                 }
+                setConfirmDelete(false);
+                onDelete(message.id);
               }}
               disabled={message === null}
+              aria-label={isSent && confirmDelete ? t('mail.confirmDelete') : t('mail.deleteForever')}
+              title={isSent && confirmDelete ? t('mail.confirmDelete') : t('mail.deleteForever')}
             >
-              <Forward size={15} aria-hidden="true" />
-              <span>{t('mail.forward')}</span>
+              <Trash2 size={15} aria-hidden="true" />
+              <span className="reader__bar-label">
+                {isSent && confirmDelete ? t('mail.confirmDelete') : t('mail.deleteForever')}
+              </span>
             </button>
-          </div>
-        )}
+          ) : null}
+        </div>
       </header>
       <div className="reader__scroll">{renderContent()}</div>
     </section>

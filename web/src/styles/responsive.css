@@ -228,18 +228,6 @@
     flex-direction: column;
   }
 
-  /* On mobile the action bar reads first: it sits between the header and the
-     body instead of hanging below the whole message. */
-  .reader__header {
-    order: -2;
-  }
-
-  .reader__actions {
-    order: -1;
-    border-bottom: 1px solid var(--border);
-    padding-bottom: 12px;
-    margin-bottom: 14px;
-  }
 
   .reader__identity {
     align-items: flex-start;
@@ -255,12 +243,15 @@
 
   /* First paint shows the message, not chrome: the top quiet action pair
      duplicates the bottom actions, and the verdict chips collapse. */
-  .reader__bar-actions {
-    display: none;
-  }
-
   .verdicts {
     gap: 5px;
+  }
+
+  /* The unified top bar carries all actions now: let the quiet buttons
+     shrink and keep the bar scrollable if it overflows on small screens. */
+  .reader__bar-actions {
+    flex-wrap: wrap;
+    max-width: 100%;
   }
 
   .verdict {
