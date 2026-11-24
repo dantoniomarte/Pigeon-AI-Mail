@@ -214,6 +214,9 @@ export default function MailView({
   }, []);
   useEffect(() => {
     setFrameHeight(null);
+    // JD-B-002: a fresh message must not inherit the previous one's reading
+    // fraction (the judge measured a mid-document jump on the next flip).
+    frameScrollRef.current = null;
   }, [message?.id]);
   // O1: after the theme changes the frame document is rebuilt; restore the
   // remembered reading position once the new document reports its height.

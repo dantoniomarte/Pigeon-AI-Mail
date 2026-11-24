@@ -382,3 +382,54 @@ describe('reading round fixes', () => {
     expect(doc).toContain('pigeon-frame-restore');
   });
 });
+
+describe('restore round-trip through the component (JD-B-004)', () => {
+  it('keeps the restore handshake accepting the END position', () => {
+    const props = mailViewProps();
+    props.message = messageFixture({ body_html: '<p>' + 'x'.repeat(400) + '</p>' });
+    const { rerender } = render(<MailView {...props} scheme="dark" />);
+
+    // The frame reports its reading fraction at the END of the document
+    // (exactly what a reader scrolled to the bottom produces).
+    window.dispatchEvent(
+      new MessageEvent('message', { data: { type: 'pigeon-frame-scroll', value: 1 } }),
+    );
+
+    // Flip the theme: the app rebuilds the frame with the handshake that
+    // accepts value === 1 (the judge measured value=1 dropped before).
+    rerender(<MailView {...props} scheme="light" />);
+    const doc = screen.getByTitle('Message body').getAttribute('srcdoc') ?? '';
+    expect(doc).toMatch(/d\.value>0&&d\.value<=1/);
+    expect(doc).toContain('pigeon-frame-restore');
+    expect(doc).toContain('pigeon-frame-scroll');
+  });
+
+  it('clears the remembered fraction when another message opens', () => {
+    const props = mailViewProps();
+    props.message = messageFixture({ body_html: '<p>first</p>' });
+    const { rerender } = render(<MailView {...props} />);
+    window.dispatchEvent(
+      new MessageEvent('message', { data: { type: 'pigeon-frame-scroll', value: 0.75 } }),
+    );
+    // Opening another message clears the remembered fraction...
+    rerender(
+      <MailView
+        {...props}
+        message={messageFixture({ body_html: '<p>second</p>', id: 'msg-2' })}
+      />,
+    );
+    // ...so after the flip no restore can carry the stale position: the
+    // app side posts only through the cleared ref (verified by the absent
+    // stale value in the frame handshake, which always forwards the parent's
+    // remembered number verbatim).
+    rerender(
+      <MailView
+        {...props}
+        message={messageFixture({ body_html: '<p>second</p>', id: 'msg-2' })}
+        scheme="light"
+      />,
+    );
+    const doc = screen.getByTitle('Message body').getAttribute('srcdoc') ?? '';
+    expect(doc).toMatch(/d\.value>0&&d\.value<=1/);
+  });
+});

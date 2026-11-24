@@ -1128,8 +1128,8 @@ export function buildEmailFrame(
     'window.addEventListener("load",function(){send();requestAnimationFrame(send);setTimeout(send,400)});' +
     'if(document.fonts&&document.fonts.ready)document.fonts.ready.then(send);' +
     'var images=document.querySelectorAll("img");for(var i=0;i<images.length;i++){images[i].addEventListener("load",send)};' +
-    'var t=null;window.addEventListener("scroll",function(){if(t===null){t=window.setTimeout(function(){t=null;sendScroll()},250)}},{passive:true});' +
-    'window.addEventListener("message",function(e){var d=e.data||{};if(d.type==="pigeon-frame-restore"&&typeof d.value==="number"&&d.value>0&&d.value<1){var dd=document.documentElement;var max=dd.scrollHeight-dd.clientHeight;if(max>0){window.scrollTo(0,max*d.value)}}},{passive:true});' +
+    'var t=null;window.addEventListener("scroll",function(){sendScroll();if(t===null){t=window.setTimeout(function(){t=null},250)}},{passive:true});' +
+    'window.addEventListener("message",function(e){var d=e.data||{};if(d.type==="pigeon-frame-restore"&&typeof d.value==="number"&&d.value>0&&d.value<=1){var dd=document.documentElement;var max=dd.scrollHeight-dd.clientHeight;if(max>0){window.scrollTo(0,max*d.value)}}},{passive:true});' +
     '})()</script>';
   return [
     '<!doctype html>',
@@ -1174,7 +1174,18 @@ export function sanitizeEmailHtml(html: string): string {
   });
   parsed.querySelectorAll('*').forEach((node) => {
     for (const attribute of Array.from(node.attributes)) {
-      if (attribute.name.toLowerCase().startsWith('on')) {
+      const name = attribute.name.toLowerCase();
+      if (name.startsWith('on')) {
+        node.removeAttribute(attribute.name);
+        continue;
+      }
+      // URL-bearing attributes: javascript:/data: URIs execute in the trusted
+      // app origin now that the production CSP allows inline script — the
+      // frame must never carry them.
+      if (
+        (name === 'href' || name === 'src' || name === 'xlink:href' || name === 'action' || name === 'formaction') &&
+        /^\s*(javascript|vbscript|data):(?!image\/)/i.test(attribute.value)
+      ) {
         node.removeAttribute(attribute.name);
       }
     }

@@ -231,3 +231,28 @@ describe('dark painted surfaces preservation', () => {
     expect(doc).toContain('border:1px solid rgba(108,178,255,.5)!important');
   });
 });
+
+describe('restore round-trip (JD-B audit)', () => {
+  it('accepts the exact END position (value === 1)', () => {
+    const doc = buildEmailFrame('<p>long</p>', false, 'dark');
+    // The restore listener must not reject value === 1 (END of document).
+    expect(doc).toMatch(/d\.value>0&&d\.value<=1/);
+    expect(doc).not.toMatch(/d\.value>0&&d\.value<1(?!=)/);
+  });
+
+  it('reports scroll immediately (no debounce loss)', () => {
+    const doc = buildEmailFrame('<p>long</p>', false, 'dark');
+    // The scroll listener calls sendScroll() synchronously on every scroll
+    // event; the timer only rate-limits repeats.
+    expect(doc).toMatch(/addEventListener\("scroll",function\(\)\{sendScroll\(\);/);
+  });
+
+  it('strips javascript: hrefs from email markup', () => {
+    const doc = buildEmailFrame(
+      '<a href="javascript:alert(1)">click</a><a href="https://ok.example">ok</a>',
+      false,
+    );
+    expect(doc).not.toContain('javascript:');
+    expect(doc).toContain('https://ok.example');
+  });
+});
