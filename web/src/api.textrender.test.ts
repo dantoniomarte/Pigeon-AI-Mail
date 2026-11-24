@@ -256,3 +256,25 @@ describe('restore round-trip (JD-B audit)', () => {
     expect(doc).toContain('https://ok.example');
   });
 });
+
+describe('scheme obfuscation hardening (judge round)', () => {
+  it('strips tab/newline/control-char obfuscated schemes', () => {
+    const doc = buildEmailFrame(
+      '<a href="java\tscript:alert(1)">a</a>' +
+        '<a href="java\nscript:alert(1)">b</a>' +
+        '<a href="\x01javascript:alert(1)">c</a>',
+      false,
+    );
+    expect(doc).not.toContain('alert(1)');
+  });
+
+  it('blocks data:image/svg+xml (scriptable svg) but keeps raster data URIs', () => {
+    const doc = buildEmailFrame(
+      '<img src="data:image/svg+xml,<svg onload=alert(1)>">' +
+        '<img src="data:image/png;base64,iVBORw0KGgo=">',
+      false,
+    );
+    expect(doc).not.toContain('svg+xml');
+    expect(doc).toContain('data:image/png;base64');
+  });
+});

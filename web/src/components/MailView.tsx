@@ -228,15 +228,26 @@ export default function MailView({
       return;
     }
     const value = frameScrollRef.current;
+    // Post as soon as each frame element exists (load fires per iframe); the
+    // fixed 120 ms timer left a visible jump-to-top flash during the flip.
+    const post = (event: Event) => {
+      const frame = event.target as HTMLIFrameElement;
+      frame.contentWindow?.postMessage({ type: 'pigeon-frame-restore', value }, '*');
+    };
+    for (const frame of Array.from(document.querySelectorAll<HTMLIFrameElement>('iframe.reader__frame'))) {
+      frame.addEventListener('load', post, { once: true });
+    }
     const timer = window.setTimeout(() => {
       for (const frame of Array.from(document.querySelectorAll<HTMLIFrameElement>('iframe.reader__frame'))) {
-        frame.contentWindow?.postMessage(
-          { type: 'pigeon-frame-restore', value },
-          '*',
-        );
+        frame.contentWindow?.postMessage({ type: 'pigeon-frame-restore', value }, '*');
       }
     }, 120);
-    return () => window.clearTimeout(timer);
+    return () => {
+      window.clearTimeout(timer);
+      for (const frame of Array.from(document.querySelectorAll<HTMLIFrameElement>('iframe.reader__frame'))) {
+        frame.removeEventListener('load', post);
+      }
+    };
   }, [scheme, frameHeight]);
   // Sent rows arrive as lifecycle metadata (`/v1/emails`); the body lives
   // behind the message route, so the reader fetches it once per sent message.

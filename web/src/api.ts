@@ -1181,10 +1181,14 @@ export function sanitizeEmailHtml(html: string): string {
       }
       // URL-bearing attributes: javascript:/data: URIs execute in the trusted
       // app origin now that the production CSP allows inline script — the
-      // frame must never carry them.
+      // frame must never carry them. Schemes are matched AFTER stripping
+      // control characters and whitespace (browsers ignore them inside the
+      // scheme: java\tscript: runs like javascript:).
       if (
         (name === 'href' || name === 'src' || name === 'xlink:href' || name === 'action' || name === 'formaction') &&
-        /^\s*(javascript|vbscript|data):(?!image\/)/i.test(attribute.value)
+        /^(javascript|vbscript|data):(?!image\/(png|jpe?g|gif|webp|bmp);base64,)/i.test(
+          attribute.value.replace(/[\u0000-\u0020]+/g, ''),
+        )
       ) {
         node.removeAttribute(attribute.name);
       }
