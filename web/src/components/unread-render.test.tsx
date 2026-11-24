@@ -433,3 +433,17 @@ describe('restore round-trip through the component (JD-B-004)', () => {
     expect(doc).toMatch(/d\.value>0&&d\.value<=1/);
   });
 });
+
+describe('dark-mode unread contrast (user round 7)', () => {
+  it('strengthens the dark unread treatment', () => {
+    // The CSS contract is pinned by reading the source file directly.
+    const { readFileSync } = require('node:fs');
+    const { join } = require('node:path');
+    const css = readFileSync(join(__dirname, '..', 'styles', 'components.css'), 'utf8');
+    expect(css).toContain('box-shadow: inset 3px 0 0 0 var(--accent)');
+    expect(css).toContain('color: #ffc9b8');
+    expect(css).toContain('color: #ffe4da');
+    const tokens = readFileSync(join(__dirname, '..', 'styles', 'variables.css'), 'utf8');
+    expect(tokens).toContain('rgba(255, 122, 85, 0.22)');
+  });
+});

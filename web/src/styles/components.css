@@ -757,7 +757,7 @@ body {
    `.is-selected` so selection keeps precedence when both apply. */
 .mail-row.is-unread {
   background: var(--accent-soft);
-  box-shadow: inset 2px 0 0 0 var(--accent);
+  box-shadow: inset 3px 0 0 0 var(--accent);
 }
 
 .mail-row.is-unread .mail-row__preview {
@@ -781,6 +781,16 @@ body {
 :root[data-theme='dark'] .mail-row.is-selected {
   background: color-mix(in srgb, var(--accent) 16%, transparent);
   box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+
+/* Dark: unread text carries a warm tint (plain --text at w690 was too close
+   to read rows' --text-soft at w460 on the dark surface). */
+:root[data-theme='dark'] .mail-row.is-unread .mail-row__from {
+  color: #ffc9b8;
+}
+
+:root[data-theme='dark'] .mail-row.is-unread .mail-row__subject {
+  color: #ffe4da;
 }
 
 .mail-row:focus-visible {
@@ -891,6 +901,14 @@ body {
 .mail-row:not(.is-unread) .mail-row__from {
   color: var(--muted);
   font-weight: 460;
+}
+
+:root[data-theme='dark'] .mail-row:not(.is-unread) .mail-row__from {
+  color: #8a91a5;
+}
+
+:root[data-theme='dark'] .mail-row:not(.is-unread) .mail-row__subject {
+  color: #9aa1b5;
 }
 
 .mail-row:not(.is-unread) .mail-row__subject {
