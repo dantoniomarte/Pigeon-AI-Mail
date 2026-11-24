@@ -445,5 +445,30 @@ describe('dark-mode unread contrast (user round 7)', () => {
     expect(css).toContain('color: #ffe4da');
     const tokens = readFileSync(join(__dirname, '..', 'styles', 'variables.css'), 'utf8');
     expect(tokens).toContain('rgba(255, 122, 85, 0.22)');
+
+    // JD-B-001/002: the cascade outcome is pinned structurally — the dark
+    // selected text rule must exist at (0,6,0), strictly more specific than
+    // the dark read-row rules (0,5,0), so the open message keeps full-strength
+    // text no matter what order the rules appear in.
+    expect(css).toMatch(
+      /:root\[data-theme='dark'\] \.mail-row\.is-selected:not\(\.is-unread\) \.mail-row__from \{\s*\n\s*color: var\(--text\);/,
+    );
+    const darkRead = css.indexOf(":root[data-theme='dark'] .mail-row:not(.is-unread) .mail-row__from");
+    const darkSelected = css.indexOf(":root[data-theme='dark'] .mail-row.is-selected:not(.is-unread) .mail-row__from");
+    expect(darkSelected).toBeGreaterThan(0);
+    expect(darkRead).toBeGreaterThan(0);
+    // Specificity contract: the selected selector adds the .is-selected
+    // compound on top of the read-row selector.
+    expect(
+      ":root[data-theme='dark'] .mail-row.is-selected:not(.is-unread) .mail-row__from".includes('.is-selected'),
+    ).toBe(true);
+    // JD-B-003: dark selected fill is neutral (not accent-derived) — scoped
+    // to the selected-state block, not the whole stylesheet.
+    const selectedBlock = css.slice(
+      css.indexOf(":root[data-theme='dark'] .mail-row.is-selected {"),
+      css.indexOf(":root[data-theme='dark'] .mail-row.is-selected:not"),
+    );
+    expect(selectedBlock).toContain('background: var(--surface-3)');
+    expect(selectedBlock).not.toContain('accent) 16%');
   });
 });

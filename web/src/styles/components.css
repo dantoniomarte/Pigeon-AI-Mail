@@ -779,8 +779,22 @@ body {
 }
 
 :root[data-theme='dark'] .mail-row.is-selected {
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  /* Neutral surface: unread keeps the accent tint, so selected and unread
+     are separated by hue as well as chrome (JD-B-003). */
+  background: var(--surface-3);
   box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+
+/* JD-B-001: (0,6,0) — must out-specify the read-row rules below so the
+   open message keeps full-strength text in dark. */
+:root[data-theme='dark'] .mail-row.is-selected:not(.is-unread) .mail-row__from {
+  color: var(--text);
+  font-weight: 520;
+}
+
+:root[data-theme='dark'] .mail-row.is-selected:not(.is-unread) .mail-row__subject {
+  color: var(--text);
+  font-weight: 520;
 }
 
 /* Dark: unread text carries a warm tint (plain --text at w690 was too close
