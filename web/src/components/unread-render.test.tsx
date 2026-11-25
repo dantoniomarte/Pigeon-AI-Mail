@@ -448,6 +448,14 @@ describe('dark-mode unread contrast (user round 7)', () => {
     const tokens = readFileSync(join(__dirname, '..', 'styles', 'variables.css'), 'utf8');
     expect(tokens).toContain('rgba(255, 122, 85, 0.22)');
 
+    // JD-B-002: the unified bar must wrap on EVERY viewport (universal rule,
+    // not media-scoped — a 769-1439px cliff once clipped Delete silently).
+    expect(css).toMatch(
+      /\.reader__bar-actions \{[^}]*flex-wrap: wrap;[^}]*max-width: 100%;/,
+    );
+    // The rule must NOT exist inside a media query (that was the bug).
+    expect(css).not.toMatch(/@media[^{]*\{[^}]*\.reader__bar-actions \{[^}]*flex-wrap/);
+
     // JD-B-001/002: the cascade outcome is pinned structurally — the dark
     // selected text rule must exist at (0,6,0), strictly more specific than
     // the dark read-row rules (0,5,0), so the open message keeps full-strength
