@@ -42,7 +42,9 @@ async fn inbound_message_is_stored_sealed_and_decryptable_with_the_master_key() 
     assert_eq!(code, 250);
     assert!(capabilities.contains("SIZE 36700160"), "{capabilities}");
     assert!(capabilities.contains("8BITMIME"), "{capabilities}");
-    assert!(capabilities.contains("STARTTLS"), "{capabilities}");
+    // v0.1 cannot terminate SMTP TLS, so the capability is not advertised
+    // (issue #99): advertising it made `required`-mode peers fail terminally.
+    assert!(!capabilities.contains("STARTTLS"), "{capabilities}");
 
     assert_eq!(client.send("MAIL FROM:<dana@example.org>").await.0, 250);
     assert_eq!(client.send("RCPT TO:<carol@example.com>").await.0, 250);
@@ -145,7 +147,7 @@ async fn a_message_for_an_unknown_mailbox_is_rejected_with_550() {
 }
 
 #[tokio::test]
-async fn starttls_is_advertised_and_refused_with_454() {
+async fn starttls_is_not_advertised_but_still_refused_with_454() {
     let env = TestEnv::new();
     let server = Arc::new(InboundSmtpServer::new(
         Arc::clone(&env.store),

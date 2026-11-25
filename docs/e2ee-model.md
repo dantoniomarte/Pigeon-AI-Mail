@@ -30,7 +30,7 @@ Code: `crates/pigeon-crypto/src/seal.rs` (envelope + wrapping, domain-separated 
 | Path | Default |
 |---|---|
 | HTTP API / MCP / webmail | TLS (installer provisions via reverse proxy; no HTTP listeners by default) |
-| Inbound SMTP | STARTTLS advertised; plaintext accepted (SMTP interop reality) but logged with a visible downgrade flag |
+| Inbound SMTP | No STARTTLS in v0.1 (not advertised: no TLS termination yet, issue #99); plaintext accepted (SMTP interop reality) but logged with a visible downgrade flag |
 | Outbound SMTP | **opportunistic STARTTLS** (peer certificate validation is planned — see docs/ROADMAP.md); plaintext only via explicit per-domain override |
 | Pigeon↔Pigeon | STARTTLS **and** payload E2E (layer 3) — transport is only belt, not suspenders |
 

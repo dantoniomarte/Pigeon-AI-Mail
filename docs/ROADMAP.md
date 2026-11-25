@@ -10,8 +10,9 @@ today from what is planned, so the claims stay verifiable.
   message, `.mbox` per folder, streamed), keys, sender aliases, catch-all
   rules, organizations with invitations, suppressions, templates, webhooks,
   TOTP sessions.
-- **Inbound SMTP**: ESMTP on `:25` with STARTTLS advertised, size and rate
-  limits, no open relay; mail parsed, sealed at rest, stored.
+- **Inbound SMTP**: ESMTP on `:25` (STARTTLS not advertised: no TLS termination
+  in v0.1, issue #99), size and rate limits, no open relay; mail parsed, sealed
+  at rest, stored.
 - **Outbound delivery**: queue with lease/backoff/dead-letter,
   per-recipient-domain MX groups, delivered-domain tracking across retries,
   opportunistic STARTTLS.

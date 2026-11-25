@@ -262,10 +262,15 @@ impl Session {
             }
             "NOOP" => Action::Reply(Reply::new(250, "2.0.0 Ok")),
             "QUIT" => Action::Close(Reply::new(221, "2.0.0 Bye")),
-            // v0.1 has no certificate lifecycle, so the capability is
-            // advertised (clients can see it is planned) but refused with a
-            // temporary failure: the client may retry in clear text or give up,
-            // which is its policy to decide.
+            // v0.1 has no certificate lifecycle, so there is no STARTTLS to
+            // offer. The capability is deliberately NOT advertised in EHLO
+            // (issue #99): advertising it made every `required`-mode peer —
+            // including this binary's own outbound worker under its documented
+            // default — attempt the upgrade, receive this 454, and fail the
+            // delivery terminally. A client that sends the command anyway
+            // (blind attempts) still gets the honest temporary failure below;
+            // the refusal stays 4xx so opportunistic senders may retry later
+            // or continue in clear text, which is their policy to decide.
             "STARTTLS" => {
                 if argument.is_empty() {
                     Action::Reply(Reply::new(454, "4.7.0 TLS not available"))
@@ -303,9 +308,7 @@ impl Session {
                 format!("{hostname} Hello {}", argument),
                 format!("SIZE {}", self.config.max_message_size),
                 "8BITMIME".to_string(),
-                // Advertised so the capability is discoverable; answered with
-                // 454 until v0.2 ships a certificate lifecycle.
-                "STARTTLS".to_string(),
+                // No STARTTLS here: v0.1 cannot terminate SMTP TLS (issue #99).
                 "ENHANCEDSTATUSCODES".to_string(),
             ],
         ))
@@ -1459,7 +1462,7 @@ mod tests {
     }
 
     #[test]
-    fn ehlo_advertises_size_8bitmime_starttls_and_enhanced_codes() {
+    fn ehlo_does_not_advertise_starttls() {
         let mut session = Session::new(
             Arc::new(ServerConfig::default()),
             "127.0.0.1:1".parse().expect("peer"),
@@ -1470,7 +1473,12 @@ mod tests {
         assert!(text.starts_with("250-pigeon.local Hello client.example\r\n"));
         assert!(text.contains("250-SIZE 36700160\r\n"), "{text}");
         assert!(text.contains("250-8BITMIME\r\n"));
-        assert!(text.contains("250-STARTTLS\r\n"));
+        // v0.1 has no TLS termination for SMTP; advertising a capability the
+        // server cannot present makes every `required`-mode peer (including
+        // this binary's own outbound worker, whose default is `required`)
+        // attempt STARTTLS and fail. The capability stays unadvertised until
+        // v0.2 ships a certificate lifecycle (issue #99).
+        assert!(!text.contains("STARTTLS"), "{text}");
         assert!(text.contains("250 ENHANCEDSTATUSCODES\r\n"), "{text}");
     }
 
@@ -1487,7 +1495,10 @@ mod tests {
     }
 
     #[test]
-    fn starttls_is_advertised_but_answers_454() {
+    fn starttls_is_not_advertised_but_still_answers_454() {
+        // A client that tries STARTTLS anyway (some senders attempt the command
+        // blindly) still gets the honest temporary failure; the capability is
+        // merely absent from the EHLO list.
         let mut session = session();
         let action = session.handle_line("STARTTLS");
         assert_eq!(code(&action), 454);
