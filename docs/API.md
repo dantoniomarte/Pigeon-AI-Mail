@@ -48,7 +48,7 @@ Queues a message for delivery. Returns **202** (not 201, and not Resend's 200 �
 
 | Field | Rules |
 |---|---|
-| `from` | Required. A managed address of the caller's account, or any address on a verified domain. |
+| `from` | Required. A managed address of the caller's account (its own address, or a sender alias assigned to it) — anything else is `403 from-not-allowed`. Sending from arbitrary addresses on registered domains is planned (v0.2 domain verification). |
 | `to`/`cc`/`bcc` | **Total recipients across the three ≤ 50.** Bcc is envelope-only and **never appears in the generated MIME** nor in any response. |
 | `subject` | Required unless `template_id`. ≤ 998 chars. |
 | `html` / `text` | At least one of both (or a template). |
@@ -192,7 +192,11 @@ Draft writes need scope `send`, listing needs `read`. Drafts are per account: an
 | TXT | `<selector>._domainkey.<domain>` | DKIM public key (server-generated) | — |
 | TXT | `_dmarc.<domain>` | `v=DMARC1; p=quarantine; rua=mailto:postmaster@<domain>` | — |
 
-Verification: auto re-check every 15 min; `?verify=now` forces one.
+**Verification status (v0.1):** `verified` is always `false`. DNS checking
+(and the 15-minute auto re-check) lands in v0.2 — `?verify=now` only records
+that a check was requested (`checked_at`) and does not validate anything.
+Publish your records as the `/dns` sub-resource says and verify them with
+`dig` yourself; the field is not a health signal yet.
 
 ## Webhooks
 

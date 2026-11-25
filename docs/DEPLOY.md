@@ -235,6 +235,11 @@ dig +short TXT _dmarc.example.com
 dig +short TXT <selector>._domainkey.example.com
 ```
 
+> **Note (v0.1):** the `verified` field on `GET /v1/domains/{id}` is always
+> `false` — DNS checking lands in v0.2 and `?verify=now` only records the
+> request (`checked_at`). Verify the records above with `dig`; the API field
+> is not a health signal yet (issue #101).
+
 ## Trash retention
 
 `pigeon serve` runs a fourth long-lived task besides the HTTP API, the inbound
