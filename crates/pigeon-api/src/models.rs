@@ -1029,6 +1029,10 @@ pub struct DecryptedMessageView {
     pub attachments: Option<Vec<MessageAttachmentView>>,
     /// Authentication verdicts.
     pub auth: AuthVerdict,
+    /// Whether the message has been read. The reader's mark-read toggle needs
+    /// the current state: without it the button always offered "mark as read"
+    /// even on mail the user had already opened.
+    pub read: bool,
 }
 
 /// `MessagePage.items[]` — metadata only, never bodies.

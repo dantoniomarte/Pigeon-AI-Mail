@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   AlertTriangle,
@@ -184,6 +184,13 @@ export default function MailView({
   // frames; here, degrade gracefully: no height message -> frame keeps the
   // CSS clamp height (still usable, as #86 documented).
   const frameScrollRef = useRef<number | null>(null);
+  // Optimistic read-state overrides from the reader toggle: the parent
+  // refresh is async, so the label flips immediately and the override clears
+  // when another message opens.
+  const [readOverride, setReadOverride] = useState<Record<string, boolean>>({});
+  useEffect(() => {
+    setReadOverride({});
+  }, [message?.id]);
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {
       const data = event.data as { type?: string; value?: number } | null;
@@ -314,6 +321,13 @@ export default function MailView({
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [onNavigate, readerOpen, shortcutsEnabled, prevId, nextId]);
+
+  const effectiveMessage = useMemo(() => {
+    if (message === null || message.read === undefined) return message;
+    const override = readOverride[message.id];
+    if (override === undefined || override === message.read) return message;
+    return { ...message, read: override };
+  }, [message, readOverride]);
 
   const fullDate =
     message?.created_at !== undefined
@@ -591,18 +605,21 @@ export default function MailView({
             <Forward size={15} aria-hidden="true" />
             <span>{t('mail.forward')}</span>
           </button>
-          {!isSent && onMarkRead !== undefined && message !== null ? (
+          {!isSent && onMarkRead !== undefined && effectiveMessage !== null ? (
             <button
               type="button"
               className="btn btn--quiet"
-              onClick={() => onMarkRead(message.id, !message.read)}
+              onClick={() => {
+                onMarkRead(effectiveMessage.id, !effectiveMessage.read);
+                setReadOverride((current) => ({ ...current, [effectiveMessage.id]: !effectiveMessage.read }));
+              }}
               disabled={message === null}
-              aria-label={message.read ? t('mail.markUnread') : t('mail.markRead')}
-              title={message.read ? t('mail.markUnread') : t('mail.markRead')}
+              aria-label={effectiveMessage.read ? t('mail.markUnread') : t('mail.markRead')}
+              title={effectiveMessage.read ? t('mail.markUnread') : t('mail.markRead')}
             >
-              {message.read ? <MailOpen size={15} aria-hidden="true" /> : <Mail size={15} aria-hidden="true" />}
+              {effectiveMessage.read ? <MailOpen size={15} aria-hidden="true" /> : <Mail size={15} aria-hidden="true" />}
               <span className="reader__bar-label">
-                {message.read ? t('mail.markUnread') : t('mail.markRead')}
+                {effectiveMessage.read ? t('mail.markUnread') : t('mail.markRead')}
               </span>
             </button>
           ) : null}

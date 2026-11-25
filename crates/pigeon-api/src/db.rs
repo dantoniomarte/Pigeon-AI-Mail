@@ -153,6 +153,8 @@ pub struct StoredMessage {
     /// Address this copy was delivered for, when it is not the account's own (a
     /// sender alias or a catch-all local part). `None` on ordinary mail.
     pub delivered_for: Option<String>,
+    /// Read marker (the reader's mark-read toggle needs the current state).
+    pub read: bool,
 }
 
 /// One attachment row.
@@ -558,7 +560,7 @@ impl ApiDb {
         let message = conn
             .query_row(
                 "SELECT m.id, m.direction, m.from_addr, m.to_addrs, m.subject,
-                        m.sealed_body, m.created_at, a.wrapped_key, m.delivered_for
+                        m.sealed_body, m.created_at, a.wrapped_key, m.delivered_for, m.read_at
                    FROM messages m
                    LEFT JOIN api_messages a ON a.message_id = m.id
                   WHERE m.id = ?1 AND m.account_id = ?2",
@@ -584,7 +586,7 @@ impl ApiDb {
         let message = conn
             .query_row(
                 "SELECT m.id, m.direction, m.from_addr, m.to_addrs, m.subject, \
-                        m.sealed_body, m.created_at, a.wrapped_key, m.delivered_for \
+                        m.sealed_body, m.created_at, a.wrapped_key, m.delivered_for, m.read_at \
                    FROM messages m \
                    LEFT JOIN api_messages a ON a.message_id = m.id \
                   WHERE m.id = ?1 AND m.account_id = ?2",
@@ -1224,6 +1226,7 @@ fn map_stored_message(row: &Row<'_>) -> rusqlite::Result<StoredMessage> {
         created_at: iso_from_sqlite(&row.get::<_, String>(6)?),
         wrapped_key: row.get(7)?,
         delivered_for: row.get(8)?,
+        read: row.get::<_, Option<String>>(9)?.is_some(),
     })
 }
 

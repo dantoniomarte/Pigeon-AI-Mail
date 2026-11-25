@@ -341,6 +341,10 @@ export default function App(): JSX.Element {
           persistReadIds(next);
           return next;
         });
+        // The detail carries the server read state; the reader toggle uses it.
+        setDetail((current) =>
+          current !== null && current.id === selectedId ? { ...current, read: result.data.read ?? true } : current,
+        );
         if (!result.demo && !openedPatchedRef.current.has(selectedId)) {
           openedPatchedRef.current.add(selectedId);
           // The read flag lives on the server now: open marks read. A failure

@@ -530,6 +530,7 @@ pub async fn get_message(
             body_html,
             attachments: Some(attachments),
             auth: AuthVerdict::default(),
+            read: stored.read,
         }))
     })
     .await;
@@ -1005,6 +1006,7 @@ mod tests {
             created_at: crate::time::iso_now(),
             wrapped_key: None,
             delivered_for: None,
+            read: false,
         };
         assert!(stored.wrapped_key.is_none());
         assert_eq!(stored.direction, "in");

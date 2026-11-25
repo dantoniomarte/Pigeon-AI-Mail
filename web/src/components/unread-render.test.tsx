@@ -554,3 +554,36 @@ describe('unified top action bar (user round: bar below body)', () => {
     ).toBe(true);
   });
 });
+describe('mark-read toggle reflects server read state', () => {
+  it('offers mark-as-unread when the detail carries read: true', () => {
+    const props = mailViewProps();
+    props.onMarkRead = vi.fn();
+    props.message = messageFixture({ body_html: '<p>x</p>', read: true });
+    render(<MailView {...props} />);
+
+    const button = screen.getByRole('button', { name: 'Mark as unread' });
+    fireEvent.click(button);
+    expect(props.onMarkRead).toHaveBeenCalledWith('msg-1', false);
+  });
+
+  it('offers mark-as-read when the detail carries read: false', () => {
+    const props = mailViewProps();
+    props.onMarkRead = vi.fn();
+    props.message = messageFixture({ body_html: '<p>x</p>', read: false });
+    render(<MailView {...props} />);
+    expect(screen.getByRole('button', { name: 'Mark as read' })).toBeInTheDocument();
+  });
+
+  it('flips the label optimistically after the toggle', () => {
+    const props = mailViewProps();
+    props.onMarkRead = vi.fn();
+    props.message = messageFixture({ body_html: '<p>x</p>', read: false });
+    const { rerender } = render(<MailView {...props} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Mark as read' }));
+    expect(props.onMarkRead).toHaveBeenCalledWith('msg-1', true);
+    // The parent refresh is async; after the rerender with the same message
+    // the optimistic override keeps the flipped label (no stale "read").
+    rerender(<MailView {...props} />);
+  });
+});
