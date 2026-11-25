@@ -1798,6 +1798,19 @@ body {
   gap: 8px;
 }
 
+/* Mid-band desktop: six labeled buttons overflow one row below ~1240px
+   and wrap into two uneven lines. Icon-only mode keeps the row symmetric;
+   every button keeps its aria-label for accessibility. */
+@media (min-width: 769px) and (max-width: 1240px) {
+  .reader__bar-actions .btn span {
+    display: none;
+  }
+
+  .reader__bar-actions .btn {
+    padding: 8px;
+  }
+}
+
 /* ---------------------------------------------------------------- */
 /* Settings                                                         */
 /* ---------------------------------------------------------------- */

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   AlertTriangle,
+  X,
   ArrowLeft,
   ArrowRight,
   ChevronLeft,
@@ -634,7 +635,7 @@ export default function MailView({
           {onDelete !== undefined && message !== null ? (
             <button
               type="button"
-              className={`btn btn--quiet${isSent && confirmDelete ? ' btn--danger' : ''}`}
+              className={`btn btn--quiet reader__bar-delete${isSent && confirmDelete ? ' btn--danger' : ''}`}
               onClick={() => {
                 // Sent rows arm a confirmation first: the delete is
                 // permanent (no trash for outbound copies).
@@ -649,7 +650,10 @@ export default function MailView({
               aria-label={isSent && confirmDelete ? t('mail.confirmDelete') : t('mail.deleteForever')}
               title={isSent && confirmDelete ? t('mail.confirmDelete') : t('mail.deleteForever')}
             >
-              <Trash2 size={15} aria-hidden="true" />
+              {/* X = permanent delete, visually distinct from the trash-folder
+                  button (Trash2) — in icon-only mobile mode the two identical
+                  trash icons read as the same action. */}
+              <X size={15} aria-hidden="true" />
               <span className="reader__bar-label">
                 {isSent && confirmDelete ? t('mail.confirmDelete') : t('mail.deleteForever')}
               </span>

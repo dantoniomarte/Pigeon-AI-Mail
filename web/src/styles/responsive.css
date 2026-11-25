@@ -218,6 +218,12 @@
     display: none;
   }
 
+  /* Icon-only mode: the permanent delete reads danger-red so it cannot be
+     confused with the trash-folder button. */
+  .reader__bar-actions .reader__bar-delete {
+    color: var(--bad);
+  }
+
   .reader__bar-actions .btn {
     padding: 8px;
   }

@@ -4,6 +4,8 @@ import { describe, expect, it, vi } from 'vitest';
 
 import MailList, { type MailListProps } from './MailList';
 import MailView from './MailView';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { MessageDetail } from '../api';
 import * as apiModule from '../api';
 
@@ -439,14 +441,12 @@ describe('restore round-trip through the component (JD-B-004)', () => {
 describe('dark-mode unread contrast (user round 7)', () => {
   it('strengthens the dark unread treatment', () => {
     // The CSS contract is pinned by reading the source file directly.
-    const { readFileSync } = require('node:fs');
-    const { join } = require('node:path');
     const css = readFileSync(join(__dirname, '..', 'styles', 'components.css'), 'utf8');
     expect(css).toContain('box-shadow: inset 3px 0 0 0 var(--accent)');
     expect(css).toContain('color: #ffc9b8');
     expect(css).toContain('color: #ffe4da');
     const tokens = readFileSync(join(__dirname, '..', 'styles', 'variables.css'), 'utf8');
-    expect(tokens).toContain('rgba(255, 122, 85, 0.22)');
+        expect(tokens).toContain('rgba(255, 122, 85, 0.22)');
 
     // JD-B-002: the unified bar must wrap on EVERY viewport (universal rule,
     // not media-scoped — a 769-1439px cliff once clipped Delete silently).
@@ -480,12 +480,17 @@ describe('dark-mode unread contrast (user round 7)', () => {
     );
     expect(selectedBlock).toContain('background: var(--surface-3)');
     expect(selectedBlock).not.toContain('accent) 16%');
-  });
+
+    // The delete button uses the X icon (not Trash2) via MailView markup.
+    const viewSrc = readFileSync(join(__dirname, '..', 'components', 'MailView.tsx'), 'utf8');
+    expect(viewSrc).toContain('reader__bar-delete');
+      });
 });
 
 
 describe('unified top action bar (user round: bar below body)', () => {
   it('puts all reader actions in the top bar with no bottom action block', () => {
+    const css = readFileSync(join(__dirname, '..', 'styles', 'components.css'), 'utf8');
     const props = mailViewProps();
     props.onMarkRead = vi.fn();
     props.onMove = vi.fn();
@@ -507,6 +512,20 @@ describe('unified top action bar (user round: bar below body)', () => {
     expect(labels.some((l) => l.includes('Report spam'))).toBe(true);
     expect(labels.some((l) => l.includes('Move to trash'))).toBe(true);
     expect(labels.some((l) => l.includes('Delete permanently'))).toBe(true);
+
+    // Bar-polish round: the mid-band (769-1240px) hides labels so the six
+    // actions keep one symmetric row, and the permanent delete is danger-red
+    // in icon-only mode (distinct from the trash-folder button).
+    const midBand = css.slice(
+      css.indexOf('@media (min-width: 769px) and (max-width: 1240px)'),
+    );
+    expect(midBand).toContain('.reader__bar-actions .btn span');
+    expect(midBand.slice(0, midBand.indexOf('/* ----') >= 0 ? midBand.indexOf('/* ----') : midBand.length)).toContain('display: none');
+    const responsive = readFileSync(join(__dirname, '..', 'styles', 'responsive.css'), 'utf8');
+    const viewSrc = readFileSync(join(__dirname, '..', 'components', 'MailView.tsx'), 'utf8');
+    expect(responsive).toContain('.reader__bar-actions .reader__bar-delete');
+    expect(responsive).toContain('color: var(--bad)');
+    expect(viewSrc).toContain('reader__bar-delete');
   });
 
   it('keeps the sent reader actions in the same top bar with armed delete', () => {
