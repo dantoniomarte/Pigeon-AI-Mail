@@ -590,7 +590,7 @@ export default function MailView({
             <Forward size={15} aria-hidden="true" />
             <span>{t('mail.forward')}</span>
           </button>
-          {isSent && onMarkRead !== undefined && message !== null && !confirmDelete ? (
+          {!isSent && onMarkRead !== undefined && message !== null ? (
             <button
               type="button"
               className="btn btn--quiet"

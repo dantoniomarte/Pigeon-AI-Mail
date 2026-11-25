@@ -247,13 +247,6 @@
     gap: 5px;
   }
 
-  /* The unified top bar carries all actions now: let the quiet buttons
-     shrink and keep the bar scrollable if it overflows on small screens. */
-  .reader__bar-actions {
-    flex-wrap: wrap;
-    max-width: 100%;
-  }
-
   .verdict {
     padding: 1px 6px;
     font-size: 10px;

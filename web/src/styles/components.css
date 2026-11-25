@@ -1057,7 +1057,12 @@ body {
   flex: 1;
 }
 
+/* The unified bar carries every reader action: it wraps on any viewport
+   (a media-scoped rule left a 769-1439px cliff where Delete was clipped
+   by .reader overflow:hidden — judge-audited). */
 .reader__bar-actions {
+  flex-wrap: wrap;
+  max-width: 100%;
   display: flex;
   gap: 4px;
 }

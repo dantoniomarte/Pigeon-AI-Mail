@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -354,7 +354,9 @@ describe('reading round fixes', () => {
 
     expect(screen.getByRole('button', { name: 'Delete permanently' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Forward' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Mark as unread' })).toBeInTheDocument();
+    // Outbound copies are never unread server-side: the sent bar has no
+    // mark-read action.
+    expect(screen.queryByRole('button', { name: 'Mark as unread' })).not.toBeInTheDocument();
   });
 
   it('uses the wide html box for sent bodies like inbox', () => {
@@ -470,5 +472,58 @@ describe('dark-mode unread contrast (user round 7)', () => {
     );
     expect(selectedBlock).toContain('background: var(--surface-3)');
     expect(selectedBlock).not.toContain('accent) 16%');
+  });
+});
+
+
+describe('unified top action bar (user round: bar below body)', () => {
+  it('puts all reader actions in the top bar with no bottom action block', () => {
+    const props = mailViewProps();
+    props.onMarkRead = vi.fn();
+    props.onMove = vi.fn();
+    props.onDelete = vi.fn();
+    props.message = messageFixture({ body_html: '<p>body</p>' });
+    const { container } = render(<MailView {...props} />);
+
+    const bars = container.querySelectorAll('.reader__bar-actions');
+    expect(bars.length).toBe(1);
+    expect(container.querySelector('.reader__actions')).toBeNull();
+
+    const labels = [...bars[0].querySelectorAll('button')].map(
+      (button) => button.getAttribute('aria-label') ?? button.textContent ?? '',
+    );
+    console.log('BARLABELS>>>' + JSON.stringify(labels) + '<<<END');
+    expect(labels.some((l) => l.includes('Reply'))).toBe(true);
+    expect(labels.some((l) => l.includes('Forward'))).toBe(true);
+    expect(labels.some((l) => l.includes('Mark as read'))).toBe(true);
+    expect(labels.some((l) => l.includes('Report spam'))).toBe(true);
+    expect(labels.some((l) => l.includes('Move to trash'))).toBe(true);
+    expect(labels.some((l) => l.includes('Delete permanently'))).toBe(true);
+  });
+
+  it('keeps the sent reader actions in the same top bar with armed delete', () => {
+    const props = { ...mailViewProps(), mode: 'sent' as const, sentStatus: 'sent' as const };
+    props.onDelete = vi.fn();
+    props.message = {
+      id: 'eml_1',
+      from_addr: 'owner@example.com',
+      subject: 'sent',
+      created_at: '2026-02-03T10:00:00Z',
+      read: true,
+    };
+    const { container } = render(<MailView {...props} />);
+    const bars = container.querySelectorAll('.reader__bar-actions');
+    expect(bars.length).toBe(1);
+    const labels = [...bars[0].querySelectorAll('button')].map(
+      (button) => button.getAttribute('aria-label') ?? button.textContent ?? '',
+    );
+    expect(labels.some((l) => l.includes('Delete permanently'))).toBe(true);
+    // Armed state appears after the first click (two-step delete).
+    fireEvent.click(bars[0].querySelector('button[aria-label*="Delete"]') as HTMLElement);
+    expect(
+      [...bars[0].querySelectorAll('button')].some(
+        (button) => (button.getAttribute('aria-label') ?? '').includes('Confirm'),
+      ),
+    ).toBe(true);
   });
 });
