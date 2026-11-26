@@ -51,14 +51,23 @@ an assigned sender alias) → idempotency → render MIME (`pigeon-api/src/mime`
 → decide payload protection → seal (layer 1 at-rest always; layer 3 OpenPGP
 E2E when recipients publish keys) → insert message + lifecycle row → enqueue.
 
-**Deliver**: the worker claims a job (lease, backoff, dead-letter), groups
-recipients by MX, connects opportunistic STARTTLS, hands the MIME over, and
-records per-domain verdicts so a retry only targets outstanding domains.
+**Deliver**: the worker claims a job (lease, backoff, dead-letter), splits
+recipients into **local** (hosted by this deployment — resolved by the shared
+`resolve_all_local`: mailbox, then sender alias, then the domain's catch-all
+rule) and **remote**. Local recipients are stored directly through the same
+sealed-copy path the inbound server uses (`store_local_copies`: one sealed body
+per `(account, delivered_for)` group, with an `email.received` event); their
+domains are marked terminal on the queue row and a job whose every recipient is
+local settles `sent` without opening a connection. Remote recipients are grouped
+by MX, connected over opportunistic STARTTLS, the MIME handed over, and
+per-domain verdicts recorded so a retry only targets outstanding domains.
 
 **Receive**: a remote MX connects to `:25` → ESMTP dialog (size and rate
-limits, no open relay) → parse MIME → seal the body at rest → store →
-inbound webhook event. Auth verdicts are recorded as `none`; SPF/DKIM/DMARC
-evaluation is planned (see docs/ROADMAP.md).
+limits, no open relay) → parse MIME → seal the body at rest → resolve
+recipients via the shared `resolve_all_local` (mailbox, sender alias,
+catch-all rule) → store through `store_local_copies` → inbound webhook event.
+Auth verdicts are recorded as `none`; SPF/DKIM/DMARC evaluation is planned
+(see docs/ROADMAP.md).
 
 ## Security layers
 
