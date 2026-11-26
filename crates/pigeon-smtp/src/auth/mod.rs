@@ -6,10 +6,13 @@
 //! `p=reject`) is a config flag that ships off — v0.1 records and surfaces,
 //! it does not reject.
 
-pub mod dmarc;
-pub mod spf;
 #[cfg(test)]
-mod tests;
+#[path = "tests.rs"]
+mod auth_tests;
+pub mod dmarc;
+pub mod dns;
+pub mod runtime;
+pub mod spf;
 
 use crate::error::Result;
 
@@ -24,7 +27,7 @@ pub struct AuthVerdicts {
 /// DKIM verification outcome: which signatures passed, which failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DkimSummary {
-    /// No `DKIM-Signature` header present.
+    /// No `DKIM-Signature` header present, or no signature could be checked.
     None,
     /// At least one signature verified.
     Pass(Vec<String>),
@@ -41,6 +44,23 @@ impl DkimSummary {
             DkimSummary::Pass(_) => "pass",
             DkimSummary::Fail(_) => "fail",
             DkimSummary::TempError(_) => "temperror",
+        }
+    }
+}
+
+impl Default for AuthVerdicts {
+    fn default() -> Self {
+        Self {
+            spf: spf::SpfResult {
+                verdict: spf::SpfVerdict::None,
+                domain: String::new(),
+            },
+            dkim: DkimSummary::None,
+            dmarc: dmarc::DmarcResult {
+                verdict: dmarc::DmarcVerdict::None,
+                from_domain: String::new(),
+                policy: "none".to_string(),
+            },
         }
     }
 }
@@ -78,48 +98,31 @@ impl AuthVerdicts {
     }
 }
 
-impl Default for AuthVerdicts {
-    fn default() -> Self {
-        Self {
-            spf: spf::SpfResult {
-                verdict: spf::SpfVerdict::None,
-                domain: String::new(),
-            },
-            dkim: DkimSummary::None,
-            dmarc: dmarc::DmarcResult {
-                verdict: dmarc::DmarcVerdict::None,
-                from_domain: String::new(),
-                policy: "none".to_string(),
-            },
-        }
-    }
-}
-
 /// Evaluate all three checks for one inbound message.
 ///
-/// `dns_txt` resolves a TXT record by fully qualified name (the SPF record,
-/// the DKIM key, the DMARC policy). `peer_ip` is the connecting IP from
-/// `envelope.peer`. `mail_from` is the envelope sender. `from_header` is the
-/// parsed `From:` header address.
+/// `dns` is the authentication DNS source (TXT for SPF/DMARC/DKIM keys, A and
+/// AAAA for the SPF `a`/`mx` mechanisms). `peer_ip` is the connecting IP from
+/// `envelope.peer`. `mail_from_domain` is the envelope sender's domain.
+/// `parsed` is the parsed message (headers for DKIM, body for hashing).
 pub fn evaluate(
-    dns_txt: &dyn Fn(&str) -> Option<String>,
-    peer_ip: &str,
+    dns: &dyn dns::AuthDnsSource,
+    peer_ip: std::net::IpAddr,
     mail_from_domain: &str,
-    from_header: &crate::server::ParsedMessage,
+    parsed: &crate::server::ParsedMessage,
 ) -> Result<AuthVerdicts> {
     // SPF: check the envelope sender's domain against the connecting IP.
-    let spf_result = spf::check(dns_txt, peer_ip, mail_from_domain);
+    let spf_result = spf::check(dns, peer_ip, mail_from_domain);
 
     // DKIM: verify every DKIM-Signature header against the message.
-    let dkim_result = verify_dkim(dns_txt, from_header);
+    let dkim_result = verify_dkim(dns, parsed);
 
     // DMARC: evaluate alignment and policy for the From: domain.
-    let from_domain = from_header
+    let from_domain = parsed
         .addresses("From")
         .first()
         .map(|addr| addr.domain().to_string())
         .unwrap_or_default();
-    let dmarc_result = dmarc::evaluate(dns_txt, &spf_result, &dkim_result, &from_domain);
+    let dmarc_result = dmarc::evaluate(dns, &spf_result, &dkim_result, &from_domain);
 
     Ok(AuthVerdicts {
         spf: spf_result,
@@ -129,8 +132,8 @@ pub fn evaluate(
 }
 
 /// Verify all DKIM-Signature headers on the message.
-fn verify_dkim(
-    dns_txt: &dyn Fn(&str) -> Option<String>,
+pub(crate) fn verify_dkim(
+    dns: &dyn dns::AuthDnsSource,
     parsed: &crate::server::ParsedMessage,
 ) -> DkimSummary {
     let signatures: Vec<&(String, String)> = parsed
@@ -142,13 +145,58 @@ fn verify_dkim(
         return DkimSummary::None;
     }
 
-    let body = String::from_utf8_lossy(&parsed.body).to_string();
+    // DKIM body hashing is byte-exact (RFC 6376 §3.7): the canonicalization
+    // in pigeon-dkim operates on UTF-8 text, so a body with invalid UTF-8
+    // sequences cannot be verified without corrupting it via lossy
+    // conversion (issue #111 F3). Skip those signatures rather than report
+    // a false fail — the body hash would never match the corrupted bytes.
+    let Ok(body) = std::str::from_utf8(&parsed.body) else {
+        return DkimSummary::TempError(
+            "body is not valid UTF-8; DKIM verification requires byte-exact \
+             canonicalization and is not attempted"
+                .to_string(),
+        );
+    };
+
     let mut passed_domains = Vec::new();
     let mut failures = Vec::new();
+    let mut skipped = 0usize;
 
     for (_, value) in &signatures {
-        match pigeon_dkim::verify::verify_message(value, &parsed.headers, &body, |name| {
-            dns_txt(name)
+        // Resolve the DKIM key through the auth DNS source (blocking on the
+        // async resolver from this synchronous caller context).
+        let key = self::runtime::block_on_any(async {
+            let selector = value
+                .split("s=")
+                .nth(1)
+                .and_then(|rest| rest.split(';').next())
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            let domain_tag = value
+                .split("d=")
+                .nth(1)
+                .and_then(|rest| rest.split(';').next())
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            if selector.is_empty() || domain_tag.is_empty() {
+                return None;
+            }
+            let name = format!("{selector}._domainkey.{domain_tag}.");
+            dns.txt(&name).await.ok()
+        })
+        .and_then(|records| records.into_iter().next());
+
+        let Some(key_record) = key else {
+            // No key published: the signature cannot be checked — skip it
+            // rather than report a false fail (issue #109 R3 fix, kept).
+            skipped += 1;
+            continue;
+        };
+
+        match pigeon_dkim::verify::verify_message(value, &parsed.headers, body, |_| {
+            Some(key_record.clone())
         }) {
             Ok(result) => {
                 if result.passed {
@@ -162,15 +210,9 @@ fn verify_dkim(
                     );
                 }
             }
-            Err(error) => {
-                // Key-resolution failures (no key published, DNS unreachable)
-                // are not signature failures: skip the signature rather than
-                // reporting a false "fail" verdict. Only crypto mismatches
-                // (Ok(passed=false)) are real failures (issue #109 R3).
-                let msg = error.to_string();
-                if !msg.contains("no key") && !msg.contains("DNS") {
-                    failures.push(msg);
-                }
+            Err(_) => {
+                // Structural errors in the signature header itself.
+                failures.push("malformed DKIM-Signature header".to_string());
             }
         }
     }
@@ -180,6 +222,8 @@ fn verify_dkim(
     } else if failures.is_empty() {
         // All signatures were skipped (no key published for any): report
         // "none" rather than "fail" — we could not check, we did not fail.
+        DkimSummary::None
+    } else if skipped == signatures.len() {
         DkimSummary::None
     } else {
         DkimSummary::Fail(failures)

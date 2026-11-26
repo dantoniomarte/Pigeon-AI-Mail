@@ -5,7 +5,8 @@
 //! policy (`none`, `quarantine`, `reject`). In v0.1 the policy is recorded
 //! and surfaced, not enforced — enforcement is a config flag that ships off.
 
-use super::spf::SpfResult;
+use super::dns::AuthDnsSource;
+use super::spf::{SpfResult, SpfVerdict};
 use super::DkimSummary;
 
 /// DMARC evaluation result.
@@ -46,8 +47,8 @@ impl DmarcResult {
 }
 
 /// Evaluate DMARC for the From: domain given the SPF and DKIM results.
-pub fn evaluate(
-    dns_txt: &dyn Fn(&str) -> Option<String>,
+pub async fn evaluate_async(
+    dns: &dyn AuthDnsSource,
     spf: &SpfResult,
     dkim: &DkimSummary,
     from_domain: &str,
@@ -60,17 +61,22 @@ pub fn evaluate(
         };
     }
 
-    // Resolve the DMARC record.
     // RFC 7489 §6.6.3: look up _dmarc.<from-domain> first; if not found,
     // fall back to the organizational domain (the last two labels).
-    let record = dns_txt(&format!("_dmarc.{from_domain}.")).or_else(|| {
-        let org_domain = organizational_domain(from_domain);
-        if org_domain != from_domain {
-            dns_txt(&format!("_dmarc.{org_domain}."))
-        } else {
-            None
+    let record = match dns.txt(&format!("_dmarc.{from_domain}.")).await {
+        Ok(records) if !records.is_empty() => Some(records.into_iter().next().unwrap()),
+        _ => {
+            let org_domain = organizational_domain(from_domain);
+            if org_domain != from_domain {
+                dns.txt(&format!("_dmarc.{org_domain}."))
+                    .await
+                    .ok()
+                    .and_then(|records| records.into_iter().next())
+            } else {
+                None
+            }
         }
-    });
+    };
     let Some(record) = record else {
         return DmarcResult {
             verdict: DmarcVerdict::None,
@@ -97,11 +103,7 @@ pub fn evaluate(
         .to_string();
 
     // Alignment check (RFC 7489 §3.1): relaxed mode by default.
-    // SPF aligns when the SPF-passing domain is the same or a parent of
-    // the From: domain. DKIM aligns when the `d=` domain is the same or
-    // a parent of the From: domain.
-    let spf_aligned =
-        spf.verdict == super::spf::SpfVerdict::Pass && domains_align(&spf.domain, from_domain);
+    let spf_aligned = spf.verdict == SpfVerdict::Pass && domains_align(&spf.domain, from_domain);
     let dkim_aligned = matches!(dkim, DkimSummary::Pass(domains) if domains.iter().any(|d| domains_align(d, from_domain)));
 
     let verdict = if spf_aligned || dkim_aligned {
@@ -117,13 +119,22 @@ pub fn evaluate(
     }
 }
 
+/// Synchronous wrapper for callers outside the async runtime.
+pub fn evaluate(
+    dns: &dyn AuthDnsSource,
+    spf: &SpfResult,
+    dkim: &DkimSummary,
+    from_domain: &str,
+) -> DmarcResult {
+    super::runtime::block_on_any(evaluate_async(dns, spf, dkim, from_domain))
+}
+
 /// RFC 7489 relaxed alignment: `auth_domain` equals `from_domain` or is a
-/// subdomain of it (or `from_domain` is a subdomain of `auth_domain`).
+/// parent of it (or `from_domain` is a subdomain of `auth_domain`).
 fn domains_align(auth_domain: &str, from_domain: &str) -> bool {
     if auth_domain.eq_ignore_ascii_case(from_domain) {
         return true;
     }
-    // Subdomain check: the From: domain ends with `.auth_domain`.
     from_domain
         .to_ascii_lowercase()
         .ends_with(&format!(".{}", auth_domain.to_ascii_lowercase()))

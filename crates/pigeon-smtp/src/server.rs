@@ -820,24 +820,18 @@ fn ingest_message(
     // v0.1 records and surfaces the verdicts, it does not enforce them.
     let auth_verdicts = {
         let mail_from_domain = envelope.mail_from.domain().to_string();
-        let peer_ip = envelope.peer.ip().to_string();
-        crate::auth::evaluate(
-            &|name: &str| {
-                // The TXT resolver: hickory over the system configuration.
-                // For v0.1 we use a synchronous lookup via the existing resolver
-                // pattern (the blocking pool runs this function).
-                // A real TXT lookup needs the DNS crate; for now the evaluation
-                // runs with a no-op resolver (returns None = "no record") when
-                // the DNS seam is not available, which degrades to `none`
-                // verdicts — the same behavior as v0.1 without the module.
-                let _ = name;
-                None
-            },
-            &peer_ip,
-            &mail_from_domain,
-            &parsed,
-        )
-        .unwrap_or_default()
+        let peer_ip = envelope.peer.ip();
+        // Real DNS resolution (issue #111 F1): the auth DNS source resolves
+        // TXT (SPF/DMARC/DKIM keys) and A/AAAA (SPF a/mx mechanisms) through
+        // hickory over the system configuration. A resolver failure degrades
+        // to "no record" (none verdicts) — delivery is never blocked by DNS.
+        match crate::auth::dns::HickoryAuthDnsSource::from_system() {
+            Ok(dns_source) => {
+                crate::auth::evaluate(&dns_source, peer_ip, &mail_from_domain, &parsed)
+                    .unwrap_or_default()
+            }
+            Err(_) => crate::auth::AuthVerdicts::default(),
+        }
     };
 
     let origin = format!(

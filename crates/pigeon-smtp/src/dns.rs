@@ -17,7 +17,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use hickory_resolver::TokioResolver;
+pub use hickory_resolver::TokioResolver;
 
 use crate::error::{Result, SmtpError};
 
