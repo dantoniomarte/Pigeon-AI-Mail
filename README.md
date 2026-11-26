@@ -8,7 +8,7 @@
   </p>
   <img src="assets/logo/pigeon.svg" alt="Pigeon Mail mascot — a carrier pigeon carrying an envelope" width="180">
   <p><strong>Self-hosted encrypted email infrastructure with an API-first soul.</strong><br>
-  Send and receive email through a clean HTTP API (Resend-compatible), from any AI agent via MCP, or from an optional beautiful webmail. End-to-end encrypted where possible, always encrypted in transit and at rest.</p>
+  Send and receive email through a clean HTTP API (Resend-compatible), from any AI agent via MCP, or from an optional beautiful webmail. End-to-end encrypted where possible, encrypted in transit where the protocol supports it, always encrypted at rest.</p>
   <p><a href="#status">Status</a> · <a href="#features">Features</a> · <a href="#quick-start">Quick start</a> · <a href="docs/API.md">API</a> · <a href="#for-ai-agents-mcp">Agents / MCP</a> · <a href="#connect-any-agent">Agent configs</a> · <a href="#security">Security</a> · <a href="#development">Development</a></p>
 </div>
 
@@ -27,8 +27,8 @@ Carrier pigeons carried sealed letters across enemy lines for centuries — fast
 | Area | What you get |
 |---|---|
 | **Sending API** | Resend-compatible `POST /v1/emails`, idempotency keys, templates with variables, scheduled sends |
-| **Receiving** | Full inbound SMTP (port 25): ESMTP with STARTTLS, size and rate limits; mail is parsed and stored. SPF/DKIM/DMARC evaluation is planned — see [docs/ROADMAP.md](docs/ROADMAP.md) |
-| **Encryption** | TLS 1.2+/1.3 in transit; encrypted storage at rest; end-to-end (OpenPGP) delivery and WKD key publishing, modeled after Proton's architecture — see [docs/e2ee-model.md](docs/e2ee-model.md) |
+| **Receiving** | Full inbound SMTP (port 25): ESMTP with size and rate limits; mail is parsed and stored. Inbound SMTP is plaintext in v0.1 (no STARTTLS termination — see [docs/ARCHITECTURE.md](ARCHITECTURE.md)); SPF/DKIM/DMARC evaluation is planned — see [docs/ROADMAP.md](docs/ROADMAP.md) |
+| **Encryption** | TLS for the API/webmail (behind a reverse proxy); opportunistic STARTTLS for outbound SMTP; inbound SMTP plaintext in v0.1; encrypted storage at rest; end-to-end (OpenPGP) delivery and WKD key publishing — see [docs/e2ee-model.md](docs/e2ee-model.md) |
 | **Agents first** | Built-in [MCP](https://modelcontextprotocol.io) server (`send_email`, `list_messages`, `get_message`, `manage_webhooks`…), so any AI harness can operate mail through the same audited API |
 | **Webmail (optional)** | A calm, fast web UI with light/dark themes, i18n and animations you can switch off — installed only if you ask for it |
 | **2FA** | TOTP (Google Authenticator, Aegis, 1Password…) for dashboard and webmail accounts |
@@ -195,7 +195,7 @@ agents running on the mail server. Everywhere else, use the Docker bridge or a
 
 ## Security
 
-- **In transit**: TLS for the API, STARTTLS opportunistically required for outbound SMTP (configurable to mandatory), modern inbound SMTP.
+- **In transit**: TLS for the API and webmail (behind a reverse proxy); opportunistic STARTTLS for outbound SMTP (configurable to mandatory); inbound SMTP in plaintext (v0.1 has no TLS termination for SMTP — STARTTLS lands in v0.2).
 - **At rest**: message bodies and credentials are encrypted with XChaCha20-Poly1305 using a server master key before they touch disk.
 - **End-to-end**: when the recipient publishes a key (WKD/PGP), outbound mail is encrypted so the Pigeon server itself cannot read it. The model and its limits are documented in [docs/e2ee-model.md](docs/e2ee-model.md) — we are explicit about what is E2E and what is not.
 - **Disclosure**: please report vulnerabilities privately via [SECURITY.md](SECURITY.md).
