@@ -38,6 +38,7 @@
 pub mod client;
 pub mod dns;
 pub mod error;
+mod local;
 pub mod server;
 pub mod worker;
 

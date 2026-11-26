@@ -50,7 +50,6 @@
 //! catch-all mail", so bouncing it because everybody is on holiday would turn a
 //! configuration choice into a delivery failure.
 
-use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -58,10 +57,9 @@ use std::time::Duration;
 use base64::Engine as _;
 use pigeon_api::db::ApiDb;
 use pigeon_api::time::{now_unix, rfc5322_date};
-use pigeon_core::types::CatchallAction;
-use pigeon_core::{Direction, EmailAddress};
+use pigeon_core::EmailAddress;
 use pigeon_crypto::MasterKey;
-use store::{CatchallAssignmentRow, CatchallRuleRow, NewMessage, SqliteStorage, Storage};
+use store::{CatchallAssignmentRow, CatchallRuleRow, SqliteStorage, Storage};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -720,47 +718,6 @@ impl InboundSmtpServer {
     }
 }
 
-/// How one recipient resolved, for the event detail a mailbox owner reads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DeliveryVia {
-    /// The address belongs to the account itself.
-    Direct,
-    /// The address is a sender alias the account holds.
-    Alias,
-    /// The domain routes unknown local parts to the account.
-    Catchall,
-}
-
-/// One outgoing copy: who receives it, and why.
-#[derive(Debug)]
-struct Delivery {
-    recipients: Vec<EmailAddress>,
-    via: DeliveryVia,
-}
-
-impl Delivery {
-    fn direct() -> Self {
-        Self {
-            recipients: Vec::new(),
-            via: DeliveryVia::Direct,
-        }
-    }
-
-    fn via_alias() -> Self {
-        Self {
-            recipients: Vec::new(),
-            via: DeliveryVia::Alias,
-        }
-    }
-
-    fn via_catchall() -> Self {
-        Self {
-            recipients: Vec::new(),
-            via: DeliveryVia::Catchall,
-        }
-    }
-}
-
 /// Store one message. Runs on the blocking pool: every call is `rusqlite`.
 fn ingest_message(
     store: &SqliteStorage,
@@ -773,110 +730,61 @@ fn ingest_message(
 ) -> Result<Reply> {
     let parsed = parse_message(&raw);
 
-    // Recipient → (account, delivery marker), resolved in the documented order:
-    // exact mailbox, then sender alias, then the domain's catch-all rule.
-    //
-    // The key carries the marker so one resolved message can produce several
-    // copies for the same account (its own mail plus an alias copy), while two
-    // recipients that resolve to the same account *and* the same marker share one
-    // sealed body. Recipients nobody resolves are not local: they are logged and
-    // dropped rather than bounced (v0.1 has no outbound bounce generator); if
-    // nobody was stored and nobody was deliberately discarded, the whole message
-    // is refused with 550.
-    let mut per_account: BTreeMap<(i64, Option<String>), Delivery> = BTreeMap::new();
-    // One lookup per domain, not per recipient: a message addressed to ten made-up
-    // local parts of one domain costs one rule lookup and one assignee lookup.
-    let mut rules: BTreeMap<String, Option<CatchallRuleRow>> = BTreeMap::new();
-    let mut assignees: BTreeMap<String, Vec<CatchallAssignmentRow>> = BTreeMap::new();
-    // One lookup per alias address, for the same reason.
-    let mut alias_holders: BTreeMap<String, Vec<i64>> = BTreeMap::new();
+    // Recipient → (account, delivery marker), resolved in the documented order
+    // (exact mailbox, then sender alias, then the domain's catch-all rule) by
+    // the resolver this server shares with the delivery worker (issue #100).
+    // Recipients nobody resolves are not local: they are logged and dropped
+    // rather than bounced (v0.1 has no outbound bounce generator); if nobody
+    // was stored and nobody was deliberately discarded, the whole message is
+    // refused with 550.
+    let mut copies: Vec<crate::local::LocalCopy> = Vec::new();
     let mut discarded = 0usize;
     for recipient in &envelope.recipients {
-        if let Some(account_id) = db.account_id_by_email(&recipient.normalized())? {
-            per_account
-                .entry((account_id, None))
-                .or_insert_with(Delivery::direct)
-                .recipients
-                .push(recipient.clone());
-            continue;
-        }
-        let normalized = recipient.normalized();
-        if !alias_holders.contains_key(&normalized) {
-            let holders = store.accounts_for_alias(&normalized)?;
-            alias_holders.insert(normalized.clone(), holders);
-        }
-        let holders = alias_holders
-            .get(&normalized)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        if !holders.is_empty() {
-            // An alias is a shared address: every holder gets its own sealed copy,
-            // marked with the address it arrived for.
-            for account_id in holders {
-                per_account
-                    .entry((*account_id, Some(normalized.clone())))
-                    .or_insert_with(Delivery::via_alias)
-                    .recipients
-                    .push(recipient.clone());
+        match crate::local::resolve_local(store, db, catchall, recipient)? {
+            crate::local::LocalResolution::Direct(account_id) => {
+                copies.push(crate::local::LocalCopy {
+                    account_id,
+                    delivered_for: None,
+                    via: "",
+                    recipient: recipient.clone(),
+                });
             }
-            continue;
-        }
-        let domain = recipient.domain().to_string();
-        if !rules.contains_key(&domain) {
-            let rule = catchall.rule_for(&domain)?;
-            rules.insert(domain.clone(), rule);
-        }
-        match rules.get(&domain).and_then(Option::as_ref) {
-            Some(rule) if rule.action == CatchallAction::Route => {
-                if !assignees.contains_key(&domain) {
-                    let rows = catchall.assignees_for(&domain)?;
-                    assignees.insert(domain.clone(), rows);
-                }
-                let live: Vec<i64> = assignees
-                    .get(&domain)
-                    .map(Vec::as_slice)
-                    .unwrap_or_default()
-                    .iter()
-                    .filter(|row| !row.paused)
-                    .map(|row| row.account_id)
-                    .collect();
-                if live.is_empty() {
-                    // A route rule with every assignee paused accepts and drops,
-                    // exactly like `discard`: the domain is configured to take
-                    // catch-all mail, so refusing it would turn a member's holiday
-                    // switch into a delivery failure for the sender.
-                    discarded += 1;
-                    tracing::info!(
-                        recipient = %recipient,
-                        domain = %domain,
-                        "catch-all route has no unpaused assignee; accepting and dropping"
-                    );
-                    continue;
-                }
-                for account_id in live {
-                    per_account
-                        .entry((account_id, Some(normalized.clone())))
-                        .or_insert_with(Delivery::via_catchall)
-                        .recipients
-                        .push(recipient.clone());
+            crate::local::LocalResolution::Alias(holders) => {
+                // An alias is a shared address: every holder gets its own sealed
+                // copy, marked with the address it arrived for.
+                for account_id in holders {
+                    copies.push(crate::local::LocalCopy {
+                        account_id,
+                        delivered_for: Some(recipient.normalized()),
+                        via: " via=alias",
+                        recipient: recipient.clone(),
+                    });
                 }
             }
-            Some(_) => {
-                // Anti-enumeration in action: accepted, then dropped.
+            crate::local::LocalResolution::Catchall(assignees) => {
+                for account_id in assignees {
+                    copies.push(crate::local::LocalCopy {
+                        account_id,
+                        delivered_for: Some(recipient.normalized()),
+                        via: " via=catchall",
+                        recipient: recipient.clone(),
+                    });
+                }
+            }
+            crate::local::LocalResolution::Discard => {
                 discarded += 1;
                 tracing::info!(
                     recipient = %recipient,
-                    domain = %domain,
-                    "catch-all rule discards inbound mail for an unknown local part"
+                    "catch-all rule accepted and dropped this recipient"
                 );
             }
-            None => tracing::info!(
+            crate::local::LocalResolution::NotLocal => tracing::info!(
                 recipient = %recipient,
                 "inbound recipient has no local account; dropping it"
             ),
         }
     }
-    if per_account.is_empty() && discarded == 0 {
+    if copies.is_empty() && discarded == 0 {
         return Ok(Reply::new(550, "5.1.1 no such mailbox here"));
     }
 
@@ -885,91 +793,31 @@ fn ingest_message(
         .into_iter()
         .next()
         .unwrap_or_else(|| envelope.mail_from.clone());
-    let subject = decode_rfc2047(parsed.header("Subject").unwrap_or_default());
 
     // The stored document is the received bytes with our trace header on top, so
-    // the copy a user reads shows how it arrived.
+    // the copy a user reads shows how it arrived. Storage itself (grouping,
+    // sealing, inserting) is the shared local-delivery path (issue #100).
     let received = received_header(hostname, envelope);
     let mut document = Vec::with_capacity(received.len() + raw.len());
     document.extend_from_slice(received.as_bytes());
     document.extend_from_slice(&raw);
 
-    let mut stored_ids = Vec::new();
-    for ((account_id, delivered_for), delivery) in per_account {
-        let recipients = delivery.recipients;
-        let message_id = store.reserve_message_id()?;
-        let message_aad = format!("account:{account_id}:message:{message_id}");
-        let content_key = pigeon_crypto::generate_content_key();
-        let wrapped_key = master_key
-            .wrap_content_key(&content_key, message_aad.as_bytes())
-            .map_err(store::StoreError::from)?;
-        let sealed_body =
-            pigeon_crypto::seal_content(&content_key, &document, message_aad.as_bytes())
-                .map_err(store::StoreError::from)?;
-
-        store.insert_message(
-            NewMessage {
-                account_id,
-                direction: Direction::In,
-                from_addr: from.clone(),
-                to_addrs: recipients.clone(),
-                subject: subject.clone(),
-                sealed_body,
-                idempotency_key: None,
-                delivered_for: delivered_for.clone(),
-            },
-            message_id,
-        )?;
-
-        // The wrapped content key lives in `api_messages` (the API's read path
-        // opens bodies from there). Without this row the body would be
-        // unrecoverable, so a failure here is a failure of the whole ingest.
-        db.insert_email(&pigeon_api::db::NewEmail {
-            account_id,
-            message_id,
-            public_id: pigeon_api::ids::derived(pigeon_api::ids::MSG, message_id),
-            status: "received".to_string(),
-            to_addrs: recipients.iter().map(ToString::to_string).collect(),
-            cc_addrs: Vec::new(),
-            tags: Vec::new(),
-            sandbox: false,
-            // Inbound mail from a foreign sender is never `sealed`: the server
-            // received TLS-or-clear bytes and sealed them at rest (layer 1). See
-            // `pigeon_api::handlers::wkd::INBOUND_E2E`.
-            e2e: pigeon_api::handlers::wkd::INBOUND_E2E.as_str().to_string(),
-            wrapped_key,
-        })?;
-
-        // Recorded on the row so a mailbox owner can tell "this arrived because I
-        // own the address" from "this arrived for a shared alias" and from "the
-        // domain routes unknown addresses here".
-        let via = match delivery.via {
-            DeliveryVia::Direct => String::new(),
-            DeliveryVia::Alias => " via=alias".to_string(),
-            DeliveryVia::Catchall => " via=catchall".to_string(),
-        };
-        let delivered = match &delivered_for {
-            Some(address) => format!(" delivered_for={address}"),
-            None => String::new(),
-        };
-        store.record_event(
-            message_id,
-            "email.received",
-            &format!(
-                "from={from} helo={} peer={} auth=spf:none,dkim:none,dmarc:none{via}{delivered}",
-                envelope.helo, envelope.peer
-            ),
-        )?;
-        stored_ids.push(message_id);
-    }
+    let subject_for_event = decode_rfc2047(parsed.header("Subject").unwrap_or_default());
+    let origin = format!(
+        "helo={} peer={} auth=spf:none,dkim:none,dmarc:none",
+        envelope.helo, envelope.peer
+    );
+    let stored_ids =
+        crate::local::store_local_copies(store, db, master_key, from, &origin, &document, &copies)?;
+    let stored = stored_ids.len();
 
     // v0.1 evaluates nothing: the verdicts are reported as `none` so an operator
     // reading logs can tell "not checked" from "checked and failed".
     tracing::info!(
-        from = %from,
-        subject = %subject,
+        from = %envelope.mail_from,
+        subject = %subject_for_event,
         recipients = envelope.recipients.len(),
-        accounts = stored_ids.len(),
+        accounts = stored,
         discarded,
         spf = "none",
         dkim = "none",

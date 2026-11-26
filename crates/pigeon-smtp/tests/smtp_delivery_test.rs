@@ -508,3 +508,97 @@ async fn an_unusable_stored_key_fails_the_job_instead_of_sending_unsigned() -> S
     assert!(failed.1.contains("unusable"), "{}", failed.1);
     Ok(())
 }
+
+#[tokio::test]
+async fn recipient_hosted_locally_is_stored_without_an_smtp_round_trip() {
+    let env = TestEnv::new();
+    let dana = env.account("dana@pigeonmail.dev");
+    let bob = env.account("bob@localrelay.dev");
+    let (message_id, public_id) = env.queue_outbound(
+        dana,
+        "dana@pigeonmail.dev",
+        &["bob@localrelay.dev"],
+        "internal hello",
+        "no MX hop needed",
+    );
+    let fake = FakeMx::start(false).await;
+    let worker = worker(
+        &env,
+        client_for(&fake, StartTlsMode::Opportunistic),
+        "local-1",
+    );
+
+    let settled = worker.drain(10).await.expect("drain");
+    assert_eq!(settled, 1, "one job was due");
+
+    // The recipient lives on this deployment: no MX may ever be contacted
+    // (issue #100 - self-delivery must not re-enter through :25).
+    assert_eq!(fake.count(), 0, "a local recipient must not reach any MX");
+
+    // Sender lifecycle: sent, queue settled.
+    assert_eq!(env.queue_rows_for(message_id), 0, "job is settled");
+    let email = env
+        .db
+        .email_by_public_id(dana, &public_id)
+        .expect("email row")
+        .expect("email row present");
+    assert_eq!(email.status, "sent");
+
+    // The recipient holds an inbound copy, sealed and decryptable.
+    let rows = env.store.list_messages(bob, 10, 0).expect("listing");
+    assert_eq!(rows.len(), 1, "one local copy for the recipient: {rows:?}");
+    let row = &rows[0];
+    assert_eq!(row.direction, pigeon_core::Direction::In);
+    assert_eq!(row.from_addr.to_string(), "dana@pigeonmail.dev");
+    assert_eq!(row.subject, "internal hello");
+    let body = env.open_body(bob, row.id);
+    assert!(body.contains("no MX hop needed"), "{body}");
+
+    // The event trail says how it was delivered.
+    let events = env.store.list_events(message_id).expect("events");
+    let sent = events
+        .iter()
+        .find(|(kind, _, _)| kind == "email.sent")
+        .expect("an email.sent event");
+    assert!(sent.1.contains("locally"), "{}", sent.1);
+}
+
+#[tokio::test]
+async fn mixed_recipients_store_the_local_copy_and_mail_the_remote_one() {
+    let env = TestEnv::new();
+    let dana = env.account("dana@pigeonmail.dev");
+    let bob = env.account("bob@localrelay.dev");
+    let (message_id, _public_id) = env.queue_outbound(
+        dana,
+        "dana@pigeonmail.dev",
+        &["bob@localrelay.dev", "carol@example.org"],
+        "mixed delivery",
+        "one local, one remote",
+    );
+    let fake = FakeMx::start(false).await;
+    let worker = worker(
+        &env,
+        client_for(&fake, StartTlsMode::Opportunistic),
+        "local-2",
+    );
+
+    let settled = worker.drain(10).await.expect("drain");
+    assert_eq!(settled, 1);
+
+    // Only the remote recipient traversed SMTP, carrying only its own domain.
+    assert_eq!(fake.count(), 1, "one remote transaction only");
+    let recipients = fake.recipient_sets();
+    assert_eq!(
+        recipients,
+        vec![vec!["carol@example.org".to_string()]],
+        "the local recipient never rode the SMTP transaction"
+    );
+
+    // Both verdicts are terminal: the job is settled as sent.
+    assert_eq!(env.queue_rows_for(message_id), 0);
+    let rows = env.store.list_messages(bob, 10, 0).expect("listing");
+    assert_eq!(rows.len(), 1, "the local copy exists: {rows:?}");
+    assert_eq!(rows[0].subject, "mixed delivery");
+    let body = env.open_body(bob, rows[0].id);
+    assert!(body.contains("one local, one remote"), "{body}");
+}

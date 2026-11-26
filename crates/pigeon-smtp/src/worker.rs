@@ -350,9 +350,139 @@ impl QueueWorker {
             return self.complete(&job, "already delivered");
         }
 
+        // Issue #100: recipients hosted by this deployment are stored directly
+        // through the same sealed-copy path the inbound server uses; only the
+        // rest are handed to the MX flow. Self-delivery therefore never
+        // re-enters through :25 — no hairpin NAT, no container DNS, no TLS
+        // policy interplay. Resolution runs on the blocking pool like
+        // `prepare`, because every call is `rusqlite`.
+        let prepared = Arc::new(prepared);
+        let (local_copies, local_domains, remote) = {
+            let store = Arc::clone(&self.store);
+            let db = Arc::clone(&self.db);
+            let outstanding = outstanding.clone();
+            tokio::task::spawn_blocking(move || {
+                let catchall = crate::server::StoreCatchall::new(Arc::clone(&store));
+                let mut copies: Vec<crate::local::LocalCopy> = Vec::new();
+                let mut local_domains: Vec<String> = Vec::new();
+                let mut remote: Vec<EmailAddress> = Vec::new();
+                for recipient in outstanding {
+                    let domain = recipient.domain().to_string();
+                    match crate::local::resolve_local(&store, &db, &catchall, &recipient)? {
+                        crate::local::LocalResolution::Direct(account_id) => {
+                            copies.push(crate::local::LocalCopy {
+                                account_id,
+                                delivered_for: None,
+                                via: "",
+                                recipient: recipient.clone(),
+                            });
+                            local_domains.push(domain);
+                        }
+                        crate::local::LocalResolution::Alias(holders) => {
+                            for account_id in holders {
+                                copies.push(crate::local::LocalCopy {
+                                    account_id,
+                                    delivered_for: Some(recipient.normalized()),
+                                    via: " via=alias",
+                                    recipient: recipient.clone(),
+                                });
+                            }
+                            local_domains.push(domain);
+                        }
+                        crate::local::LocalResolution::Catchall(assignees) => {
+                            for account_id in assignees {
+                                copies.push(crate::local::LocalCopy {
+                                    account_id,
+                                    delivered_for: Some(recipient.normalized()),
+                                    via: " via=catchall",
+                                    recipient: recipient.clone(),
+                                });
+                            }
+                            local_domains.push(domain);
+                        }
+                        // Accepted and dropped, exactly like the inbound server's
+                        // catch-all `discard`: terminal for this domain.
+                        crate::local::LocalResolution::Discard => local_domains.push(domain),
+                        crate::local::LocalResolution::NotLocal => remote.push(recipient),
+                    }
+                }
+                Ok::<_, SmtpError>((copies, local_domains, remote))
+            })
+            .await
+            .map_err(|error| SmtpError::Protocol(format!("local split task failed: {error}")))??
+        };
+
+        if !local_copies.is_empty() {
+            let stored = {
+                let store = Arc::clone(&self.store);
+                let db = Arc::clone(&self.db);
+                let master_key = Arc::clone(&self.master_key);
+                let prepared = Arc::clone(&prepared);
+                let copies = local_copies.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::local::store_local_copies(
+                        &store,
+                        &db,
+                        &master_key,
+                        prepared.from.clone(),
+                        "origin=local-delivery auth=none",
+                        &prepared.mime,
+                        &copies,
+                    )
+                })
+                .await
+                .map_err(|error| {
+                    SmtpError::Protocol(format!("local storage task failed: {error}"))
+                })??
+            };
+            tracing::info!(
+                message_id = job.message_id,
+                copies = stored.len(),
+                "local recipients stored without an SMTP hop (issue #100)"
+            );
+        }
+        // The locally-hosted domains are terminal as soon as their copies are
+        // written (or deliberately dropped): a later retry must not re-deliver
+        // them, and a storage failure above deferred the whole job before this
+        // point, so nothing is marked that was not actually finished.
+        if !local_domains.is_empty() {
+            if let Err(error) = self
+                .store
+                .queue_mark_domains_delivered(&job.claim_token, &local_domains)
+            {
+                tracing::error!(
+                    %error,
+                    message_id = job.message_id,
+                    domains = ?local_domains,
+                    "could not record the locally-delivered domains; a retry may duplicate them"
+                );
+            }
+        }
+
+        if remote.is_empty() {
+            tracing::info!(message_id = job.message_id, "email sent (local delivery)");
+            self.record_event(
+                job.message_id,
+                "email.sent",
+                "delivered locally: recipients are hosted by this deployment, no SMTP hop",
+            );
+            self.settle_status(&prepared, "sent");
+            return self.complete(&job, "delivered locally");
+        }
+
+        // Issue #100 contract: `remote` holds ONLY recipients whose domain is
+        // not hosted by this deployment. Every locally-hosted recipient was
+        // already written above as a sealed local copy (or deliberately
+        // discarded per the domain's catch-all rule) and marked terminal on
+        // the queue row; `remote.is_empty()` above settles all-local jobs
+        // without any SMTP transaction. If this split is ever removed,
+        // self-delivery re-enters through :25 and the message MIME leaves the
+        // deployment toward whatever DNS names as the hosted domain's MX; the
+        // local-delivery integration tests (recipient_hosted_locally…,
+        // mixed_recipients…) pin that this never happens.
         let result = self
             .client
-            .deliver(&prepared.from, &outstanding, &prepared.mime)
+            .deliver(&prepared.from, &remote, &prepared.mime)
             .await;
 
         let result = match result {
