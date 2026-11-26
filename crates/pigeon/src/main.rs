@@ -225,7 +225,9 @@ async fn serve(config: Config, api_config: ApiConfig) -> Result<(), Box<dyn Erro
         Arc::clone(&state.store),
         Arc::clone(&state.db),
         Arc::clone(&state.master_key),
-        ServerConfig::default().with_hostname_from_env()?,
+        ServerConfig::default()
+            .with_hostname_from_env()?
+            .with_auth_enforce(config.smtp_auth_enforce),
     ));
     let (smtp_listener, smtp_address) = server.bind(&config.smtp_in_addr).await?;
 

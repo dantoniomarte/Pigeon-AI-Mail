@@ -94,6 +94,11 @@ pub struct Config {
     pub master_key_file: PathBuf,
     /// Outbound TLS policy (`PIGEON_SMTP_OUT_STARTTLS`).
     pub smtp_out_starttls: StartTlsMode,
+    /// Apply the published DMARC policy on inbound mail
+    /// (`PIGEON_SMTP_AUTH_ENFORCE`, default `false`): `p=reject` refuses
+    /// the message, `p=quarantine` delivers to the spam folder. Record
+    /// mode (the default) evaluates and labels without acting.
+    pub smtp_auth_enforce: bool,
     /// Serve the webmail UI (`PIGEON_WEBMAIL`).
     pub webmail: bool,
     /// Recipient domains exempted from end-to-end sealing
@@ -115,6 +120,7 @@ impl Default for Config {
             db_path: PathBuf::from("/var/lib/pigeon/pigeon.db"),
             master_key_file: PathBuf::from("/etc/pigeon/master.key"),
             smtp_out_starttls: StartTlsMode::Required,
+            smtp_auth_enforce: false,
             webmail: false,
             e2e_plaintext_domains: Vec::new(),
             log_filter: "info".to_string(),
@@ -167,6 +173,9 @@ impl Config {
         }
         if let Some(v) = get("SMTP_OUT_STARTTLS")? {
             cfg.smtp_out_starttls = StartTlsMode::parse(&v)?;
+        }
+        if let Some(v) = get("SMTP_AUTH_ENFORCE")? {
+            cfg.smtp_auth_enforce = parse_bool("SMTP_AUTH_ENFORCE", &v)?;
         }
         if let Some(v) = get("WEBMAIL")? {
             cfg.webmail = parse_bool("WEBMAIL", &v)?;

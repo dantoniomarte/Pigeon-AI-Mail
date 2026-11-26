@@ -64,6 +64,23 @@ Build the image first — `docker build -t pigeon-mail:local .` — and add
 bundle. The default target never pulls a Node image, so the off-switch really is
 off.
 
+### DMARC enforcement (optional, default off)
+
+Inbound authentication (SPF, DKIM, DMARC) always **evaluates and records** the
+verdicts. Setting `PIGEON_SMTP_AUTH_ENFORCE=true` additionally **applies** the
+published DMARC policy of the From domain: `p=reject` refuses the message with
+`550 5.7.1` at DATA, `p=quarantine` delivers the copies to the spam folder,
+`p=none` (and domains without a DMARC record) keep the record-only behavior.
+
+```sh
+  -e PIGEON_SMTP_AUTH_ENFORCE=true \
+```
+
+Leave it off for your first weeks: SPF/DKIM/DMARC have real false positives
+(forwarding, mailing lists, misconfigured peers), so the rollout is record
+first, review the DMARC reports arriving at `postmaster@`, and only then flip
+the flag.
+
 No `HEALTHCHECK` is defined: the runtime image is distroless (no shell, no curl).
 Probe `/healthz` and `/readyz` from outside until the binary ships a built-in
 probe.

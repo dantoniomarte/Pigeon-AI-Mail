@@ -58,6 +58,7 @@ use base64::Engine as _;
 use pigeon_api::db::ApiDb;
 use pigeon_api::time::{now_unix, rfc5322_date};
 use pigeon_core::EmailAddress;
+use pigeon_core::MessageFolder;
 use pigeon_crypto::MasterKey;
 use store::{CatchallAssignmentRow, CatchallRuleRow, SqliteStorage, Storage};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -81,6 +82,12 @@ pub const CONNECTION_TIMEOUT: Duration = Duration::from_secs(300);
 pub struct ServerConfig {
     /// Name announced in the banner and used in the `Received:` header.
     pub hostname: String,
+    /// Apply the published DMARC policy on inbound mail
+    /// (`PIGEON_SMTP_AUTH_ENFORCE`, default `false`): `p=reject` refuses
+    /// the message with 550 5.7.1, `p=quarantine` delivers to the spam
+    /// folder. Record mode (the default) evaluates and labels without
+    /// acting (issue #114).
+    pub auth_enforce: bool,
     /// See [`MAX_MESSAGE_SIZE`].
     pub max_message_size: usize,
     /// See [`MAX_RECIPIENTS`].
@@ -99,6 +106,7 @@ impl Default for ServerConfig {
             // `.local` never resolves publicly, so a default banner cannot be
             // mistaken for a real host identity.
             hostname: "pigeon.local".to_string(),
+            auth_enforce: false,
             max_message_size: MAX_MESSAGE_SIZE,
             max_recipients: MAX_RECIPIENTS,
             max_line_len: MAX_LINE_LEN,
@@ -109,6 +117,12 @@ impl Default for ServerConfig {
 }
 
 impl ServerConfig {
+    /// Apply the published DMARC policy on inbound mail (issue #114).
+    pub fn with_auth_enforce(mut self, enforce: bool) -> Self {
+        self.auth_enforce = enforce;
+        self
+    }
+
     /// Read `PIGEON_SMTP_HOSTNAME` when it is set, deriving it from the listen
     /// address otherwise.
     ///
@@ -687,18 +701,16 @@ impl InboundSmtpServer {
         let db = Arc::clone(&self.db);
         let master_key = Arc::clone(&self.master_key);
         let hostname = self.config.hostname.clone();
+        let auth_enforce = self.config.auth_enforce;
         let catchall = Arc::clone(&self.catchall);
 
         let outcome = tokio::task::spawn_blocking(move || {
-            ingest_message(
-                &store,
-                &db,
-                &master_key,
-                &hostname,
-                catchall.as_ref(),
-                &envelope,
-                raw,
-            )
+            let context = IngestContext {
+                hostname,
+                auth_enforce,
+                catchall: catchall.as_ref(),
+            };
+            ingest_message(&store, &db, &master_key, &context, &envelope, raw)
         })
         .await;
 
@@ -719,12 +731,19 @@ impl InboundSmtpServer {
 }
 
 /// Store one message. Runs on the blocking pool: every call is `rusqlite`.
+/// Everything `ingest_message` needs beyond the handles: the banner host,
+/// the enforcement flag (issue #114) and the catch-all source.
+struct IngestContext<'a> {
+    hostname: String,
+    auth_enforce: bool,
+    catchall: &'a dyn CatchallSource,
+}
+
 fn ingest_message(
     store: &SqliteStorage,
     db: &ApiDb,
     master_key: &MasterKey,
-    hostname: &str,
-    catchall: &dyn CatchallSource,
+    context: &IngestContext<'_>,
     envelope: &Envelope,
     raw: Vec<u8>,
 ) -> Result<Reply> {
@@ -739,7 +758,8 @@ fn ingest_message(
     // refused with 550.
     let mut copies: Vec<crate::local::LocalCopy> = Vec::new();
     let mut discarded = 0usize;
-    let resolutions = crate::local::resolve_all_local(store, db, catchall, &envelope.recipients)?;
+    let resolutions =
+        crate::local::resolve_all_local(store, db, context.catchall, &envelope.recipients)?;
     for (recipient, resolution) in resolutions {
         match resolution {
             crate::local::LocalResolution::Direct(account_id) => {
@@ -807,7 +827,7 @@ fn ingest_message(
     // The stored document is the received bytes with our trace header on top, so
     // the copy a user reads shows how it arrived. Storage itself (grouping,
     // sealing, inserting) is the shared local-delivery path (issue #100).
-    let received = received_header(hostname, envelope);
+    let received = received_header(&context.hostname, envelope);
     let mut document = Vec::with_capacity(received.len() + raw.len());
     document.extend_from_slice(received.as_bytes());
     document.extend_from_slice(&raw);
@@ -840,6 +860,29 @@ fn ingest_message(
         envelope.peer,
         auth_verdicts.event_detail()
     );
+
+    // Enforcement (issue #114): apply the published DMARC policy instead of
+    // only recording it. `p=reject` refuses the message before anything is
+    // stored; `p=quarantine` stores normally and then moves the copies to the
+    // spam folder. `p=none`, missing records and DNS failures never block
+    // delivery — the domain asked for monitoring, or we could not check.
+    let dmarc_failed = auth_verdicts.dmarc.verdict == crate::auth::dmarc::DmarcVerdict::Fail;
+    let reject = context.auth_enforce && dmarc_failed && auth_verdicts.dmarc.policy == "reject";
+    let quarantine =
+        context.auth_enforce && dmarc_failed && auth_verdicts.dmarc.policy == "quarantine";
+    if reject {
+        tracing::warn!(
+            from = %from,
+            subject = %subject_for_event,
+            policy = "reject",
+            "inbound message refused: DMARC policy enforcement (PIGEON_SMTP_AUTH_ENFORCE)"
+        );
+        return Ok(Reply::new(
+            550,
+            "5.7.1 message rejected by DMARC policy of the From domain",
+        ));
+    }
+
     let stored_ids = crate::local::store_local_copies(
         store,
         db,
@@ -850,6 +893,26 @@ fn ingest_message(
         &copies,
     )?;
     let stored = stored_ids.len();
+
+    // Quarantine (issue #114): the copies were stored normally; move them to
+    // the spam folder so the user can review and rescue. A move failure is
+    // logged, not fatal — the message is already stored, and a quarantine
+    // that turns into an inbox delivery beats a quarantine that loses mail.
+    if quarantine {
+        for id in &stored_ids {
+            if let Err(error) = store.set_message_folder(*id, MessageFolder::Spam) {
+                tracing::warn!(
+                    message_id = id,
+                    error = %error,
+                    "DMARC quarantine move to spam failed; the copy stays in the inbox"
+                );
+            }
+        }
+        tracing::info!(
+            accounts = stored,
+            "inbound message quarantined: DMARC policy enforcement"
+        );
+    }
 
     // The verdicts are now real (issue #109): an operator reading logs can
     // tell "checked and passed" from "checked and failed".
