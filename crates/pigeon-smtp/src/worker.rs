@@ -366,9 +366,11 @@ impl QueueWorker {
                 let mut copies: Vec<crate::local::LocalCopy> = Vec::new();
                 let mut local_domains: Vec<String> = Vec::new();
                 let mut remote: Vec<EmailAddress> = Vec::new();
-                for recipient in outstanding {
+                let resolutions =
+                    crate::local::resolve_all_local(&store, &db, &catchall, &outstanding)?;
+                for (recipient, resolution) in resolutions {
                     let domain = recipient.domain().to_string();
-                    match crate::local::resolve_local(&store, &db, &catchall, &recipient)? {
+                    match resolution {
                         crate::local::LocalResolution::Direct(account_id) => {
                             copies.push(crate::local::LocalCopy {
                                 account_id,
@@ -400,9 +402,10 @@ impl QueueWorker {
                             }
                             local_domains.push(domain);
                         }
-                        // Accepted and dropped, exactly like the inbound server's
-                        // catch-all `discard`: terminal for this domain.
-                        crate::local::LocalResolution::Discard => local_domains.push(domain),
+                        crate::local::LocalResolution::DiscardRule
+                        | crate::local::LocalResolution::DiscardRouteAllPaused => {
+                            local_domains.push(domain)
+                        }
                         crate::local::LocalResolution::NotLocal => remote.push(recipient),
                     }
                 }

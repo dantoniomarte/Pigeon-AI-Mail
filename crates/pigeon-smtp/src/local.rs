@@ -33,20 +33,57 @@ pub(crate) enum LocalResolution {
     /// The domain's catch-all route assigns the message to these (unpaused)
     /// accounts, each marked with the address it arrived for.
     Catchall(Vec<i64>),
-    /// A catch-all rule accepts and drops (`discard`, or a route whose every
-    /// assignee is paused): terminal for the sender, nothing stored.
-    Discard,
+    /// A catch-all `discard` rule accepts and drops: terminal for the sender,
+    /// nothing stored.
+    DiscardRule,
+    /// A catch-all `route` rule whose every assignee is paused: accepted and
+    /// dropped, same outcome as `DiscardRule` but a distinct cause an operator
+    /// needs to see in logs.
+    DiscardRouteAllPaused,
     /// Not hosted here: the recipient belongs in the remote MX flow.
     NotLocal,
 }
 
 /// Resolve `recipient` in the documented order: exact mailbox, then sender
 /// alias, then the domain's catch-all rule.
-pub(crate) fn resolve_local(
+/// Resolve every recipient in one pass, memoizing per-domain rule/assignee
+/// lookups and per-alias holder lookups so a message with N recipients on one
+/// catch-all domain costs one rule lookup + one assignee lookup, not N of each
+/// (issue #105 R1: the base ingest loop had these caches; the shared extraction
+/// dropped them).
+pub(crate) fn resolve_all_local(
+    store: &SqliteStorage,
+    db: &ApiDb,
+    catchall: &dyn CatchallSource,
+    recipients: &[EmailAddress],
+) -> Result<Vec<(EmailAddress, LocalResolution)>> {
+    let mut rules: BTreeMap<String, Option<CatchallRuleRow>> = BTreeMap::new();
+    let mut assignees: BTreeMap<String, Vec<CatchallAssignmentRow>> = BTreeMap::new();
+    let mut alias_holders: BTreeMap<String, Vec<i64>> = BTreeMap::new();
+    let mut results = Vec::with_capacity(recipients.len());
+    for recipient in recipients {
+        let resolution = resolve_local_with_caches(
+            store,
+            db,
+            catchall,
+            recipient,
+            &mut rules,
+            &mut assignees,
+            &mut alias_holders,
+        )?;
+        results.push((recipient.clone(), resolution));
+    }
+    Ok(results)
+}
+
+fn resolve_local_with_caches(
     store: &SqliteStorage,
     db: &ApiDb,
     catchall: &dyn CatchallSource,
     recipient: &EmailAddress,
+    rules: &mut BTreeMap<String, Option<CatchallRuleRow>>,
+    assignees: &mut BTreeMap<String, Vec<CatchallAssignmentRow>>,
+    alias_holders: &mut BTreeMap<String, Vec<i64>>,
 ) -> Result<LocalResolution> {
     if let Some(account_id) = db
         .account_id_by_email(&recipient.normalized())
@@ -55,18 +92,34 @@ pub(crate) fn resolve_local(
         return Ok(LocalResolution::Direct(account_id));
     }
     let normalized = recipient.normalized();
-    let holders = store
-        .accounts_for_alias(&normalized)
-        .map_err(SmtpError::from)?;
+    if !alias_holders.contains_key(&normalized) {
+        let holders = store
+            .accounts_for_alias(&normalized)
+            .map_err(SmtpError::from)?;
+        alias_holders.insert(normalized.clone(), holders);
+    }
+    let holders = alias_holders
+        .get(&normalized)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
     if !holders.is_empty() {
-        return Ok(LocalResolution::Alias(holders));
+        return Ok(LocalResolution::Alias(holders.to_vec()));
     }
     let domain = recipient.domain().to_string();
-    let rule: Option<CatchallRuleRow> = catchall.rule_for(&domain)?;
-    match rule {
+    if !rules.contains_key(&domain) {
+        let rule = catchall.rule_for(&domain)?;
+        rules.insert(domain.clone(), rule);
+    }
+    match rules.get(&domain).and_then(Option::as_ref) {
         Some(rule) if rule.action == CatchallAction::Route => {
-            let rows: Vec<CatchallAssignmentRow> = catchall.assignees_for(&domain)?;
-            let live: Vec<i64> = rows
+            if !assignees.contains_key(&domain) {
+                let rows = catchall.assignees_for(&domain)?;
+                assignees.insert(domain.clone(), rows);
+            }
+            let live: Vec<i64> = assignees
+                .get(&domain)
+                .map(Vec::as_slice)
+                .unwrap_or_default()
                 .iter()
                 .filter(|row| !row.paused)
                 .map(|row| row.account_id)
@@ -76,13 +129,13 @@ pub(crate) fn resolve_local(
                 // exactly like `discard`: the domain is configured to take
                 // catch-all mail, so refusing it would turn a member's holiday
                 // switch into a delivery failure for the sender.
-                Ok(LocalResolution::Discard)
+                Ok(LocalResolution::DiscardRouteAllPaused)
             } else {
                 Ok(LocalResolution::Catchall(live))
             }
         }
         // Anti-enumeration: accepted, then dropped.
-        Some(_) => Ok(LocalResolution::Discard),
+        Some(_) => Ok(LocalResolution::DiscardRule),
         None => Ok(LocalResolution::NotLocal),
     }
 }
@@ -190,4 +243,204 @@ pub(crate) fn store_local_copies(
         stored_ids.push(message_id);
     }
     Ok(stored_ids)
+}
+
+#[cfg(test)]
+mod tests {
+    use pigeon_api::db::ApiDb;
+    use pigeon_core::types::CatchallAction;
+    use pigeon_core::EmailAddress;
+    use store::{SqliteStorage, Storage};
+
+    /// Minimal in-memory store for the resolver tests.
+    struct TestSetup {
+        _dir: tempfile::TempDir,
+        store: SqliteStorage,
+        db: ApiDb,
+        catchall: crate::server::StoreCatchall,
+    }
+
+    impl TestSetup {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("test.db");
+            let store = SqliteStorage::open(&path).expect("store");
+            let db = ApiDb::open(&path).expect("db");
+            let catchall = crate::server::StoreCatchall::new(std::sync::Arc::new(
+                SqliteStorage::open(&path).expect("store2"),
+            ));
+            Self {
+                _dir: dir,
+                store,
+                db,
+                catchall,
+            }
+        }
+
+        fn addr(email: &str) -> EmailAddress {
+            EmailAddress::parse(email).expect("address")
+        }
+    }
+
+    fn resolve(setup: &TestSetup, email: &str) -> crate::local::LocalResolution {
+        let recipient = TestSetup::addr(email);
+        crate::local::resolve_all_local(&setup.store, &setup.db, &setup.catchall, &[recipient])
+            .expect("resolve")
+            .remove(0)
+            .1
+    }
+
+    #[test]
+    fn direct_resolution_for_an_existing_account() {
+        let setup = TestSetup::new();
+        let account = setup
+            .store
+            .create_account(&TestSetup::addr("alice@example.com"))
+            .expect("account");
+        assert!(matches!(
+            resolve(&setup, "alice@example.com"),
+            crate::local::LocalResolution::Direct(id) if id == account
+        ));
+    }
+
+    #[test]
+    fn alias_resolution_when_no_mailbox() {
+        let setup = TestSetup::new();
+        // An alias may only live on a served domain (one with an account on
+        // it), so the holder is on the same domain as the alias it holds.
+        let holder = setup
+            .store
+            .create_account(&TestSetup::addr("bob@example.com"))
+            .expect("holder");
+        let alias = setup
+            .store
+            .create_alias(&TestSetup::addr("sales@example.com"), holder)
+            .expect("alias");
+        setup
+            .store
+            .assign_alias(alias, holder, holder)
+            .expect("assign");
+        assert!(matches!(
+            resolve(&setup, "sales@example.com"),
+            crate::local::LocalResolution::Alias(holders) if holders == vec![holder]
+        ));
+    }
+
+    #[test]
+    fn not_local_when_no_mailbox_no_alias_no_catchall() {
+        let setup = TestSetup::new();
+        assert!(matches!(
+            resolve(&setup, "nobody@example.com"),
+            crate::local::LocalResolution::NotLocal
+        ));
+    }
+
+    /// The two accept-and-drop causes are distinct variants: an operator must
+    /// be able to tell a `discard` rule from a route whose assignees are all
+    /// paused (issue #105 R2: the collapsed log arm lost that distinction).
+    #[test]
+    fn discard_rule_and_all_paused_route_are_distinct_causes() {
+        let setup = TestSetup::new();
+        let assignee = setup
+            .store
+            .create_account(&TestSetup::addr("carol@paused.com"))
+            .expect("assignee");
+        setup
+            .store
+            .set_catchall("paused.com", CatchallAction::Route)
+            .expect("route rule");
+        setup
+            .store
+            .assign_catchall("paused.com", assignee, assignee)
+            .expect("assignee");
+        setup
+            .store
+            .set_catchall_paused("paused.com", assignee, true)
+            .expect("pause");
+        setup
+            .store
+            .set_catchall("drop.com", CatchallAction::Discard)
+            .expect("discard rule");
+
+        assert!(matches!(
+            resolve(&setup, "unknown@paused.com"),
+            crate::local::LocalResolution::DiscardRouteAllPaused
+        ));
+        assert!(matches!(
+            resolve(&setup, "unknown@drop.com"),
+            crate::local::LocalResolution::DiscardRule
+        ));
+    }
+
+    #[test]
+    fn catchall_route_resolves_to_unpaused_assignees() {
+        let setup = TestSetup::new();
+        let a = setup
+            .store
+            .create_account(&TestSetup::addr("a@route.com"))
+            .expect("a");
+        let b = setup
+            .store
+            .create_account(&TestSetup::addr("b@route.com"))
+            .expect("b");
+        setup
+            .store
+            .set_catchall("route.com", CatchallAction::Route)
+            .expect("rule");
+        setup
+            .store
+            .assign_catchall("route.com", a, a)
+            .expect("assign a");
+        setup
+            .store
+            .assign_catchall("route.com", b, b)
+            .expect("assign b");
+        setup
+            .store
+            .set_catchall_paused("route.com", b, true)
+            .expect("pause b");
+        assert!(matches!(
+            resolve(&setup, "unknown@route.com"),
+            crate::local::LocalResolution::Catchall(live) if live == vec![a]
+        ));
+    }
+
+    #[test]
+    fn resolve_all_local_produces_the_same_results_as_individual_calls() {
+        let setup = TestSetup::new();
+        let a = setup
+            .store
+            .create_account(&TestSetup::addr("a@example.com"))
+            .expect("a");
+        let _b = setup
+            .store
+            .create_account(&TestSetup::addr("b@example.com"))
+            .expect("b");
+        setup
+            .store
+            .set_catchall("drop.com", CatchallAction::Discard)
+            .expect("rule");
+        let recipients: Vec<EmailAddress> =
+            ["a@example.com", "b@example.com", "x@drop.com", "x@else.org"]
+                .iter()
+                .map(|s| TestSetup::addr(s))
+                .collect();
+        let batch =
+            crate::local::resolve_all_local(&setup.store, &setup.db, &setup.catchall, &recipients)
+                .expect("batch");
+        assert_eq!(batch.len(), 4);
+        assert!(matches!(batch[0].1, crate::local::LocalResolution::Direct(id) if id == a));
+        assert!(matches!(
+            batch[1].1,
+            crate::local::LocalResolution::Direct(_)
+        ));
+        assert!(matches!(
+            batch[2].1,
+            crate::local::LocalResolution::DiscardRule
+        ));
+        assert!(matches!(
+            batch[3].1,
+            crate::local::LocalResolution::NotLocal
+        ));
+    }
 }

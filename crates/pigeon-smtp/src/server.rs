@@ -739,8 +739,9 @@ fn ingest_message(
     // refused with 550.
     let mut copies: Vec<crate::local::LocalCopy> = Vec::new();
     let mut discarded = 0usize;
-    for recipient in &envelope.recipients {
-        match crate::local::resolve_local(store, db, catchall, recipient)? {
+    let resolutions = crate::local::resolve_all_local(store, db, catchall, &envelope.recipients)?;
+    for (recipient, resolution) in resolutions {
+        match resolution {
             crate::local::LocalResolution::Direct(account_id) => {
                 copies.push(crate::local::LocalCopy {
                     account_id,
@@ -771,11 +772,20 @@ fn ingest_message(
                     });
                 }
             }
-            crate::local::LocalResolution::Discard => {
+            crate::local::LocalResolution::DiscardRule => {
                 discarded += 1;
                 tracing::info!(
                     recipient = %recipient,
-                    "catch-all rule accepted and dropped this recipient"
+                    domain = %recipient.domain(),
+                    "catch-all rule discards inbound mail for an unknown local part"
+                );
+            }
+            crate::local::LocalResolution::DiscardRouteAllPaused => {
+                discarded += 1;
+                tracing::info!(
+                    recipient = %recipient,
+                    domain = %recipient.domain(),
+                    "catch-all route has no unpaused assignee; accepting and dropping"
                 );
             }
             crate::local::LocalResolution::NotLocal => tracing::info!(
@@ -807,14 +817,21 @@ fn ingest_message(
         "helo={} peer={} auth=spf:none,dkim:none,dmarc:none",
         envelope.helo, envelope.peer
     );
-    let stored_ids =
-        crate::local::store_local_copies(store, db, master_key, from, &origin, &document, &copies)?;
+    let stored_ids = crate::local::store_local_copies(
+        store,
+        db,
+        master_key,
+        from.clone(),
+        &origin,
+        &document,
+        &copies,
+    )?;
     let stored = stored_ids.len();
 
     // v0.1 evaluates nothing: the verdicts are reported as `none` so an operator
     // reading logs can tell "not checked" from "checked and failed".
     tracing::info!(
-        from = %envelope.mail_from,
+        from = %from,
         subject = %subject_for_event,
         recipients = envelope.recipients.len(),
         accounts = stored,
