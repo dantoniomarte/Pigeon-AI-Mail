@@ -21,7 +21,6 @@ deployment style that matches your host:
 |---|---|---|
 | 8000 | HTTP API + MCP-over-HTTP, `/healthz`, `/readyz` | behind a TLS terminator |
 | 25 | inbound SMTP from remote MX | must be reachable from the internet |
-| 587 | submission with AUTH | reachable from your clients |
 
 | Path | Content | Notes |
 |---|---|---|
@@ -50,7 +49,7 @@ sudo chmod 640 secrets/master.key
 
 docker run -d --name pigeon \
   --restart unless-stopped \
-  -p 8000:8000 -p 25:25 -p 587:587 \
+  -p 8000:8000 -p 25:25 \
   -v pigeon-data:/var/lib/pigeon \
   -v "$PWD/secrets:/etc/pigeon:ro" \
   -e PIGEON_HTTP_ADDR=:8000 \
@@ -160,7 +159,7 @@ What it performs, in order:
 5. installs `pigeon` to `/usr/local/bin` — either `--bin <path>` or
    `pigeon-<arch>.tar.gz` from the latest GitHub release (a 404 means no release
    exists yet: build from source and pass `--bin`);
-6. best-effort `setcap cap_net_bind_service=+ep` so `:25`/`:587` bind as
+6. best-effort `setcap cap_net_bind_service=+ep` so `:25` binds as
    non-root;
 7. writes `/etc/pigeon/pigeon.env` and `/etc/systemd/system/pigeon.service`
    (`User=pigeon`, `AmbientCapabilities=cap_net_bind_service`,
@@ -235,8 +234,7 @@ without a reachable `:25` silently blackholes inbound mail — no bounce, no log
 > **Warning — `:25` ownership.** On a server that already runs another MTA
 > (postfix, exim, mailcow, mail-in-a-box…), Pigeon inbound cannot share `:25`.
 > You need **its own IP address**, or you must **take over `:25`** by stopping
-> the other MTA. Submission (587, inbound listener) and the API (8000) are
-> unaffected.
+> the other MTA. The API (8000) is unaffected.
 
 One model, one place. Every record lives on the **mail domain you serve**
 (`example.com`); the only thing published on `mail.example.com` is the address
