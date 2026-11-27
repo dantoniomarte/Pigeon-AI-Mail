@@ -152,7 +152,7 @@ async fn flag_on_with_p_reject_refuses_the_message() {
 async fn flag_on_with_p_quarantine_stores_in_spam() {
     // martelabs.org (this deployment's domain) publishes `p=quarantine`:
     // a spoofed sender fails SPF (the loopback IP is not the authorized
-    // 109.123.254.118), has no DKIM, fails DMARC alignment, and the copies
+    // the authorized sender IP), has no DKIM, fails DMARC alignment, and the copies
     // land in the spam folder instead of the inbox.
     let env = TestEnv::new();
     let account_id = env.account("carol@example.com");
