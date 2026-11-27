@@ -77,11 +77,13 @@ Pigeon applies three independent layers, documented in
 1. **At-rest sealing** (always): every stored body is XChaCha20-Poly1305
    sealed with a per-message content key wrapped by the master key,
    domain-separated by account and message.
-2. **Transport**: inbound SMTP answers in clear text — v0.1 has no TLS
-   termination for SMTP, and STARTTLS is deliberately **not advertised** so
-   `required`-mode peers never attempt an upgrade the server cannot present
-   (issue #99); outbound opportunistic STARTTLS (peer certificate validation is
-   planned).
+2. **Transport**: inbound SMTP upgrades to TLS via STARTTLS (RFC 3207)
+   when `PIGEON_SMTP_TLS_CERT` and `PIGEON_SMTP_TLS_KEY` are configured —
+   the capability is advertised in EHLO and the session upgrades on the
+   command (issue #118). Without a certificate the server stays plaintext
+   and does **not** advertise STARTTLS (the #99 honesty rule: never
+   advertise what you cannot present). Outbound opportunistic STARTTLS
+   (peer certificate validation is planned).
 3. **End-to-end OpenPGP** (layer 3): when every recipient publishes a key
    (WKD), the body part is sealed so only the keys can open it.
 

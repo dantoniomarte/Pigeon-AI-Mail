@@ -64,6 +64,28 @@ Build the image first — `docker build -t pigeon-mail:local .` — and add
 bundle. The default target never pulls a Node image, so the off-switch really is
 off.
 
+### Inbound STARTTLS (optional, default plaintext)
+
+Set `PIGEON_SMTP_TLS_CERT` and `PIGEON_SMTP_TLS_KEY` to PEM file paths and
+the inbound server advertises `STARTTLS` (RFC 3207) and upgrades the
+session on the command. Without them the server stays plaintext and does
+**not** advertise the capability (the #99 honesty rule).
+
+```sh
+  -e PIGEON_SMTP_TLS_CERT=/etc/pigeon/tls/cert.pem \
+  -e PIGEON_SMTP_TLS_KEY=/etc/pigeon/tls/key.pem \
+```
+
+The certificate files must be readable by the container (chmod 644; the
+image is distroless and runs as nonroot). Mount them inside the existing
+`/etc/pigeon` volume (the `secrets` directory) — the image's read-only
+rootfs cannot create new mountpoints.
+
+**Renewal**: the certificate expires (Let's Encrypt: 90 days). If a
+reverse proxy (Caddy, nginx) obtains the certificate, sync it to the
+pigeon directory with a cron job that compares the hash and restarts the
+container when it changes — the binary reads the certificate at startup.
+
 ### DMARC enforcement (optional, default off)
 
 Inbound authentication (SPF, DKIM, DMARC) always **evaluates and records** the
