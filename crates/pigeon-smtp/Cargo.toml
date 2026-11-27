@@ -14,6 +14,8 @@ pigeon-crypto.workspace = true
 pigeon-dkim.workspace = true
 store.workspace = true
 hickory-resolver.workspace = true
+# Parsing the PEM cert/key pair for the inbound STARTTLS acceptor (issue #118).
+rustls-pemfile.workspace = true
 hex.workspace = true
 rustls.workspace = true
 thiserror.workspace = true
@@ -26,6 +28,8 @@ tracing.workspace = true
 # the assertion the delivery tests need; read it directly from the same file.
 rusqlite.workspace = true
 tempfile.workspace = true
+# Self-signed certificates for the STARTTLS handshake tests (issue #118).
+rcgen.workspace = true
 # The layer-3 end-to-end test drives the real API router (to queue a send the way
 # a client does) and reads the JSON answer, so it needs the HTTP stack the API
 # itself uses.

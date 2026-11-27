@@ -99,6 +99,14 @@ pub struct Config {
     /// the message, `p=quarantine` delivers to the spam folder. Record
     /// mode (the default) evaluates and labels without acting.
     pub smtp_auth_enforce: bool,
+    /// TLS certificate for inbound STARTTLS (`PIGEON_SMTP_TLS_CERT`, a PEM
+    /// file). When set together with `smtp_tls_key`, the inbound server
+    /// advertises STARTTLS (RFC 3207) and upgrades the session; without it,
+    /// port 25 stays plaintext and the capability is not advertised (the
+    /// #99 honesty rule).
+    pub smtp_tls_cert: Option<std::path::PathBuf>,
+    /// TLS private key for inbound STARTTLS (`PIGEON_SMTP_TLS_KEY`, PEM).
+    pub smtp_tls_key: Option<std::path::PathBuf>,
     /// Serve the webmail UI (`PIGEON_WEBMAIL`).
     pub webmail: bool,
     /// Recipient domains exempted from end-to-end sealing
@@ -121,6 +129,8 @@ impl Default for Config {
             master_key_file: PathBuf::from("/etc/pigeon/master.key"),
             smtp_out_starttls: StartTlsMode::Required,
             smtp_auth_enforce: false,
+            smtp_tls_cert: None,
+            smtp_tls_key: None,
             webmail: false,
             e2e_plaintext_domains: Vec::new(),
             log_filter: "info".to_string(),
@@ -176,6 +186,12 @@ impl Config {
         }
         if let Some(v) = get("SMTP_AUTH_ENFORCE")? {
             cfg.smtp_auth_enforce = parse_bool("SMTP_AUTH_ENFORCE", &v)?;
+        }
+        if let Some(v) = get("SMTP_TLS_CERT")? {
+            cfg.smtp_tls_cert = Some(std::path::PathBuf::from(v));
+        }
+        if let Some(v) = get("SMTP_TLS_KEY")? {
+            cfg.smtp_tls_key = Some(std::path::PathBuf::from(v));
         }
         if let Some(v) = get("WEBMAIL")? {
             cfg.webmail = parse_bool("WEBMAIL", &v)?;

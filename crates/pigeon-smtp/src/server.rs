@@ -60,9 +60,16 @@ use pigeon_api::time::{now_unix, rfc5322_date};
 use pigeon_core::EmailAddress;
 use pigeon_core::MessageFolder;
 use pigeon_crypto::MasterKey;
+use rustls_pemfile;
 use store::{CatchallAssignmentRow, CatchallRuleRow, SqliteStorage, Storage};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
+
+/// The transport of one SMTP connection: plaintext TCP or the TLS stream
+/// after a STARTTLS handshake (issue #118). Both halves of the loop share
+/// this type through `tokio::io::split`.
+pub(crate) trait Conn: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+impl<T> Conn for T where T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
 
 use crate::error::{Result, SmtpError};
 
@@ -78,10 +85,15 @@ pub const MAX_COMMANDS: usize = 1000;
 pub const CONNECTION_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Tunables of the inbound server.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct ServerConfig {
     /// Name announced in the banner and used in the `Received:` header.
     pub hostname: String,
+    /// TLS acceptor for inbound STARTTLS (issue #118): built from
+    /// `PIGEON_SMTP_TLS_CERT` + `PIGEON_SMTP_TLS_KEY` at startup. `None`
+    /// keeps port 25 plaintext and the capability unadvertised (the #99
+    /// honesty rule).
+    pub tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
     /// Apply the published DMARC policy on inbound mail
     /// (`PIGEON_SMTP_AUTH_ENFORCE`, default `false`): `p=reject` refuses
     /// the message with 550 5.7.1, `p=quarantine` delivers to the spam
@@ -106,6 +118,7 @@ impl Default for ServerConfig {
             // `.local` never resolves publicly, so a default banner cannot be
             // mistaken for a real host identity.
             hostname: "pigeon.local".to_string(),
+            tls_acceptor: None,
             auth_enforce: false,
             max_message_size: MAX_MESSAGE_SIZE,
             max_recipients: MAX_RECIPIENTS,
@@ -121,6 +134,39 @@ impl ServerConfig {
     pub fn with_auth_enforce(mut self, enforce: bool) -> Self {
         self.auth_enforce = enforce;
         self
+    }
+
+    /// Build a TLS acceptor from PEM files for inbound STARTTLS (issue #118).
+    /// Both the certificate chain and the private key must be present; a
+    /// missing or unreadable pair is a startup error (the operator asked
+    /// for TLS and must learn it is broken, not silently run plaintext).
+    pub fn with_tls_from_files(
+        mut self,
+        cert_path: &std::path::Path,
+        key_path: &std::path::Path,
+    ) -> Result<Self> {
+        let certs: Vec<_> = rustls_pemfile::certs(&mut std::io::BufReader::new(
+            std::fs::File::open(cert_path).map_err(|error| {
+                SmtpError::Config(format!("cannot open TLS cert {cert_path:?}: {error}"))
+            })?,
+        ))
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|error| {
+            SmtpError::Config(format!("cannot parse TLS cert {cert_path:?}: {error}"))
+        })?;
+        let key = rustls_pemfile::private_key(&mut std::io::BufReader::new(
+            std::fs::File::open(key_path).map_err(|error| {
+                SmtpError::Config(format!("cannot open TLS key {key_path:?}: {error}"))
+            })?,
+        ))
+        .map_err(|error| SmtpError::Config(format!("cannot parse TLS key {key_path:?}: {error}")))?
+        .ok_or_else(|| SmtpError::Config(format!("no private key found in {key_path:?}")))?;
+        let config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .map_err(|error| SmtpError::Config(format!("invalid TLS cert/key pair: {error}")))?;
+        self.tls_acceptor = Some(tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(config)));
+        Ok(self)
     }
 
     /// Read `PIGEON_SMTP_HOSTNAME` when it is set, deriving it from the listen
@@ -207,12 +253,15 @@ pub(crate) enum Action {
     Reply(Reply),
     /// Send `354`, then read the message data.
     StartData,
+    /// Send `220 Ready to start TLS`, perform the TLS handshake, replace
+    /// the stream, and reset the session state (RFC 3207 §4). Only returned
+    /// when a TLS acceptor is configured (issue #118).
+    StartTls,
     /// Send the reply and close the connection.
     Close(Reply),
 }
 
 /// Per-connection protocol state.
-#[derive(Debug)]
 pub(crate) struct Session {
     config: Arc<ServerConfig>,
     peer: SocketAddr,
@@ -222,6 +271,9 @@ pub(crate) struct Session {
     mail_from: Option<EmailAddress>,
     recipients: Vec<EmailAddress>,
     commands: u32,
+    /// True after a successful STARTTLS handshake: a second STARTTLS is
+    /// rejected (RFC 3207 §4) and EHLO stops advertising the capability.
+    tls_active: bool,
 }
 
 impl Session {
@@ -234,6 +286,7 @@ impl Session {
             mail_from: None,
             recipients: Vec::new(),
             commands: 0,
+            tls_active: false,
         }
     }
 
@@ -274,20 +327,21 @@ impl Session {
             }
             "NOOP" => Action::Reply(Reply::new(250, "2.0.0 Ok")),
             "QUIT" => Action::Close(Reply::new(221, "2.0.0 Bye")),
-            // v0.1 has no certificate lifecycle, so there is no STARTTLS to
-            // offer. The capability is deliberately NOT advertised in EHLO
-            // (issue #99): advertising it made every `required`-mode peer —
-            // including this binary's own outbound worker under its documented
-            // default — attempt the upgrade, receive this 454, and fail the
-            // delivery terminally. A client that sends the command anyway
-            // (blind attempts) still gets the honest temporary failure below;
-            // the refusal stays 4xx so opportunistic senders may retry later
-            // or continue in clear text, which is their policy to decide.
+            // STARTTLS (RFC 3207, issue #118): offered only when a TLS
+            // acceptor is configured; a second attempt after a successful
+            // handshake is rejected (RFC 3207 §4). Without a certificate the
+            // honest 454 stays (the #99 rule: never advertise what you
+            // cannot present — and a blind attempt still gets 4xx so
+            // opportunistic senders may continue in clear text).
             "STARTTLS" => {
-                if argument.is_empty() {
-                    Action::Reply(Reply::new(454, "4.7.0 TLS not available"))
-                } else {
+                if !argument.is_empty() {
                     Action::Reply(Reply::new(501, "5.5.4 STARTTLS takes no arguments"))
+                } else if self.tls_active {
+                    Action::Reply(Reply::new(502, "5.5.1 TLS already active (RFC 3207 §4)"))
+                } else if self.config.tls_acceptor.is_some() {
+                    Action::StartTls
+                } else {
+                    Action::Reply(Reply::new(454, "4.7.0 TLS not available"))
                 }
             }
             "VRFY" | "EXPN" | "HELP" | "TURN" | "AUTH" => {
@@ -314,16 +368,18 @@ impl Session {
         }
 
         let hostname = &self.config.hostname;
-        Action::Reply(Reply::multiline(
-            250,
-            vec![
-                format!("{hostname} Hello {}", argument),
-                format!("SIZE {}", self.config.max_message_size),
-                "8BITMIME".to_string(),
-                // No STARTTLS here: v0.1 cannot terminate SMTP TLS (issue #99).
-                "ENHANCEDSTATUSCODES".to_string(),
-            ],
-        ))
+        let mut capabilities = vec![
+            format!("{hostname} Hello {}", argument),
+            format!("SIZE {}", self.config.max_message_size),
+            "8BITMIME".to_string(),
+        ];
+        // STARTTLS is advertised only when a TLS acceptor is configured and
+        // the session is not already upgraded (RFC 3207 §4, issues #99/#118).
+        if self.config.tls_acceptor.is_some() && !self.tls_active {
+            capabilities.push("STARTTLS".to_string());
+        }
+        capabilities.push("ENHANCEDSTATUSCODES".to_string());
+        Action::Reply(Reply::multiline(250, capabilities))
     }
 
     fn mail(&mut self, argument: &str) -> Action {
@@ -607,8 +663,13 @@ impl InboundSmtpServer {
     /// Run the protocol for one connection.
     async fn handle_connection(self: Arc<Self>, stream: TcpStream, peer: SocketAddr) {
         let timeout = self.config.command_timeout;
-        let (read_half, mut write_half) = stream.into_split();
+        // The stream is boxed so the plaintext and TLS transports share one
+        // loop: `tokio::io::split` gives reuniteable halves, which the
+        // STARTTLS handshake needs (RFC 3207, issue #118).
+        let stream: Box<dyn Conn> = Box::new(stream);
+        let (read_half, write_half) = tokio::io::split(stream);
         let mut reader = BufReader::new(read_half);
+        let mut write_half = write_half;
         let mut session = Session::new(Arc::clone(&self.config), peer);
 
         if !write(&mut write_half, &session.banner()).await {
@@ -651,6 +712,48 @@ impl InboundSmtpServer {
                 Action::Close(reply) => {
                     write(&mut write_half, &reply).await;
                     break;
+                }
+                Action::StartTls => {
+                    // RFC 3207: announce readiness, then upgrade the stream.
+                    if !write(
+                        &mut write_half,
+                        &Reply::new(220, "2.0.0 Ready to start TLS"),
+                    )
+                    .await
+                    {
+                        break;
+                    }
+                    let Some(acceptor) = self.config.tls_acceptor.clone() else {
+                        // Unreachable: StartTls is only returned when the
+                        // acceptor exists.
+                        break;
+                    };
+                    // Reunite the halves for the handshake. The BufReader
+                    // must be empty here: the STARTTLS command line was fully
+                    // consumed, and RFC 3207 §4.1 forbids pipelining into the
+                    // handshake.
+                    let stream = reader.into_inner().unsplit(write_half);
+                    match acceptor.accept(stream).await {
+                        Ok(tls_stream) => {
+                            let tls_stream: Box<dyn Conn> = Box::new(tls_stream);
+                            let (tls_read, tls_write) = tokio::io::split(tls_stream);
+                            reader = BufReader::new(tls_read);
+                            write_half = tls_write;
+                            // RFC 3207 §4: the session resets — the client
+                            // must re-issue EHLO before any MAIL command.
+                            session = Session::new(Arc::clone(&self.config), peer);
+                            session.tls_active = true;
+                            tracing::debug!(%peer, "inbound smtp STARTTLS handshake completed");
+                        }
+                        Err(error) => {
+                            // A failed handshake (client sent garbage, or the
+                            // TLS negotiation broke) closes the connection:
+                            // the plaintext session state is no longer
+                            // trustworthy (RFC 3207 §4).
+                            tracing::debug!(%peer, %error, "inbound smtp STARTTLS handshake failed");
+                            break;
+                        }
+                    }
                 }
                 Action::StartData => {
                     if !write(
@@ -1217,7 +1320,7 @@ pub(crate) enum LineEvent {
 /// by chunk, so a client cannot force unbounded allocation by sending one huge
 /// line.
 pub(crate) async fn read_limited_line(
-    reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
+    reader: &mut BufReader<tokio::io::ReadHalf<Box<dyn Conn>>>,
     max_len: usize,
     timeout: Duration,
 ) -> Result<LineEvent> {
@@ -1291,7 +1394,7 @@ pub(crate) enum DataEvent {
 /// the next command is read from the right place, and the caller then replies
 /// `552`/`500` per the flag that was set.
 pub(crate) async fn read_data(
-    reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
+    reader: &mut BufReader<tokio::io::ReadHalf<Box<dyn Conn>>>,
     config: &ServerConfig,
     timeout: Duration,
 ) -> Result<DataEvent> {
@@ -1344,7 +1447,7 @@ pub(crate) fn accumulate(payload: &mut DataPayload, line: &str, max_message_size
 }
 
 /// Write one encoded reply; `false` means the peer is gone.
-async fn write(stream: &mut tokio::net::tcp::OwnedWriteHalf, reply: &Reply) -> bool {
+async fn write(stream: &mut tokio::io::WriteHalf<Box<dyn Conn>>, reply: &Reply) -> bool {
     match stream.write_all(reply.encode().as_bytes()).await {
         Ok(()) => stream.flush().await.is_ok(),
         Err(error) => {
@@ -1391,6 +1494,7 @@ mod tests {
         match action {
             Action::Reply(reply) | Action::Close(reply) => reply.encode(),
             Action::StartData => "354 start".to_string(),
+            Action::StartTls => "220 starttls".to_string(),
         }
     }
 
@@ -1398,6 +1502,7 @@ mod tests {
         match action {
             Action::Reply(reply) | Action::Close(reply) => reply.code,
             Action::StartData => 354,
+            Action::StartTls => 220,
         }
     }
 

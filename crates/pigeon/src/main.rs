@@ -229,6 +229,27 @@ async fn serve(config: Config, api_config: ApiConfig) -> Result<(), Box<dyn Erro
             .with_hostname_from_env()?
             .with_auth_enforce(config.smtp_auth_enforce),
     ));
+    // Inbound STARTTLS (issue #118): build the acceptor when both the cert
+    // and the key are configured; one without the other is a startup error
+    // (the operator asked for TLS and must learn it is broken).
+    let server = match (&config.smtp_tls_cert, &config.smtp_tls_key) {
+        (Some(cert), Some(key)) => Arc::new(InboundSmtpServer::new(
+            Arc::clone(&state.store),
+            Arc::clone(&state.db),
+            Arc::clone(&state.master_key),
+            ServerConfig::default()
+                .with_hostname_from_env()?
+                .with_auth_enforce(config.smtp_auth_enforce)
+                .with_tls_from_files(cert, key)?,
+        )),
+        (None, None) => server,
+        (cert, key) => {
+            return Err(format!(
+                "PIGEON_SMTP_TLS_CERT and PIGEON_SMTP_TLS_KEY must be set together (got cert={cert:?}, key={key:?})"
+            )
+            .into());
+        }
+    };
     let (smtp_listener, smtp_address) = server.bind(&config.smtp_in_addr).await?;
 
     // --- outbound SMTP -----------------------------------------------------
