@@ -19,7 +19,7 @@ deployment style that matches your host:
 
 | Port | Purpose | Exposure |
 |---|---|---|
-| 8000 | HTTP API + MCP-over-HTTP, `/healthz`, `/readyz` | behind a TLS terminator |
+| 8000 | HTTP API + MCP-over-HTTP, `/healthz`, `/readyz` | behind a TLS terminator; bind to `127.0.0.1` so only the proxy can reach it (issue #126) |
 | 25 | inbound SMTP from remote MX | must be reachable from the internet |
 
 | Path | Content | Notes |
@@ -49,7 +49,7 @@ sudo chmod 640 secrets/master.key
 
 docker run -d --name pigeon \
   --restart unless-stopped \
-  -p 8000:8000 -p 25:25 \
+  -p 127.0.0.1:8000:8000 -p 25:25 \
   -v pigeon-data:/var/lib/pigeon \
   -v "$PWD/secrets:/etc/pigeon:ro" \
   -e PIGEON_HTTP_ADDR=:8000 \
