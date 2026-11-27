@@ -29,6 +29,16 @@ pub fn block_on_any<F: Future>(future: F) -> F::Output {
                 // A current-thread runtime: block_in_place would panic
                 // (issue #121 F7). Handle::block_on is safe from a
                 // blocking-pool thread (where the auth path runs).
+                // Issue #124 F2: a debug assertion detects the deadlock
+                // case (called from the runtime thread itself) instead
+                // of hanging silently.
+                debug_assert!(
+                    !std::thread::current()
+                        .name()
+                        .is_some_and(|name| name.starts_with("tokio-runtime-worker")),
+                    "block_on_any called from a current-thread runtime worker — this deadlocks; \
+                     the auth path must run from spawn_blocking"
+                );
                 handle.block_on(future)
             } else {
                 // A multi-thread runtime: block_in_place converts the

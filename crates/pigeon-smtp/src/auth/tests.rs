@@ -646,4 +646,139 @@ mod tests_inner {
             assert_eq!(value, 42);
         });
     }
+
+    // --- Issue #124 hardening tests ---
+
+    /// F4: the DNS lookup limit produces PermError (not TempError).
+    /// A record with more than 10 DNS-querying mechanisms exhausts the budget.
+    #[test]
+    fn spf_dns_lookup_limit_produces_permerror() {
+        // 11 `a:` mechanisms (each does one DNS lookup) — the 11th exceeds
+        // the limit of 10 and should produce PermError.
+        let mechanisms: Vec<String> = (0..11).map(|i| format!("a:host{i}.example.com")).collect();
+        let record = format!("v=spf1 {} -all", mechanisms.join(" "));
+        let dns = FakeDns::new()
+            .with_txt("example.com", &[&record])
+            .with_a("host0.example.com", &["203.0.113.99"]);
+        let result = block(spf::check_async(
+            &dns,
+            "192.0.2.1".parse().unwrap(),
+            "example.com",
+        ));
+        // The 11th a: mechanism exceeds the budget → PermError.
+        assert_eq!(result.verdict, SpfVerdict::PermError);
+    }
+
+    /// F4: the MX host limit truncates at 10 hosts (the 11th is not tried).
+    #[test]
+    fn spf_mx_host_limit_truncates() {
+        // 15 MX hosts, but only the first 10 are evaluated. The connecting
+        // IP matches the 11th host's A record — it should NOT match because
+        // the 11th is beyond the limit.
+        let mx_hosts: Vec<String> = (0..15).map(|i| format!("mx{i}.example.net.")).collect();
+        let mut dns = FakeDns::new()
+            .with_txt("example.com", &["v=spf1 mx -all"])
+            .with_mx(
+                "example.com",
+                &mx_hosts.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            );
+        // Add A records: hosts 0-9 resolve to a non-matching IP,
+        // host 10 (the 11th, beyond the limit) resolves to the connecting IP.
+        for i in 0..10 {
+            let host = format!("mx{i}.example.net");
+            dns.a.insert(host, vec!["203.0.113.1".parse().unwrap()]);
+        }
+        dns.a.insert(
+            "mx10.example.net".to_string(),
+            vec!["192.0.2.99".parse().unwrap()],
+        );
+        let result = block(spf::check_async(
+            &dns,
+            "192.0.2.99".parse().unwrap(),
+            "example.com",
+        ));
+        // The 11th MX host has the matching IP but is beyond the limit → Fail.
+        assert_eq!(result.verdict, SpfVerdict::Fail);
+    }
+
+    /// F4: mx DNS failure produces TempError (the `a` mechanism path was
+    /// tested in #121 but the `mx` path was not).
+    #[test]
+    fn spf_mx_mechanism_dns_failure_is_temperror() {
+        // A DNS source that succeeds for TXT but fails for MX lookups.
+        struct TxtOkMxFail;
+        impl AuthDnsSource for TxtOkMxFail {
+            fn txt<'a>(
+                &'a self,
+                name: &'a str,
+            ) -> LookupFuture<'a, crate::error::Result<Vec<String>>> {
+                let records = if name.contains("example.com") {
+                    vec!["v=spf1 mx -all".to_string()]
+                } else {
+                    vec![]
+                };
+                Box::pin(async move { Ok(Ok(records)) })
+            }
+            fn a<'a>(
+                &'a self,
+                _name: &'a str,
+            ) -> LookupFuture<'a, crate::error::Result<Vec<Ipv4Addr>>> {
+                Box::pin(async move { Ok(Ok(vec![])) })
+            }
+            fn aaaa<'a>(
+                &'a self,
+                _name: &'a str,
+            ) -> LookupFuture<'a, crate::error::Result<Vec<Ipv6Addr>>> {
+                Box::pin(async move { Ok(Ok(vec![])) })
+            }
+            fn mx<'a>(
+                &'a self,
+                _name: &'a str,
+            ) -> LookupFuture<'a, crate::error::Result<Vec<String>>> {
+                Box::pin(async move {
+                    Ok(Err(crate::error::SmtpError::Dns(
+                        "MX lookup failed".to_string(),
+                    )))
+                })
+            }
+        }
+        let result = block(spf::check_async(
+            &TxtOkMxFail,
+            "192.0.2.1".parse().unwrap(),
+            "example.com",
+        ));
+        assert_eq!(result.verdict, SpfVerdict::TempError);
+    }
+
+    /// F1: include: lookups now count against the parent budget (the old
+    /// Clone let each include run its own full 10-lookup budget).
+    #[test]
+    fn spf_include_budget_propagates_to_parent() {
+        // A record with 6 include: mechanisms, each pointing at a record
+        // with 2 `a:` mechanisms. Total DNS lookups: 6 (includes) + 12 (a:)
+        // = 18, which exceeds the limit of 10. The old Clone-based budget
+        // would have allowed this (each include got its own 10); the shared
+        // budget catches it.
+        let include_record = "v=spf1 a:host1.example.net a:host2.example.net -all";
+        let mechanisms: Vec<String> = (0..6)
+            .map(|i| format!("include:inc{}.example.net", i))
+            .collect();
+        let record = format!("v=spf1 {} -all", mechanisms.join(" "));
+        let mut dns = FakeDns::new()
+            .with_txt("example.com", &[&record])
+            .with_txt("inc0.example.net", &[include_record]);
+        for i in 1..6 {
+            let name = format!("inc{}.example.net", i);
+            dns = dns.with_txt(&name, &[include_record]);
+        }
+        // The with_* builders consume self, so use direct insertion for the MX test.
+        let result = block(spf::check_async(
+            &dns,
+            "192.0.2.1".parse().unwrap(),
+            "example.com",
+        ));
+        // With the shared budget, the total exceeds 10 → PermError.
+        // (With the old Clone budget, this would have been Fail or SoftFail.)
+        assert_eq!(result.verdict, SpfVerdict::PermError);
+    }
 }

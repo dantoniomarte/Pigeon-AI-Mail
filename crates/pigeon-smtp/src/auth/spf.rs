@@ -72,21 +72,26 @@ const MX_HOST_LIMIT: usize = 10;
 
 /// Per-evaluation DNS lookup budget (issue #121 F3: the old depth counter
 /// only counted include/redirect; now every DNS access counts).
+/// Issue #124 F1: shared via `Arc<AtomicUsize>` so `include:` lookups
+/// propagate to the parent budget (the old `Clone` let each include
+/// run its own full budget — 10 includes × 10 lookups = 100 total).
 #[derive(Debug, Clone)]
 struct LookupBudget {
-    used: usize,
+    used: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl LookupBudget {
     fn new() -> Self {
-        Self { used: 0 }
+        Self {
+            used: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
     }
 
     /// Consume one lookup slot; returns false when the budget is exhausted
     /// (RFC 7208 §4.6.4: permerror).
-    fn charge(&mut self) -> bool {
-        self.used += 1;
-        self.used <= DNS_LOOKUP_LIMIT
+    fn charge(&self) -> bool {
+        let n = self.used.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        n <= DNS_LOOKUP_LIMIT
     }
 }
 
@@ -108,7 +113,7 @@ pub async fn check_async(dns: &dyn AuthDnsSource, peer_ip: IpAddr, domain: &str)
         // DNS failure: temperror, not none (RFC 7208 §5.4, issue #116 F1).
         // The multiple-SPF-records marker is permerror (RFC 7208 §3.2, F6).
         Err(error) => {
-            let verdict = if error.to_string().contains("multiple SPF") {
+            let verdict = if is_multiple_records_error(&error) {
                 SpfVerdict::PermError
             } else {
                 SpfVerdict::TempError
@@ -121,7 +126,7 @@ pub async fn check_async(dns: &dyn AuthDnsSource, peer_ip: IpAddr, domain: &str)
     };
 
     let budget = LookupBudget::new();
-    let verdict = Box::pin(evaluate_record(dns, &record, peer_ip, domain, budget)).await;
+    let verdict = Box::pin(evaluate_record(dns, &record, peer_ip, domain, &budget)).await;
     SpfResult {
         verdict,
         domain: domain.to_string(),
@@ -155,10 +160,10 @@ fn evaluate_record<'a>(
     record: &'a str,
     ip: IpAddr,
     domain: &'a str,
-    budget: LookupBudget,
+    budget: &'a LookupBudget,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = SpfVerdict> + Send + 'a>> {
     Box::pin(async move {
-        let mut budget = budget;
+        let budget = budget.clone();
         let terms: Vec<&str> = record.split_whitespace().skip(1).collect();
         let mut redirect: Option<&str> = None;
 
@@ -216,17 +221,14 @@ fn evaluate_record<'a>(
                     .split('/')
                     .next()
                     .unwrap_or(domain);
-                match match_mx(dns, ip, target, &mut budget).await {
+                // Issue #124 F3: the mx mechanism counts as ONE term
+                // against the DNS lookup budget (RFC 7208 §4.6.4).
+                if !budget.charge() {
+                    return SpfVerdict::PermError;
+                }
+                match match_mx(dns, ip, target).await {
                     Ok(matched) => matched,
-                    Err(error) => {
-                        // Budget exhaustion is PermError (RFC 7208 §4.6.4);
-                        // DNS failures are TempError (§5.4).
-                        return if error.to_string().contains("lookup limit") {
-                            SpfVerdict::PermError
-                        } else {
-                            SpfVerdict::TempError
-                        };
-                    }
+                    Err(_) => return SpfVerdict::TempError,
                 }
             } else if let Some(include_domain) = mechanism.strip_prefix("include:") {
                 // Issue #121 F6: include: propagates permerror from
@@ -235,7 +237,7 @@ fn evaluate_record<'a>(
                 if !budget.charge() {
                     return SpfVerdict::PermError;
                 }
-                match match_include(dns, ip, include_domain, budget.clone()).await {
+                match match_include(dns, ip, include_domain, &budget).await {
                     Ok(matched) => matched,
                     Err(verdict) => return verdict,
                 }
@@ -256,7 +258,7 @@ fn evaluate_record<'a>(
             }
             match spf_record(dns, target).await {
                 Ok(Some(record)) => {
-                    return Box::pin(evaluate_record(dns, &record, ip, target, budget)).await;
+                    return Box::pin(evaluate_record(dns, &record, ip, target, &budget)).await;
                 }
                 Ok(None) => {
                     // redirect target without an SPF record: permerror.
@@ -265,7 +267,7 @@ fn evaluate_record<'a>(
                 // DNS failure during redirect: temperror (issue #116 F1),
                 // unless the error is the multiple-records marker.
                 Err(error) => {
-                    return if error.to_string().contains("multiple SPF") {
+                    return if is_multiple_records_error(&error) {
                         SpfVerdict::PermError
                     } else {
                         SpfVerdict::TempError
@@ -353,20 +355,16 @@ async fn match_mx(
     dns: &dyn AuthDnsSource,
     ip: IpAddr,
     target: &str,
-    budget: &mut LookupBudget,
 ) -> Result<bool, crate::error::SmtpError> {
     let mx_hosts = match dns.mx(target).await {
         Ok(Ok(hosts)) => hosts,
         Ok(Err(error)) => return Err(error),
         Err(error) => return Err(error),
     };
-    // Issue #121 F2: bound the number of MX hosts evaluated.
+    // Issue #124 F3: the mx mechanism counts as ONE term against the DNS
+    // lookup budget (RFC 7208 §4.6.4), not 1+N. The per-host A/AAAA lookups
+    // are bounded separately by MX_HOST_LIMIT (issue #121 F2).
     for host in mx_hosts.iter().take(MX_HOST_LIMIT) {
-        if !budget.charge() {
-            return Err(crate::error::SmtpError::Dns(
-                "DNS lookup limit exceeded during mx mechanism (RFC 7208 §4.6.4)".to_string(),
-            ));
-        }
         match match_a(dns, ip, host).await {
             Ok(true) => return Ok(true),
             Ok(false) => continue,
@@ -383,7 +381,7 @@ async fn match_include(
     dns: &dyn AuthDnsSource,
     ip: IpAddr,
     include_domain: &str,
-    budget: LookupBudget,
+    budget: &LookupBudget,
 ) -> Result<bool, SpfVerdict> {
     match spf_record(dns, include_domain).await {
         Ok(Some(record)) => {
@@ -399,11 +397,19 @@ async fn match_include(
         }
         Ok(None) => Ok(false),
         Err(error) => {
-            if error.to_string().contains("multiple SPF") {
+            if is_multiple_records_error(&error) {
                 Err(SpfVerdict::PermError)
             } else {
                 Err(SpfVerdict::TempError)
             }
         }
     }
+}
+
+/// Classify a DNS error as the multiple-SPF-records permerror marker.
+/// Issue #124 F5: a single helper centralizes the classification so a
+/// format change only needs one fix (the old string matching was
+/// scattered across four call sites).
+fn is_multiple_records_error(error: &crate::error::SmtpError) -> bool {
+    error.to_string().contains("multiple SPF")
 }
