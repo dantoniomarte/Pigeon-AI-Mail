@@ -88,13 +88,13 @@ container when it changes — the binary reads the certificate at startup.
 ### DMARC enforcement (optional, default off)
 
 Inbound authentication (SPF, DKIM, DMARC) always **evaluates and records** the
-verdicts. Setting `PIGEON_SMTP_AUTH_ENFORCE=true` additionally **applies** the
+verdicts. Setting `PIGEON_DMARC_ENFORCE=true` additionally **applies** the
 published DMARC policy of the From domain: `p=reject` refuses the message with
 `550 5.7.1` at DATA, `p=quarantine` delivers the copies to the spam folder,
 `p=none` (and domains without a DMARC record) keep the record-only behavior.
 
 ```sh
-  -e PIGEON_SMTP_AUTH_ENFORCE=true \
+  -e PIGEON_DMARC_ENFORCE=true \
 ```
 
 Leave it off for your first weeks: SPF/DKIM/DMARC have real false positives

@@ -95,7 +95,7 @@ pub struct ServerConfig {
     /// honesty rule).
     pub tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
     /// Apply the published DMARC policy on inbound mail
-    /// (`PIGEON_SMTP_AUTH_ENFORCE`, default `false`): `p=reject` refuses
+    /// (`PIGEON_DMARC_ENFORCE`, default `false`): `p=reject` refuses
     /// the message with 550 5.7.1, `p=quarantine` delivers to the spam
     /// folder. Record mode (the default) evaluates and labels without
     /// acting (issue #114).
@@ -978,7 +978,7 @@ fn ingest_message(
             from = %from,
             subject = %subject_for_event,
             policy = "reject",
-            "inbound message refused: DMARC policy enforcement (PIGEON_SMTP_AUTH_ENFORCE)"
+            "inbound message refused: DMARC policy enforcement (PIGEON_DMARC_ENFORCE)"
         );
         return Ok(Reply::new(
             550,

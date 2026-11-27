@@ -95,7 +95,8 @@ pub struct Config {
     /// Outbound TLS policy (`PIGEON_SMTP_OUT_STARTTLS`).
     pub smtp_out_starttls: StartTlsMode,
     /// Apply the published DMARC policy on inbound mail
-    /// (`PIGEON_SMTP_AUTH_ENFORCE`, default `false`): `p=reject` refuses
+    /// (`PIGEON_DMARC_ENFORCE`, default `false`; the deprecated
+    /// `PIGEON_SMTP_AUTH_ENFORCE` still works): `p=reject` refuses
     /// the message, `p=quarantine` delivers to the spam folder. Record
     /// mode (the default) evaluates and labels without acting.
     pub smtp_auth_enforce: bool,
@@ -184,6 +185,11 @@ impl Config {
         if let Some(v) = get("SMTP_OUT_STARTTLS")? {
             cfg.smtp_out_starttls = StartTlsMode::parse(&v)?;
         }
+        // The new name (issue #129): PIGEON_DMARC_ENFORCE
+        if let Some(v) = get("DMARC_ENFORCE")? {
+            cfg.smtp_auth_enforce = parse_bool("DMARC_ENFORCE", &v)?;
+        }
+        // The old name still works (deprecated, issue #129)
         if let Some(v) = get("SMTP_AUTH_ENFORCE")? {
             cfg.smtp_auth_enforce = parse_bool("SMTP_AUTH_ENFORCE", &v)?;
         }
