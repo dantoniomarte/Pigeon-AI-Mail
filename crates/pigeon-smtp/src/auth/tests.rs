@@ -481,4 +481,169 @@ mod tests_inner {
         ));
         assert_eq!(result.verdict, SpfVerdict::Pass);
     }
+
+    // --- Issue #121 hardening tests ---
+
+    /// A DNS source that always fails — proves the TempError paths.
+    struct FailingDns;
+
+    impl AuthDnsSource for FailingDns {
+        fn txt<'a>(
+            &'a self,
+            _name: &'a str,
+        ) -> LookupFuture<'a, crate::error::Result<Vec<String>>> {
+            Box::pin(async move {
+                Ok(Err(crate::error::SmtpError::Dns(
+                    "simulated DNS outage".to_string(),
+                )))
+            })
+        }
+        fn a<'a>(
+            &'a self,
+            _name: &'a str,
+        ) -> LookupFuture<'a, crate::error::Result<Vec<Ipv4Addr>>> {
+            Box::pin(async move {
+                Ok(Err(crate::error::SmtpError::Dns(
+                    "simulated DNS outage".to_string(),
+                )))
+            })
+        }
+        fn aaaa<'a>(
+            &'a self,
+            _name: &'a str,
+        ) -> LookupFuture<'a, crate::error::Result<Vec<Ipv6Addr>>> {
+            Box::pin(async move {
+                Ok(Err(crate::error::SmtpError::Dns(
+                    "simulated DNS outage".to_string(),
+                )))
+            })
+        }
+        fn mx<'a>(&'a self, _name: &'a str) -> LookupFuture<'a, crate::error::Result<Vec<String>>> {
+            Box::pin(async move {
+                Ok(Err(crate::error::SmtpError::Dns(
+                    "simulated DNS outage".to_string(),
+                )))
+            })
+        }
+    }
+
+    /// F4: a DNS failure during the initial TXT lookup produces
+    /// spf=temperror, not none.
+    #[test]
+    fn spf_temperror_on_dns_failure() {
+        let result = block(spf::check_async(
+            &FailingDns,
+            "192.0.2.1".parse().unwrap(),
+            "example.com",
+        ));
+        assert_eq!(result.verdict, SpfVerdict::TempError);
+    }
+
+    /// F4: a DNS failure during the DMARC record lookup produces
+    /// dmarc=temperror, not none.
+    #[test]
+    fn dmarc_temperror_on_dns_failure() {
+        let spf = SpfResult {
+            verdict: SpfVerdict::Fail,
+            domain: "other.com".to_string(),
+        };
+        let dkim = DkimSummary::None;
+        let result = block(dmarc::evaluate_async(
+            &FailingDns,
+            &spf,
+            &dkim,
+            "example.com",
+        ));
+        assert_eq!(result.verdict, DmarcVerdict::TempError);
+    }
+
+    /// F1: a DNS failure during the `a` mechanism produces temperror,
+    /// not a silent no-match that combined with -all would produce fail.
+    #[test]
+    fn spf_a_mechanism_dns_failure_is_temperror() {
+        // A DNS source that succeeds for TXT but fails for A lookups.
+        struct TxtOkAFail;
+        impl AuthDnsSource for TxtOkAFail {
+            fn txt<'a>(
+                &'a self,
+                name: &'a str,
+            ) -> LookupFuture<'a, crate::error::Result<Vec<String>>> {
+                let records = if name.contains("example.com") {
+                    vec!["v=spf1 a -all".to_string()]
+                } else {
+                    vec![]
+                };
+                Box::pin(async move { Ok(Ok(records)) })
+            }
+            fn a<'a>(
+                &'a self,
+                _name: &'a str,
+            ) -> LookupFuture<'a, crate::error::Result<Vec<Ipv4Addr>>> {
+                Box::pin(async move {
+                    Ok(Err(crate::error::SmtpError::Dns(
+                        "A lookup failed".to_string(),
+                    )))
+                })
+            }
+            fn aaaa<'a>(
+                &'a self,
+                _name: &'a str,
+            ) -> LookupFuture<'a, crate::error::Result<Vec<Ipv6Addr>>> {
+                Box::pin(async move {
+                    Ok(Err(crate::error::SmtpError::Dns(
+                        "AAAA lookup failed".to_string(),
+                    )))
+                })
+            }
+            fn mx<'a>(
+                &'a self,
+                _name: &'a str,
+            ) -> LookupFuture<'a, crate::error::Result<Vec<String>>> {
+                Box::pin(async move { Ok(Ok(vec![])) })
+            }
+        }
+        let result = block(spf::check_async(
+            &TxtOkAFail,
+            "192.0.2.1".parse().unwrap(),
+            "example.com",
+        ));
+        assert_eq!(result.verdict, SpfVerdict::TempError);
+    }
+
+    /// F6: an include: pointing at a domain with multiple v=spf1 records
+    /// produces permerror (the old catch-all treated it as no-match).
+    #[test]
+    fn spf_include_multiple_records_is_permerror() {
+        let dns = FakeDns::new()
+            .with_txt("example.com", &["v=spf1 include:broken.example.net -all"])
+            .with_txt(
+                "broken.example.net",
+                &["v=spf1 ip4:192.0.2.1 -all", "v=spf1 ip4:198.51.100.1 -all"],
+            );
+        let result = block(spf::check_async(
+            &dns,
+            "192.0.2.1".parse().unwrap(),
+            "example.com",
+        ));
+        assert_eq!(result.verdict, SpfVerdict::PermError);
+    }
+
+    /// F7: block_on_any does not panic when called from a blocking task
+    /// on a current-thread runtime (the real-world path: the auth module
+    /// always runs from spawn_blocking, never from the runtime thread).
+    #[test]
+    fn block_on_any_works_from_spawn_blocking_on_current_thread() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            // spawn_blocking puts us on a separate thread; block_on_any
+            // must not panic there (the old block_in_place did).
+            let value =
+                tokio::task::spawn_blocking(|| crate::auth::runtime::block_on_any(async { 42 }))
+                    .await
+                    .expect("spawn_blocking join");
+            assert_eq!(value, 42);
+        });
+    }
 }

@@ -80,9 +80,18 @@ impl HickoryAuthDnsSource {
             return Ok(source);
         }
         // Build (may fail transiently). Only a success is cached; a failure
-        // returns to the caller and the next message retries.
-        let source = Self::build()?;
-        Ok(SHARED.get_or_init(|| source))
+        // returns to the caller and the next message retries (issue #121
+        // F9: log it so operators can see the transient failure).
+        match Self::build() {
+            Ok(source) => Ok(SHARED.get_or_init(|| source)),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "auth DNS resolver init failed (transient; the next message retries)"
+                );
+                Err(error)
+            }
+        }
     }
 }
 
@@ -150,6 +159,10 @@ impl AuthDnsSource for HickoryAuthDnsSource {
                     .collect())),
                 // "No MX published" is not an error for the mx mechanism: an
                 // empty list simply matches nothing (RFC 7208 §5.6.4).
+                // Issue #121 F5: hickory 0.25's ResolveErrorKind has no
+                // typed NoRecordsFound variant — the string match is the
+                // available mechanism. A hickory upgrade should revisit
+                // this (the proto error carries the ResponseCode).
                 Err(error)
                     if error.to_string().contains("no record")
                         || error.to_string().contains("NXDOMAIN") =>

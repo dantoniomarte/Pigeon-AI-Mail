@@ -160,7 +160,6 @@ pub(crate) fn verify_dkim(
 
     let mut passed_domains = Vec::new();
     let mut failures = Vec::new();
-    let mut skipped = 0usize;
 
     for (_, value) in &signatures {
         // Parse the tag pairs first (issue #116 F5): the old substring
@@ -185,7 +184,6 @@ pub(crate) fn verify_dkim(
         let Some(key_record) = key else {
             // No key published: the signature cannot be checked — skip it
             // rather than report a false fail (issue #109 R3 fix, kept).
-            skipped += 1;
             continue;
         };
 
@@ -204,9 +202,11 @@ pub(crate) fn verify_dkim(
                     );
                 }
             }
-            Err(_) => {
-                // Structural errors in the signature header itself.
-                failures.push("malformed DKIM-Signature header".to_string());
+            Err(error) => {
+                // Structural errors in the signature header itself —
+                // forward the detail (issue #121 F8: the old catch-all
+                // replaced every error with a generic message).
+                failures.push(error.to_string());
             }
         }
     }
@@ -216,8 +216,6 @@ pub(crate) fn verify_dkim(
     } else if failures.is_empty() {
         // All signatures were skipped (no key published for any): report
         // "none" rather than "fail" — we could not check, we did not fail.
-        DkimSummary::None
-    } else if skipped == signatures.len() {
         DkimSummary::None
     } else {
         DkimSummary::Fail(failures)

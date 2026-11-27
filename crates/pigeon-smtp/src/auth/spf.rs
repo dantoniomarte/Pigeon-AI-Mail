@@ -4,7 +4,7 @@
 //! the `+`/`-`/`~`/`?` qualifiers). Not supported (rare, v0.3): `exists:`,
 //! `ptr:`, `exp:`, macro expansion. The DNS lookup limit (10 per record,
 //! RFC 7208 §4.6.4) is enforced on `include:`, `redirect=` and the
-//! `a`/`mx` dereferences.
+//! `a`/`mx` dereferences (issue #121 F3).
 //!
 //! `redirect=` is a modifier, not a mechanism: RFC 7208 §6.1 evaluates it
 //! only when no mechanism matched (F5, issue #111).
@@ -14,6 +14,12 @@
 //! resolves the domain's MX hosts and then their A/AAAA records (F4);
 //! a name publishing more than one `v=spf1` TXT record is `permerror`
 //! (F6, RFC 7208 §3.2).
+//!
+//! Hardening (#121): DNS errors during **per-mechanism** lookups also
+//! produce `TempError` (F1) — a DNS outage during the `a` or `mx` lookup
+//! no longer degrades to `Fail` via `-all`. The `mx` mechanism evaluates
+//! at most 10 MX hosts (F2, RFC 7208 §5.6.4). The include: mechanism
+//! propagates permerror from multiple-records (F6).
 
 use std::net::IpAddr;
 
@@ -58,6 +64,32 @@ impl SpfResult {
     }
 }
 
+/// The RFC 7208 §4.6.4 DNS lookup limit.
+const DNS_LOOKUP_LIMIT: usize = 10;
+
+/// The RFC 7208 §5.6.4 MX host limit for the `mx` mechanism.
+const MX_HOST_LIMIT: usize = 10;
+
+/// Per-evaluation DNS lookup budget (issue #121 F3: the old depth counter
+/// only counted include/redirect; now every DNS access counts).
+#[derive(Debug, Clone)]
+struct LookupBudget {
+    used: usize,
+}
+
+impl LookupBudget {
+    fn new() -> Self {
+        Self { used: 0 }
+    }
+
+    /// Consume one lookup slot; returns false when the budget is exhausted
+    /// (RFC 7208 §4.6.4: permerror).
+    fn charge(&mut self) -> bool {
+        self.used += 1;
+        self.used <= DNS_LOOKUP_LIMIT
+    }
+}
+
 /// Check whether `peer_ip` is authorized to send mail for `domain`.
 pub fn check(dns: &dyn AuthDnsSource, peer_ip: IpAddr, mail_from_domain: &str) -> SpfResult {
     super::runtime::block_on_any(check_async(dns, peer_ip, mail_from_domain))
@@ -88,7 +120,8 @@ pub async fn check_async(dns: &dyn AuthDnsSource, peer_ip: IpAddr, domain: &str)
         }
     };
 
-    let verdict = Box::pin(evaluate_record(dns, &record, peer_ip, domain, 0)).await;
+    let budget = LookupBudget::new();
+    let verdict = Box::pin(evaluate_record(dns, &record, peer_ip, domain, budget)).await;
     SpfResult {
         verdict,
         domain: domain.to_string(),
@@ -109,9 +142,7 @@ async fn spf_record(dns: &dyn AuthDnsSource, domain: &str) -> crate::error::Resu
     match spf_records.len() {
         0 => Ok(None),
         1 => Ok(Some(spf_records[0].clone())),
-        // RFC 7208 §3.2: multiple SPF records are permerror. We signal it by
-        // returning the first record with a marker the caller can check; the
-        // cleanest way is a dedicated error the caller maps to PermError.
+        // RFC 7208 §3.2: multiple SPF records are permerror.
         _ => Err(crate::error::SmtpError::Dns(format!(
             "multiple SPF records published for {domain} (RFC 7208 §3.2 permerror)"
         ))),
@@ -124,14 +155,10 @@ fn evaluate_record<'a>(
     record: &'a str,
     ip: IpAddr,
     domain: &'a str,
-    depth: usize,
+    budget: LookupBudget,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = SpfVerdict> + Send + 'a>> {
     Box::pin(async move {
-        if depth > 10 {
-            // RFC 7208 §4.6.4: more than 10 DNS lookups → permerror.
-            return SpfVerdict::PermError;
-        }
-
+        let mut budget = budget;
         let terms: Vec<&str> = record.split_whitespace().skip(1).collect();
         let mut redirect: Option<&str> = None;
 
@@ -160,26 +187,58 @@ fn evaluate_record<'a>(
                 match_ip6(ip, cidr)
             } else if mechanism == "a" || mechanism.starts_with("a:") || mechanism.starts_with("a/")
             {
+                // Issue #121 F1: a DNS failure during the mechanism lookup
+                // produces TempError (not a silent no-match that combined
+                // with -all would produce Fail).
+                if !budget.charge() {
+                    return SpfVerdict::PermError;
+                }
                 let target = mechanism
                     .strip_prefix("a:")
                     .unwrap_or(domain)
                     .split('/')
                     .next()
                     .unwrap_or(domain);
-                match_a(dns, ip, target).await
+                match match_a(dns, ip, target).await {
+                    Ok(matched) => matched,
+                    Err(_) => return SpfVerdict::TempError,
+                }
             } else if mechanism == "mx" || mechanism.starts_with("mx:") {
                 // RFC 7208 §5.6.4: resolve the domain's MX hosts, then the
-                // A/AAAA of each host (issue #116 F4 — no more fallback to
-                // the domain's own A record).
+                // A/AAAA of each host (issue #116 F4). Issue #121 F2: bound
+                // the number of MX hosts evaluated to MX_HOST_LIMIT.
+                if !budget.charge() {
+                    return SpfVerdict::PermError;
+                }
                 let target = mechanism
                     .strip_prefix("mx:")
                     .unwrap_or(domain)
                     .split('/')
                     .next()
                     .unwrap_or(domain);
-                match_mx(dns, ip, target).await
+                match match_mx(dns, ip, target, &mut budget).await {
+                    Ok(matched) => matched,
+                    Err(error) => {
+                        // Budget exhaustion is PermError (RFC 7208 §4.6.4);
+                        // DNS failures are TempError (§5.4).
+                        return if error.to_string().contains("lookup limit") {
+                            SpfVerdict::PermError
+                        } else {
+                            SpfVerdict::TempError
+                        };
+                    }
+                }
             } else if let Some(include_domain) = mechanism.strip_prefix("include:") {
-                match_include(dns, ip, include_domain, depth + 1).await
+                // Issue #121 F6: include: propagates permerror from
+                // multiple-records (the old catch-all treated it as
+                // no-match).
+                if !budget.charge() {
+                    return SpfVerdict::PermError;
+                }
+                match match_include(dns, ip, include_domain, budget.clone()).await {
+                    Ok(matched) => matched,
+                    Err(verdict) => return verdict,
+                }
             } else {
                 // Unknown mechanism: RFC 7208 §6.2 says permerror.
                 return SpfVerdict::PermError;
@@ -192,9 +251,12 @@ fn evaluate_record<'a>(
 
         // No mechanism matched: evaluate redirect= (RFC 7208 §6.1), else neutral.
         if let Some(target) = redirect {
+            if !budget.charge() {
+                return SpfVerdict::PermError;
+            }
             match spf_record(dns, target).await {
                 Ok(Some(record)) => {
-                    return Box::pin(evaluate_record(dns, &record, ip, target, depth + 1)).await;
+                    return Box::pin(evaluate_record(dns, &record, ip, target, budget)).await;
                 }
                 Ok(None) => {
                     // redirect target without an SPF record: permerror.
@@ -262,49 +324,86 @@ fn match_ip6(ip: IpAddr, cidr: &str) -> bool {
 }
 
 /// `a` mechanism: any A/AAAA record of `target` matches the connecting IP.
-/// DNS failure during the lookup means no match (the overall check reports
-/// temperror through the record-level path when the initial TXT lookup
-/// fails; per-mechanism failures degrade conservatively).
-async fn match_a(dns: &dyn AuthDnsSource, ip: IpAddr, target: &str) -> bool {
+/// Returns `Err` on DNS failure (issue #121 F1: the caller maps it to
+/// TempError, not a silent no-match).
+async fn match_a(
+    dns: &dyn AuthDnsSource,
+    ip: IpAddr,
+    target: &str,
+) -> Result<bool, crate::error::SmtpError> {
     match ip {
         IpAddr::V4(peer) => match dns.a(target).await {
-            Ok(Ok(addrs)) => addrs.contains(&peer),
-            _ => false,
+            Ok(Ok(addrs)) => Ok(addrs.contains(&peer)),
+            Ok(Err(error)) => Err(error),
+            Err(error) => Err(error),
         },
         IpAddr::V6(peer) => match dns.aaaa(target).await {
-            Ok(Ok(addrs)) => addrs.contains(&peer),
-            _ => false,
+            Ok(Ok(addrs)) => Ok(addrs.contains(&peer)),
+            Ok(Err(error)) => Err(error),
+            Err(error) => Err(error),
         },
     }
 }
 
 /// `mx` mechanism: any A/AAAA record of any MX host of `target` matches
-/// (RFC 7208 §5.6.4, issue #116 F4).
-async fn match_mx(dns: &dyn AuthDnsSource, ip: IpAddr, target: &str) -> bool {
+/// (RFC 7208 §5.6.4, issue #116 F4). Issue #121 F2: at most
+/// MX_HOST_LIMIT hosts are evaluated; issue #121 F1: DNS failures
+/// propagate as Err (the caller maps to TempError).
+async fn match_mx(
+    dns: &dyn AuthDnsSource,
+    ip: IpAddr,
+    target: &str,
+    budget: &mut LookupBudget,
+) -> Result<bool, crate::error::SmtpError> {
     let mx_hosts = match dns.mx(target).await {
         Ok(Ok(hosts)) => hosts,
-        _ => return false,
+        Ok(Err(error)) => return Err(error),
+        Err(error) => return Err(error),
     };
-    for host in &mx_hosts {
-        if match_a(dns, ip, host).await {
-            return true;
+    // Issue #121 F2: bound the number of MX hosts evaluated.
+    for host in mx_hosts.iter().take(MX_HOST_LIMIT) {
+        if !budget.charge() {
+            return Err(crate::error::SmtpError::Dns(
+                "DNS lookup limit exceeded during mx mechanism (RFC 7208 §4.6.4)".to_string(),
+            ));
+        }
+        match match_a(dns, ip, host).await {
+            Ok(true) => return Ok(true),
+            Ok(false) => continue,
+            Err(error) => return Err(error),
         }
     }
-    false
+    Ok(false)
 }
 
 /// `include:` mechanism: recursive check of `include_domain`.
+/// Issue #121 F6: permerror from multiple-records propagates (the old
+/// catch-all treated it as no-match).
 async fn match_include(
     dns: &dyn AuthDnsSource,
     ip: IpAddr,
     include_domain: &str,
-    depth: usize,
-) -> bool {
+    budget: LookupBudget,
+) -> Result<bool, SpfVerdict> {
     match spf_record(dns, include_domain).await {
         Ok(Some(record)) => {
-            Box::pin(evaluate_record(dns, &record, ip, include_domain, depth)).await
-                == SpfVerdict::Pass
+            let verdict = Box::pin(evaluate_record(dns, &record, ip, include_domain, budget)).await;
+            match verdict {
+                SpfVerdict::Pass => Ok(true),
+                // Issue #121 F6: permerror and temperror propagate up
+                // instead of being swallowed as no-match.
+                SpfVerdict::PermError => Err(SpfVerdict::PermError),
+                SpfVerdict::TempError => Err(SpfVerdict::TempError),
+                _ => Ok(false),
+            }
         }
-        _ => false,
+        Ok(None) => Ok(false),
+        Err(error) => {
+            if error.to_string().contains("multiple SPF") {
+                Err(SpfVerdict::PermError)
+            } else {
+                Err(SpfVerdict::TempError)
+            }
+        }
     }
 }
