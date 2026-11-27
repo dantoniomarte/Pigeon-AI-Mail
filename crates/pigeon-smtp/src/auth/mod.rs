@@ -163,30 +163,24 @@ pub(crate) fn verify_dkim(
     let mut skipped = 0usize;
 
     for (_, value) in &signatures {
-        // Resolve the DKIM key through the auth DNS source (blocking on the
-        // async resolver from this synchronous caller context).
-        let key = self::runtime::block_on_any(async {
-            let selector = value
-                .split("s=")
-                .nth(1)
-                .and_then(|rest| rest.split(';').next())
-                .unwrap_or_default()
-                .trim()
-                .to_string();
-            let domain_tag = value
-                .split("d=")
-                .nth(1)
-                .and_then(|rest| rest.split(';').next())
-                .unwrap_or_default()
-                .trim()
-                .to_string();
-            if selector.is_empty() || domain_tag.is_empty() {
-                return None;
-            }
+        // Parse the tag pairs first (issue #116 F5): the old substring
+        // splits (`value.split("s=")`) matched the first occurrence anywhere,
+        // so the common `t=s` canonicalization tag broke the selector parse
+        // and base64 padding could misdirect the lookup. Tag-pair parsing
+        // splits on `;` and matches the tag name exactly.
+        let tags = parse_dkim_tags(value);
+        let selector = tags.get("s").cloned().unwrap_or_default();
+        let domain_tag = tags.get("d").cloned().unwrap_or_default();
+
+        // Resolve the DKIM key through the auth DNS source.
+        let key = if selector.is_empty() || domain_tag.is_empty() {
+            None
+        } else {
             let name = format!("{selector}._domainkey.{domain_tag}.");
-            dns.txt(&name).await.ok()
-        })
-        .and_then(|records| records.into_iter().next());
+            self::runtime::block_on_any(async { dns.txt(&name).await.ok() })
+                .and_then(|result| result.ok())
+                .and_then(|records| records.into_iter().next())
+        };
 
         let Some(key_record) = key else {
             // No key published: the signature cannot be checked — skip it
@@ -228,4 +222,21 @@ pub(crate) fn verify_dkim(
     } else {
         DkimSummary::Fail(failures)
     }
+}
+
+/// Parse a `DKIM-Signature` value into `tag → value` pairs (issue #116 F5).
+///
+/// RFC 6376 §3.2: the value is `tag=value` pairs separated by `;`, with
+/// optional whitespace around each. Splitting on `;` and then on the first
+/// `=` gives the exact tag names — no substring matching that `t=s` can
+/// confuse with `s=`.
+fn parse_dkim_tags(value: &str) -> std::collections::BTreeMap<String, String> {
+    let mut tags = std::collections::BTreeMap::new();
+    for pair in value.split(';') {
+        let pair = pair.trim();
+        if let Some((name, tag_value)) = pair.split_once('=') {
+            tags.insert(name.trim().to_string(), tag_value.trim().to_string());
+        }
+    }
+    tags
 }

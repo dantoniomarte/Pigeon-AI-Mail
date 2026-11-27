@@ -2,8 +2,13 @@
 //!
 //! DMARC builds on SPF and DKIM: it checks whether either authenticated
 //! domain **aligns** with the From: header domain, and applies the published
-//! policy (`none`, `quarantine`, `reject`). In v0.1 the policy is recorded
-//! and surfaced, not enforced — enforcement is a config flag that ships off.
+//! policy (`none`, `quarantine`, `reject`). With enforcement off (the
+//! default) the policy is recorded and surfaced; with
+//! `PIGEON_SMTP_AUTH_ENFORCE=true` the server applies it (issue #114).
+//!
+//! Hardening (#116): DNS failures during the DMARC record lookup produce
+//! `TempError` verdicts (not `none`) — a transient outage must not be
+//! misread as "no policy published".
 
 use super::dns::AuthDnsSource;
 use super::spf::{SpfResult, SpfVerdict};
@@ -63,27 +68,25 @@ pub async fn evaluate_async(
 
     // RFC 7489 §6.6.3: look up _dmarc.<from-domain> first; if not found,
     // fall back to the organizational domain (the last two labels).
-    let record = match dns.txt(&format!("_dmarc.{from_domain}.")).await {
-        Ok(records) if !records.is_empty() => Some(records.into_iter().next().unwrap()),
-        _ => {
-            let org_domain = organizational_domain(from_domain);
-            if org_domain != from_domain {
-                dns.txt(&format!("_dmarc.{org_domain}."))
-                    .await
-                    .ok()
-                    .and_then(|records| records.into_iter().next())
-            } else {
-                None
+    let record = match dmarc_record(dns, from_domain).await {
+        Ok(Some(record)) => record,
+        Ok(None) => {
+            return DmarcResult {
+                verdict: DmarcVerdict::None,
+                from_domain: from_domain.to_string(),
+                policy: "none".to_string(),
+            }
+        }
+        // DNS failure: temperror, not none (issue #116 F1).
+        Err(_) => {
+            return DmarcResult {
+                verdict: DmarcVerdict::TempError,
+                from_domain: from_domain.to_string(),
+                policy: "none".to_string(),
             }
         }
     };
-    let Some(record) = record else {
-        return DmarcResult {
-            verdict: DmarcVerdict::None,
-            from_domain: from_domain.to_string(),
-            policy: "none".to_string(),
-        };
-    };
+
     if !record.starts_with("v=DMARC1") {
         return DmarcResult {
             verdict: DmarcVerdict::PermError,
@@ -127,6 +130,26 @@ pub fn evaluate(
     from_domain: &str,
 ) -> DmarcResult {
     super::runtime::block_on_any(evaluate_async(dns, spf, dkim, from_domain))
+}
+
+/// Fetch the DMARC record with the organizational-domain fallback.
+/// `Err` on DNS failure; `Ok(None)` when no record is published.
+async fn dmarc_record(
+    dns: &dyn AuthDnsSource,
+    from_domain: &str,
+) -> crate::error::Result<Option<String>> {
+    let records = dns.txt(&format!("_dmarc.{from_domain}.")).await??;
+    if let Some(record) = records.into_iter().find(|r| r.starts_with("v=DMARC1")) {
+        return Ok(Some(record));
+    }
+    let org_domain = organizational_domain(from_domain);
+    if org_domain != from_domain {
+        let records = dns.txt(&format!("_dmarc.{org_domain}.")).await??;
+        if let Some(record) = records.into_iter().find(|r| r.starts_with("v=DMARC1")) {
+            return Ok(Some(record));
+        }
+    }
+    Ok(None)
 }
 
 /// RFC 7489 relaxed alignment: `auth_domain` equals `from_domain` or is a

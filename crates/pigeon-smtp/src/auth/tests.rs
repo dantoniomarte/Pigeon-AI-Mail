@@ -18,6 +18,7 @@ mod tests_inner {
         txt: HashMap<String, Vec<String>>,
         a: HashMap<String, Vec<Ipv4Addr>>,
         aaaa: HashMap<String, Vec<Ipv6Addr>>,
+        mx: HashMap<String, Vec<String>>,
     }
 
     impl FakeDns {
@@ -26,6 +27,7 @@ mod tests_inner {
                 txt: HashMap::new(),
                 a: HashMap::new(),
                 aaaa: HashMap::new(),
+                mx: HashMap::new(),
             }
         }
 
@@ -33,6 +35,14 @@ mod tests_inner {
             self.txt.insert(
                 name.to_string(),
                 records.iter().map(|s| s.to_string()).collect(),
+            );
+            self
+        }
+
+        fn with_mx(mut self, name: &str, hosts: &[&str]) -> Self {
+            self.mx.insert(
+                name.to_string(),
+                hosts.iter().map(|s| s.to_string()).collect(),
             );
             self
         }
@@ -47,22 +57,31 @@ mod tests_inner {
     }
 
     impl AuthDnsSource for FakeDns {
-        fn txt<'a>(&'a self, name: &'a str) -> LookupFuture<'a, Vec<String>> {
+        fn txt<'a>(&'a self, name: &'a str) -> LookupFuture<'a, crate::error::Result<Vec<String>>> {
             let key = name.trim_end_matches('.').to_string();
             let records = self.txt.get(&key).cloned().unwrap_or_default();
-            Box::pin(async move { Ok(records) })
+            Box::pin(async move { Ok(Ok(records)) })
         }
 
-        fn a<'a>(&'a self, name: &'a str) -> LookupFuture<'a, Vec<Ipv4Addr>> {
+        fn a<'a>(&'a self, name: &'a str) -> LookupFuture<'a, crate::error::Result<Vec<Ipv4Addr>>> {
             let key = name.trim_end_matches('.').to_string();
             let records = self.a.get(&key).cloned().unwrap_or_default();
-            Box::pin(async move { Ok(records) })
+            Box::pin(async move { Ok(Ok(records)) })
         }
 
-        fn aaaa<'a>(&'a self, name: &'a str) -> LookupFuture<'a, Vec<Ipv6Addr>> {
+        fn aaaa<'a>(
+            &'a self,
+            name: &'a str,
+        ) -> LookupFuture<'a, crate::error::Result<Vec<Ipv6Addr>>> {
             let key = name.trim_end_matches('.').to_string();
             let records = self.aaaa.get(&key).cloned().unwrap_or_default();
-            Box::pin(async move { Ok(records) })
+            Box::pin(async move { Ok(Ok(records)) })
+        }
+
+        fn mx<'a>(&'a self, name: &'a str) -> LookupFuture<'a, crate::error::Result<Vec<String>>> {
+            let key = name.trim_end_matches('.').to_string();
+            let records = self.mx.get(&key).cloned().unwrap_or_default();
+            Box::pin(async move { Ok(Ok(records)) })
         }
     }
 
@@ -170,20 +189,37 @@ mod tests_inner {
         assert_eq!(result.verdict, SpfVerdict::Fail);
     }
 
-    /// Issue #111 F2: the `mx` mechanism currently falls back to the domain's
-    /// A record (documented limitation — strict MX resolution lands with the
-    /// resolver unification).
+    /// Issue #116 F4: the `mx` mechanism resolves the domain's MX hosts and
+    /// then the A/AAAA of each host — no more fallback to the domain's own
+    /// A record.
     #[test]
-    fn spf_mx_mechanism_falls_back_to_domain_a() {
+    fn spf_mx_mechanism_matches_the_mx_host_ip() {
         let dns = FakeDns::new()
             .with_txt("example.com", &["v=spf1 mx -all"])
-            .with_a("example.com", &["109.123.254.118"]);
+            .with_mx("example.com", &["mx.example.net."])
+            .with_a("mx.example.net", &["198.51.100.7"])
+            .with_a("example.com", &["203.0.113.99"]);
         let result = block(spf::check_async(
             &dns,
-            "109.123.254.118".parse().unwrap(),
+            "198.51.100.7".parse().unwrap(),
             "example.com",
         ));
         assert_eq!(result.verdict, SpfVerdict::Pass);
+    }
+
+    #[test]
+    fn spf_mx_mechanism_does_not_match_the_domain_a_when_mx_differs() {
+        let dns = FakeDns::new()
+            .with_txt("example.com", &["v=spf1 mx -all"])
+            .with_mx("example.com", &["mx.example.net."])
+            .with_a("mx.example.net", &["198.51.100.7"])
+            .with_a("example.com", &["203.0.113.99"]);
+        let result = block(spf::check_async(
+            &dns,
+            "203.0.113.99".parse().unwrap(),
+            "example.com",
+        ));
+        assert_eq!(result.verdict, SpfVerdict::Fail);
     }
 
     /// Issue #111 F5: redirect= is evaluated only when no mechanism matched.
@@ -390,4 +426,59 @@ mod tests_inner {
     // Silence unused warnings for the Arc/Mutex imports in some builds.
     #[allow(dead_code)]
     fn _unused(_: Arc<Mutex<FakeDns>>) {}
+
+    // --- Issue #116 hardening tests ---
+
+    /// F5: a DKIM-Signature with `t=s` (the timestamp tag) before `s=` must
+    /// still resolve the correct selector — the old substring split
+    /// matched `s=` inside `t=s` and produced an empty selector.
+    #[test]
+    fn dkim_tag_parsing_survives_the_timestamp_tag() {
+        use crate::auth::parse_dkim_tags;
+        // A realistic header with t= before s= (tag order is arbitrary).
+        let value = "v=1; a=rsa-sha256; c=relaxed/relaxed; d=example.com; t=1700000000; s=pigeon; h=from:subject; bh=abc; b=def";
+        let tags = parse_dkim_tags(value);
+        assert_eq!(tags.get("s").map(String::as_str), Some("pigeon"));
+        assert_eq!(tags.get("d").map(String::as_str), Some("example.com"));
+        assert_eq!(tags.get("t").map(String::as_str), Some("1700000000"));
+        // The base64 in b= must not confuse the s= lookup either.
+        let tricky = "v=1; a=rsa-sha256; b=abcs=def; s=real-selector; d=example.com";
+        let tags = parse_dkim_tags(tricky);
+        assert_eq!(tags.get("s").map(String::as_str), Some("real-selector"));
+    }
+
+    /// F6: a name publishing two `v=spf1` TXT records is permerror
+    /// (RFC 7208 §3.2), not a merged record.
+    #[test]
+    fn spf_multiple_records_are_permerror() {
+        let dns = FakeDns::new().with_txt(
+            "example.com",
+            &["v=spf1 ip4:192.0.2.1 -all", "v=spf1 ip4:198.51.100.1 -all"],
+        );
+        let result = block(spf::check_async(
+            &dns,
+            "192.0.2.1".parse().unwrap(),
+            "example.com",
+        ));
+        assert_eq!(result.verdict, SpfVerdict::PermError);
+    }
+
+    /// F6 (positive): unrelated TXT records (verification tokens) do not
+    /// break the SPF lookup — only the `v=spf1` record counts.
+    #[test]
+    fn spf_ignores_unrelated_txt_records() {
+        let dns = FakeDns::new().with_txt(
+            "example.com",
+            &[
+                "_k2n1y4vw3qtb4skdx9e7dxt97qrmmq9",
+                "v=spf1 ip4:192.0.2.1 -all",
+            ],
+        );
+        let result = block(spf::check_async(
+            &dns,
+            "192.0.2.1".parse().unwrap(),
+            "example.com",
+        ));
+        assert_eq!(result.verdict, SpfVerdict::Pass);
+    }
 }

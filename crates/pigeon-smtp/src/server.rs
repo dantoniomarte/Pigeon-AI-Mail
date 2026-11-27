@@ -845,9 +845,9 @@ fn ingest_message(
         // TXT (SPF/DMARC/DKIM keys) and A/AAAA (SPF a/mx mechanisms) through
         // hickory over the system configuration. A resolver failure degrades
         // to "no record" (none verdicts) — delivery is never blocked by DNS.
-        match crate::auth::dns::HickoryAuthDnsSource::from_system() {
+        match crate::auth::dns::HickoryAuthDnsSource::shared() {
             Ok(dns_source) => {
-                crate::auth::evaluate(&dns_source, peer_ip, &mail_from_domain, &parsed)
+                crate::auth::evaluate(dns_source, peer_ip, &mail_from_domain, &parsed)
                     .unwrap_or_default()
             }
             Err(_) => crate::auth::AuthVerdicts::default(),
