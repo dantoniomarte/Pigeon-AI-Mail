@@ -40,6 +40,16 @@ pub struct ApiConfig {
     /// `plaintext_override`, and the choice is logged. This is the only way to
     /// get an unsealed payload — see `docs/e2ee-model.md`.
     pub plaintext_override_domains: Vec<String>,
+    /// Per-hostname display names for the webmail branding
+    /// (`PIGEON_INSTANCE_NAMES`, parsed `hostname:display_name` pairs).
+    ///
+    /// The `GET /v1/instance` handler looks the request's `Host` up here first
+    /// and falls back to the server-wide [`Self::instance_name`]. Empty by
+    /// default: an operator sets it only when the server serves several mail
+    /// domains with distinct webmail hostnames.
+    pub instance_names: Vec<(String, String)>,
+    /// Server-wide fallback display name (`PIGEON_INSTANCE_NAME`).
+    pub instance_name: Option<String>,
 }
 
 impl ApiConfig {
@@ -48,6 +58,37 @@ impl ApiConfig {
         self.plaintext_override_domains
             .iter()
             .any(|override_domain| override_domain.eq_ignore_ascii_case(domain))
+    }
+
+    /// Resolve the webmail display name for a request `Host` (issue #136).
+    ///
+    /// Lookup order: exact (case-insensitive) match in [`Self::instance_names`]
+    /// → the server-wide [`Self::instance_name`] → `None`. A `Host` header may
+    /// carry a port (`webmail.example.com:8443`); the port is stripped before
+    /// matching, and the fallback does not match the bare name when the request
+    /// named a different hostname.
+    pub fn display_name_for_host(&self, host: Option<&str>) -> Option<&str> {
+        let bare = host
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(|value| {
+                value
+                    .rsplit_once(':')
+                    .filter(|(_rest, port)| {
+                        !port.is_empty() && port.chars().all(|c| c.is_ascii_digit())
+                    })
+                    .map(|(hostname, _)| hostname)
+                    .unwrap_or(value)
+            });
+        let bare = match bare {
+            Some(value) => value,
+            None => return self.instance_name.as_deref(),
+        };
+        self.instance_names
+            .iter()
+            .find(|(hostname, _)| hostname.eq_ignore_ascii_case(bare))
+            .map(|(_, name)| name.as_str())
+            .or(self.instance_name.as_deref())
     }
 }
 
@@ -60,8 +101,30 @@ impl Default for ApiConfig {
             auth_cache_ttl_secs: DEFAULT_AUTH_CACHE_TTL_SECS,
             public_ip: None,
             plaintext_override_domains: Vec::new(),
+            instance_names: Vec::new(),
+            instance_name: None,
         }
     }
+}
+
+/// Parse `PIGEON_INSTANCE_NAMES` (`hostname:display_name` pairs, comma
+/// separated) — malformed entries are skipped, never a panic (issue #136).
+pub fn parse_instance_names(raw: &str) -> Vec<(String, String)> {
+    raw.split(',')
+        .filter_map(|entry| {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                return None;
+            }
+            let (hostname, name) = entry.split_once(':')?;
+            let hostname = hostname.trim();
+            let name = name.trim();
+            if hostname.is_empty() || name.is_empty() {
+                return None;
+            }
+            Some((hostname.to_string(), name.to_string()))
+        })
+        .collect()
 }
 
 /// Everything a handler needs, cheap to clone.
@@ -174,5 +237,117 @@ mod tests {
         state.db.ping().expect("api connection works");
         assert!(state.master_key_loaded());
         assert_eq!(state.store.reserve_message_id().expect("store works"), 1);
+    }
+}
+
+#[cfg(test)]
+mod branding_tests {
+    use super::*;
+
+    #[test]
+    fn parse_instance_names_parses_pairs() {
+        let parsed = parse_instance_names("a.example.com:Alpha, b.example.org:Beta");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(
+            parsed[0],
+            ("a.example.com".to_string(), "Alpha".to_string())
+        );
+        assert_eq!(parsed[1], ("b.example.org".to_string(), "Beta".to_string()));
+    }
+
+    #[test]
+    fn parse_instance_names_skips_malformed() {
+        // Missing colon, empty name, empty hostname, empty entries — all skipped.
+        let parsed = parse_instance_names(
+            "no-colon.example.com, :EmptyName, EmptyHost:, , ok.example.net:Fine",
+        );
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(
+            parsed[0],
+            ("ok.example.net".to_string(), "Fine".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_instance_names_empty_string_is_empty() {
+        assert!(parse_instance_names("").is_empty());
+        assert!(parse_instance_names("   ").is_empty());
+    }
+
+    #[test]
+    fn display_name_host_exact_match_wins() {
+        let config = ApiConfig {
+            instance_names: vec![(
+                "webmail.example.com".to_string(),
+                "Example Mail".to_string(),
+            )],
+            instance_name: Some("Fallback".to_string()),
+            ..ApiConfig::default()
+        };
+        assert_eq!(
+            config.display_name_for_host(Some("webmail.example.com")),
+            Some("Example Mail")
+        );
+        // Case-insensitive host match.
+        assert_eq!(
+            config.display_name_for_host(Some("WEBMAIL.EXAMPLE.COM")),
+            Some("Example Mail")
+        );
+    }
+
+    #[test]
+    fn display_name_strips_the_port_before_matching() {
+        let config = ApiConfig {
+            instance_names: vec![(
+                "webmail.example.com".to_string(),
+                "Example Mail".to_string(),
+            )],
+            instance_name: None,
+            ..ApiConfig::default()
+        };
+        assert_eq!(
+            config.display_name_for_host(Some("webmail.example.com:8443")),
+            Some("Example Mail")
+        );
+    }
+
+    #[test]
+    fn display_name_unknown_host_falls_back_to_server_wide() {
+        let config = ApiConfig {
+            instance_names: vec![(
+                "webmail.example.com".to_string(),
+                "Example Mail".to_string(),
+            )],
+            instance_name: Some("Fallback".to_string()),
+            ..ApiConfig::default()
+        };
+        assert_eq!(
+            config.display_name_for_host(Some("other.example.net")),
+            Some("Fallback")
+        );
+    }
+
+    #[test]
+    fn display_name_no_host_uses_server_wide_fallback() {
+        let config = ApiConfig {
+            instance_names: vec![(
+                "webmail.example.com".to_string(),
+                "Example Mail".to_string(),
+            )],
+            instance_name: Some("Fallback".to_string()),
+            ..ApiConfig::default()
+        };
+        assert_eq!(config.display_name_for_host(None), Some("Fallback"));
+        assert_eq!(config.display_name_for_host(Some("")), Some("Fallback"));
+    }
+
+    #[test]
+    fn display_name_nothing_configured_is_null() {
+        let config = ApiConfig::default();
+        assert_eq!(
+            config.display_name_for_host(Some("webmail.example.com")),
+            None
+        );
+        assert_eq!(config.display_name_for_host(None), None);
     }
 }

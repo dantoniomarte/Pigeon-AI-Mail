@@ -2198,11 +2198,16 @@ async fn health_probes_answer_without_authentication() {
     let app = TestApp::new();
     assert_eq!(app.get("/healthz", None).await.status, StatusCode::OK);
 
-    // GET /v1/instance — public branding, no auth (issue #132).
+    // GET /v1/instance — public branding, no auth (issues #132 and #136).
+    // The default test app has no branding configured → null.
     let response = app.get("/v1/instance", None).await;
     assert_eq!(response.status, StatusCode::OK);
-    // No env var set in tests → null.
     assert!(response.body["display_name"].is_null());
+
+    // Per-hostname branding: the handler resolves the name from the Host
+    // header via ApiConfig::display_name_for_host (unit tests below), so the
+    // route test only pins the wire shape. The resolution matrix lives in
+    // the state unit tests where the config is easy to construct.
     assert_eq!(app.get("/readyz", None).await.status, StatusCode::OK);
 }
 

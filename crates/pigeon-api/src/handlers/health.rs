@@ -23,15 +23,23 @@ pub async fn healthz() -> Response {
     (StatusCode::OK, "ok").into_response()
 }
 
-/// `GET /v1/instance` — public instance branding (issue #132).
+/// `GET /v1/instance` — public instance branding (issues #132 and #136).
 ///
-/// Returns `{"display_name": "…" | null}` from the `PIGEON_INSTANCE_NAME`
-/// env var. Unauthenticated on purpose: the webmail needs it before login
-/// to render the header and tab title, and it carries no secrets.
-pub async fn instance() -> Response {
-    let display_name = std::env::var("PIGEON_INSTANCE_NAME")
-        .ok()
-        .filter(|name| !name.trim().is_empty());
+/// Returns `{"display_name": "…" | null}`. The name resolves from the
+/// request's `Host`: a `PIGEON_INSTANCE_NAMES` entry (parsed into
+/// [`ApiConfig::instance_names`] at startup) wins, then the server-wide
+/// `PIGEON_INSTANCE_NAME`. Unauthenticated on purpose: the webmail needs it
+/// before login to render the header and tab title, and it carries no
+/// secrets.
+pub async fn instance(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_string());
+    let display_name = state
+        .config
+        .display_name_for_host(host.as_deref())
+        .map(|name| name.to_string());
     let body = serde_json::json!({ "display_name": display_name });
     (StatusCode::OK, axum::Json(body)).into_response()
 }

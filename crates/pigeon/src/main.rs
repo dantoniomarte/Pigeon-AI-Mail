@@ -146,6 +146,15 @@ fn run() -> Result<(), Box<dyn Error>> {
         // Layer 3 is on unless an operator names a recipient domain here; the list
         // is parsed and validated by `pigeon_core::Config`.
         plaintext_override_domains: config.e2e_plaintext_domains.clone(),
+        // Webmail branding: per-hostname pairs first, server-wide fallback
+        // second (issues #132 and #136).
+        instance_names: pigeon_api::state::parse_instance_names(
+            &std::env::var("PIGEON_INSTANCE_NAMES").unwrap_or_default(),
+        ),
+        instance_name: std::env::var("PIGEON_INSTANCE_NAME")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
         ..ApiConfig::default()
     };
     let pigeon = Pigeon::parse();
