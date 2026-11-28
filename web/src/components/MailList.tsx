@@ -689,17 +689,17 @@ export default function MailList({
                                 {item.unread ? <MailOpen size={14} /> : <Mail size={14} />}
                               </button>
                             ) : null}
-                            {onMove && view !== 'sent' && view !== 'spam' ? (
+                            {onMove && view !== 'sent' ? (
                               <button
                                 type="button"
                                 tabIndex={selected ? 0 : -1}
                                 className="row-action"
                                 onClick={(event) => {
                                   event.stopPropagation();
-                                  onMove(item.id, 'spam');
+                                  onMove(item.id, view === 'spam' ? 'inbox' : 'spam');
                                 }}
-                                aria-label={t('mail.toSpam')}
-                                title={t('mail.toSpam')}
+                                aria-label={view === 'spam' ? t('mail.notSpam') : t('mail.toSpam')}
+                                title={view === 'spam' ? t('mail.notSpam') : t('mail.toSpam')}
                               >
                                 <ShieldAlert size={14} />
                               </button>

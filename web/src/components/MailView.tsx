@@ -39,6 +39,8 @@ import { PigeonArt } from './MailList';
 
 export interface MailViewProps {
   mode: 'mail' | 'sent';
+  /** Active folder — when 'spam', the spam button becomes 'Not spam' (issue #134). */
+  folder?: 'inbox' | 'spam' | 'trash';
   /** Credential for the sent-body fetch: the API key, or null for session mode. */
   apiKey?: string | null;
   /** Active app theme: dark mail frames render with the dark scheme. */
@@ -124,6 +126,7 @@ function TextParagraph({ value }: { value: string }): JSX.Element {
 
 export default function MailView({
   mode,
+  folder,
   apiKey = null,
   scheme = 'light',
   message,
@@ -627,13 +630,13 @@ export default function MailView({
             <button
               type="button"
               className="btn btn--quiet"
-              onClick={() => onMove(message.id, 'spam')}
+              onClick={() => onMove(message.id, folder === 'spam' ? 'inbox' : 'spam')}
               disabled={message === null}
-              aria-label={t('mail.toSpam')}
-              title={t('mail.toSpam')}
+              aria-label={folder === 'spam' ? t('mail.notSpam') : t('mail.toSpam')}
+              title={folder === 'spam' ? t('mail.notSpam') : t('mail.toSpam')}
             >
               <ShieldAlert size={15} aria-hidden="true" />
-              <span className="reader__bar-label">{t('mail.toSpam')}</span>
+              <span className="reader__bar-label">{folder === 'spam' ? t('mail.notSpam') : t('mail.toSpam')}</span>
             </button>
           ) : null}
           {!isSent && onMove !== undefined && message !== null ? (

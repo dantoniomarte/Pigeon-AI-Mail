@@ -167,7 +167,9 @@
     "deselectAll": "Tout désélectionner",
     "bulkPartial": "{{count}} mis à jour, {{failed}} en échec",
     "bulkConfirmDelete_one": "Supprimer définitivement {{count}} message ?",
-    "bulkConfirmDelete_other": "Supprimer définitivement {{count}} messages ?"
+    "bulkConfirmDelete_other": "Supprimer définitivement {{count}} messages ?",
+    "notSpam": "Pas de spam",
+    "movedNotSpam": "Déplacé vers la boîte de réception"
   },
   "drafts": {
     "title": "Brouillons",

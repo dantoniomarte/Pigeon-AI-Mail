@@ -921,6 +921,7 @@ export default function App(): JSX.Element {
               apiKey={key}
           scheme={theme}
               mode={view === 'sent' ? 'sent' : 'mail'}
+              folder={view === 'spam' ? 'spam' : view === 'trash' ? 'trash' : 'inbox'}
               message={view === 'sent' ? sentDetail : detail}
               state={view === 'sent' ? (sentSelection !== null ? 'ready' : 'idle') : detailState}
               sentStatus={sentSelection?.status}

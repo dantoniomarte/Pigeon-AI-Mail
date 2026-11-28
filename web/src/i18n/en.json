@@ -167,7 +167,9 @@
     "deselectAll": "Deselect all",
     "bulkPartial": "{{count}} updated, {{failed}} failed",
     "bulkConfirmDelete_one": "Delete {{count}} message permanently?",
-    "bulkConfirmDelete_other": "Delete {{count}} messages permanently?"
+    "bulkConfirmDelete_other": "Delete {{count}} messages permanently?",
+    "notSpam": "Not spam",
+    "movedNotSpam": "Moved to inbox"
   },
   "drafts": {
     "title": "Drafts",

@@ -167,7 +167,9 @@
     "deselectAll": "Desmarcar tudo",
     "bulkPartial": "{{count}} atualizadas, {{failed}} com erro",
     "bulkConfirmDelete_one": "Excluir {{count}} mensagem permanentemente?",
-    "bulkConfirmDelete_other": "Excluir {{count}} mensagens permanentemente?"
+    "bulkConfirmDelete_other": "Excluir {{count}} mensagens permanentemente?",
+    "notSpam": "Não é spam",
+    "movedNotSpam": "Movido para a Caixa de Entrada"
   },
   "drafts": {
     "title": "Rascunhos",

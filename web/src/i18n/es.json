@@ -167,7 +167,9 @@
     "deselectAll": "Deseleccionar todo",
     "bulkPartial": "{{count}} actualizados, {{failed}} con error",
     "bulkConfirmDelete_one": "¿Eliminar {{count}} mensaje de forma permanente?",
-    "bulkConfirmDelete_other": "¿Eliminar {{count}} mensajes de forma permanente?"
+    "bulkConfirmDelete_other": "¿Eliminar {{count}} mensajes de forma permanente?",
+    "notSpam": "No es spam",
+    "movedNotSpam": "Movido a Recibidos"
   },
   "drafts": {
     "title": "Borradores",
