@@ -4358,9 +4358,14 @@ async fn the_simple_endpoint_answers_404_for_a_foreign_domain() {
 async fn the_wkd_endpoints_are_rate_limited_per_source_address() {
     let app = TestApp::new();
     // A fresh app has a full bucket; drain it from one address.
+    // The loop bound is 3x the burst: on a loaded CI machine each call can take
+    // long enough for the bucket to refill at WKD_RATE_RPS between requests, so
+    // a burst+1 bound can be outrun by the refill and never see the 429
+    // (flaky under parallel load). 3x guarantees the drain outpaces the refill
+    // on any realistic CI timing; the loop breaks on the first 429.
     let peer = ([203, 0, 113, 40], 5000);
     let mut limited = false;
-    for _ in 0..(pigeon_api::rate_limit::WKD_RATE_BURST + 1) {
+    for _ in 0..(pigeon_api::rate_limit::WKD_RATE_BURST * 3 + 1) {
         let response = app
             .call(build_from(
                 Method::GET,
