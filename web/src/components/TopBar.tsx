@@ -5,6 +5,7 @@ import type { Theme } from '../api';
 import { LANGUAGES } from '../i18n';
 
 export interface TopBarProps {
+  instanceName?: string | null;
   lang: string;
   onLangChange: (code: string) => void;
   theme: Theme;
@@ -90,6 +91,7 @@ export function MotionSwitch({
 }
 
 export default function TopBar({
+  instanceName,
   lang,
   onLangChange,
   theme,
@@ -119,6 +121,9 @@ export default function TopBar({
           <PigeonLogo />
           <span className="brand__name">
             Pigeon<span className="brand__accent">Mail</span>
+            {instanceName ? (
+              <span className="brand__instance"> · {instanceName}</span>
+            ) : null}
           </span>
         </div>
       </div>

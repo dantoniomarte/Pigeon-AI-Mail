@@ -220,6 +220,7 @@ pub fn router(state: AppState) -> Router {
         .merge(session_only(session_group, &state))
         // Unauthenticated surface: the probes and the login that mints a session.
         .route("/healthz", get(health::healthz))
+        .route("/v1/instance", get(health::instance))
         .route("/readyz", get(health::readyz))
         .route("/v1/auth/login", post(sessions::login))
         // WKD publication: a key directory is meant to be read by anyone who

@@ -2,12 +2,13 @@ import { useTranslation } from 'react-i18next';
 import { ArrowRight, KeyRound, LogIn, ShieldCheck } from 'lucide-react';
 
 export interface LandingProps {
+  instanceName?: string | null;
   onLogin: () => void;
   onApiKey: () => void;
 }
 
 /** Public landing screen — what a fresh visitor sees before signing in. */
-export default function Landing({ onLogin, onApiKey }: LandingProps): JSX.Element {
+export default function Landing({ instanceName, onLogin, onApiKey }: LandingProps): JSX.Element {
   const { t } = useTranslation();
 
   return (
@@ -18,7 +19,7 @@ export default function Landing({ onLogin, onApiKey }: LandingProps): JSX.Elemen
             <rect width="32" height="32" rx="9" fill="var(--accent)" />
             <path d="M7 18c4-7 9-9 15-8l-4 4c3 0 5 1 7 3-5-1-8 0-10 2-3 2-6 2-8-1z" fill="#fff" />
           </svg>
-          Pigeon Mail
+          Pigeon Mail{instanceName ? ` · ${instanceName}` : ''}
         </span>
         <span className="landing__badge">
           <ShieldCheck size={14} aria-hidden="true" /> {t('landing.badge')}

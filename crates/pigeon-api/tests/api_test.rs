@@ -2197,6 +2197,12 @@ async fn a_sent_email_is_filed_in_the_sent_folder_not_the_inbox() {
 async fn health_probes_answer_without_authentication() {
     let app = TestApp::new();
     assert_eq!(app.get("/healthz", None).await.status, StatusCode::OK);
+
+    // GET /v1/instance — public branding, no auth (issue #132).
+    let response = app.get("/v1/instance", None).await;
+    assert_eq!(response.status, StatusCode::OK);
+    // No env var set in tests → null.
+    assert!(response.body["display_name"].is_null());
     assert_eq!(app.get("/readyz", None).await.status, StatusCode::OK);
 }
 

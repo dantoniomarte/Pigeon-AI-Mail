@@ -9,6 +9,18 @@
 export const API_KEY_STORAGE = 'pigeon_api_key';
 export const FROM_STORAGE = 'pigeon_from';
 
+/** Instance branding from `GET /v1/instance` (issue #132). */
+export interface InstanceInfo {
+  display_name: string | null;
+}
+
+/** Fetch the public instance branding (no auth needed). */
+export async function fetchInstance(): Promise<InstanceInfo> {
+  const response = await fetch('/v1/instance');
+  if (!response.ok) return { display_name: null };
+  return (await response.json()) as InstanceInfo;
+}
+
 export type Theme = 'light' | 'dark';
 
 export type Scope = 'send' | 'read' | 'full';

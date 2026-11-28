@@ -41,7 +41,7 @@ import Settings from './components/Settings';
 import Landing from './components/Landing';
 import Login from './components/Login';
 import Setup from './components/Setup';
-import { clearStoredAccountEmail, clearStoredFrom, getStoredAccountEmail, hasSession, storeAccountEmail } from './api';
+import { clearStoredAccountEmail, clearStoredFrom, fetchInstance, getStoredAccountEmail, hasSession, storeAccountEmail } from './api';
 import Sidebar from './components/Sidebar';
 import Toast, { type ToastItem, type ToastKind } from './components/Toast';
 import TopBar from './components/TopBar';
@@ -120,6 +120,7 @@ function emptySeed(accountEmail: string): ComposeSeed {
 export default function App(): JSX.Element {
   const { t, i18n: i18nInstance } = useTranslation();
 
+  const [instanceName, setInstanceName] = useState<string | null>(null);
   const [apiKey, setApiKey] = useState<string | null>(() => getStoredKey());
   const [sessionActive, setSessionActive] = useState<boolean>(false);
   const [sessionChecked, setSessionChecked] = useState<boolean>(false);
@@ -128,6 +129,24 @@ export default function App(): JSX.Element {
   const [accountEmail, setAccountEmail] = useState<string>(() => getStoredAccountEmail());
 
   // Resolve the HttpOnly session cookie once on mount (JD-A-003).
+  useEffect(() => {
+    document.title = instanceName ? instanceName : 'Pigeon Mail';
+  }, [instanceName]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchInstance()
+      .then((info) => {
+        if (!cancelled) setInstanceName(info.display_name);
+      })
+      .catch(() => {
+        /* branding is cosmetic — a failure just leaves the default */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     void hasSession().then((active) => {
@@ -747,6 +766,7 @@ export default function App(): JSX.Element {
     if (!loginOpen) {
       return (
         <Landing
+          instanceName={instanceName}
           onLogin={() => setLoginOpen(true)}
           onApiKey={() => {
             setApiKeyFallback(true);
@@ -807,6 +827,7 @@ export default function App(): JSX.Element {
       className={`app${showReading ? ' app--reading' : ''}${view === 'drafts' ? ' app--drafts' : ''}`}
     >
       <TopBar
+        instanceName={instanceName}
         lang={lang}
         onLangChange={(code) => {
           if (isLanguageCode(code)) {

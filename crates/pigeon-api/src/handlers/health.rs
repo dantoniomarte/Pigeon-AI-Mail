@@ -23,6 +23,19 @@ pub async fn healthz() -> Response {
     (StatusCode::OK, "ok").into_response()
 }
 
+/// `GET /v1/instance` — public instance branding (issue #132).
+///
+/// Returns `{"display_name": "…" | null}` from the `PIGEON_INSTANCE_NAME`
+/// env var. Unauthenticated on purpose: the webmail needs it before login
+/// to render the header and tab title, and it carries no secrets.
+pub async fn instance() -> Response {
+    let display_name = std::env::var("PIGEON_INSTANCE_NAME")
+        .ok()
+        .filter(|name| !name.trim().is_empty());
+    let body = serde_json::json!({ "display_name": display_name });
+    (StatusCode::OK, axum::Json(body)).into_response()
+}
+
 /// `GET /readyz` — `200` when the store answers and the master key is loaded.
 pub async fn readyz(State(state): State<AppState>) -> Response {
     let result = blocking(move || {
